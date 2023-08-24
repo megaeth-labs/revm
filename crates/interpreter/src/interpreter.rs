@@ -135,10 +135,14 @@ impl Interpreter {
         // it will do noop and just stop execution of this contract
         self.instruction_pointer = unsafe { self.instruction_pointer.offset(1) };
         eval::<H, SPEC>(opcode, self, host);
+        #[cfg(feature = "enable_opcode_metrics")]
+        revm_utils::metrics::record_op(opcode);
     }
 
     /// loop steps until we are finished with execution
     pub fn run<H: Host, SPEC: Spec>(&mut self, host: &mut H) -> InstructionResult {
+        #[cfg(feature = "enable_opcode_metrics")]
+        revm_utils::metrics::start_record_op();
         while self.instruction_result == InstructionResult::Continue {
             self.step::<H, SPEC>(host)
         }

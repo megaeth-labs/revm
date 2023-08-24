@@ -6,6 +6,10 @@ use crate::primitives::{
 use crate::Database;
 use alloc::vec::Vec;
 use core::convert::Infallible;
+#[cfg(feature = "enable_cache_record")]
+use revm_interpreter::primitives::hash_map::DefaultHashBuilder;
+#[cfg(feature = "enable_cache_record")]
+use tracking_allocator::TrackingAllocator;
 
 pub type InMemoryDB = CacheDB<EmptyDB>;
 
@@ -16,6 +20,7 @@ impl Default for InMemoryDB {
 }
 
 /// Memory backend, storing all state values in a `Map` in memory.
+#[cfg(not(feature = "enable_cache_record"))]
 #[derive(Debug, Clone)]
 pub struct CacheDB<ExtDB: DatabaseRef> {
     /// Account info where None means it is not existing. Not existing state is needed for Pre TANGERINE forks.
@@ -27,19 +32,36 @@ pub struct CacheDB<ExtDB: DatabaseRef> {
     pub db: ExtDB,
 }
 
+#[cfg(feature = "enable_cache_record")]
+#[derive(Debug, Clone)]
+pub struct CacheDB<ExtDB: DatabaseRef> {
+    /// Account info where None means it is not existing. Not existing state is needed for Pre TANGERINE forks.
+    /// `code` is always `None`, and bytecode can be found in `contracts`.
+    pub accounts: HashMap<B160, DbAccount, DefaultHashBuilder, TrackingAllocator>,
+    pub contracts: HashMap<B256, Bytecode, DefaultHashBuilder, TrackingAllocator>,
+    pub logs: Vec<Log>,
+    pub block_hashes: HashMap<U256, B256, DefaultHashBuilder, TrackingAllocator>,
+    pub db: ExtDB,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DbAccount {
     pub info: AccountInfo,
     /// If account is selfdestructed or newly created, storage will be cleared.
     pub account_state: AccountState,
     /// storage slots
+    #[cfg(not(feature = "enable_cache_record"))]
     pub storage: HashMap<U256, U256>,
+    #[cfg(feature = "enable_cache_record")]
+    pub storage: HashMap<U256, U256, DefaultHashBuilder, TrackingAllocator>,
 }
 
 impl DbAccount {
     pub fn new_not_existing() -> Self {
         Self {
             account_state: AccountState::NotExisting,
+            #[cfg(feature = "enable_cache_record")]
+            storage: HashMap::new_in(TrackingAllocator),
             ..Default::default()
         }
     }
@@ -58,7 +80,10 @@ impl From<Option<AccountInfo>> for DbAccount {
             Self {
                 info,
                 account_state: AccountState::None,
-                ..Default::default()
+                #[cfg(feature = "enable_cache_record")]
+                storage: HashMap::new_in(TrackingAllocator),
+                #[cfg(not(feature = "enable_cache_record"))]
+                storage: HashMap::new(),
             }
         } else {
             Self::new_not_existing()
@@ -71,7 +96,10 @@ impl From<AccountInfo> for DbAccount {
         Self {
             info,
             account_state: AccountState::None,
-            ..Default::default()
+            #[cfg(feature = "enable_cache_record")]
+            storage: HashMap::new_in(TrackingAllocator),
+            #[cfg(not(feature = "enable_cache_record"))]
+            storage: HashMap::new(),
         }
     }
 }
@@ -99,6 +127,7 @@ impl AccountState {
 }
 
 impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
+    #[cfg(not(feature = "enable_cache_record"))]
     pub fn new(db: ExtDB) -> Self {
         let mut contracts = HashMap::new();
         contracts.insert(KECCAK_EMPTY, Bytecode::new());
@@ -108,6 +137,25 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
             contracts,
             logs: Vec::default(),
             block_hashes: HashMap::new(),
+            db,
+        }
+    }
+
+    #[cfg(feature = "enable_cache_record")]
+    pub fn new(db: ExtDB) -> Self {
+        let mut contracts = HashMap::new_in(TrackingAllocator);
+        contracts.insert(KECCAK_EMPTY, Bytecode::new());
+        contracts.insert(B256::zero(), Bytecode::new());
+
+        let accounts = HashMap::new_in(TrackingAllocator);
+        let logs = Vec::new();
+        let block_hashes = HashMap::new_in(TrackingAllocator);
+        tracking_allocator::reset();
+        Self {
+            accounts,
+            contracts,
+            logs,
+            block_hashes,
             db,
         }
     }
@@ -135,15 +183,25 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
     pub fn load_account(&mut self, address: B160) -> Result<&mut DbAccount, ExtDB::Error> {
         let db = &self.db;
         match self.accounts.entry(address) {
-            Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => Ok(entry.insert(
-                db.basic(address)?
-                    .map(|info| DbAccount {
-                        info,
-                        ..Default::default()
-                    })
-                    .unwrap_or_else(DbAccount::new_not_existing),
-            )),
+            Entry::Occupied(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::HitRecord::new();
+
+                Ok(entry.into_mut())
+            }
+            Entry::Vacant(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::MissRecord::new();
+
+                Ok(entry.insert(
+                    db.basic(address)?
+                        .map(|info| DbAccount {
+                            info,
+                            ..Default::default()
+                        })
+                        .unwrap_or_else(DbAccount::new_not_existing),
+                ))
+            }
         }
     }
 
@@ -169,6 +227,33 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
         account.account_state = AccountState::StorageCleared;
         account.storage = storage.into_iter().collect();
         Ok(())
+    }
+
+    #[cfg(feature = "enable_cache_record")]
+    pub fn size(&self) -> usize {
+        let ret = tracking_allocator::stats();
+
+        let topic_and_bytes_size = self
+            .logs
+            .iter()
+            .map(|v| v.topics.capacity() * 32 as usize + v.data.len())
+            .sum::<usize>();
+
+        let log_size = topic_and_bytes_size + self.logs.capacity() * std::mem::size_of::<Log>();
+
+        let account_code_size = self
+            .accounts
+            .iter()
+            .map(|(_, v)| v.info.code.as_ref().map(|c| c.len()).unwrap_or(0))
+            .sum::<usize>();
+
+        let contract_code_size = self.contracts.iter().map(|(_, v)| v.len()).sum::<usize>();
+
+        log_size
+            + account_code_size
+            + contract_code_size
+            + ret.diff as usize
+            + std::mem::size_of::<CacheDB<ExtDB>>()
     }
 }
 
@@ -211,8 +296,15 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
 
     fn block_hash(&mut self, number: U256) -> Result<B256, Self::Error> {
         match self.block_hashes.entry(number) {
-            Entry::Occupied(entry) => Ok(*entry.get()),
+            Entry::Occupied(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::HitRecord::new();
+                Ok(*entry.get())
+            }
             Entry::Vacant(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::MissRecord::new();
+                // if storage was cleared, we dont need to ping db.
                 let hash = self.db.block_hash(number)?;
                 entry.insert(hash);
                 Ok(hash)
@@ -222,16 +314,24 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
 
     fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
         let basic = match self.accounts.entry(address) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(
-                self.db
-                    .basic(address)?
-                    .map(|info| DbAccount {
-                        info,
-                        ..Default::default()
-                    })
-                    .unwrap_or_else(DbAccount::new_not_existing),
-            ),
+            Entry::Occupied(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::HitRecord::new();
+                entry.into_mut()
+            }
+            Entry::Vacant(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::MissRecord::new();
+                entry.insert(
+                    self.db
+                        .basic(address)?
+                        .map(|info| DbAccount {
+                            info,
+                            ..Default::default()
+                        })
+                        .unwrap_or_else(DbAccount::new_not_existing),
+                )
+            }
         };
         Ok(basic.info())
     }
@@ -244,14 +344,22 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
             Entry::Occupied(mut acc_entry) => {
                 let acc_entry = acc_entry.get_mut();
                 match acc_entry.storage.entry(index) {
-                    Entry::Occupied(entry) => Ok(*entry.get()),
+                    Entry::Occupied(entry) => {
+                        #[cfg(feature = "enable_cache_record")]
+                        let _record = revm_utils::HitRecord::new();
+                        Ok(*entry.get())
+                    }
                     Entry::Vacant(entry) => {
                         if matches!(
                             acc_entry.account_state,
                             AccountState::StorageCleared | AccountState::NotExisting
                         ) {
+                            #[cfg(feature = "enable_cache_record")]
+                            let _record = revm_utils::HitRecord::new();
                             Ok(U256::ZERO)
                         } else {
+                            #[cfg(feature = "enable_cache_record")]
+                            let _record = revm_utils::MissRecord::new();
                             let slot = self.db.storage(address, index)?;
                             entry.insert(slot);
                             Ok(slot)
@@ -260,6 +368,8 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                 }
             }
             Entry::Vacant(acc_entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::MissRecord::new();
                 // acc needs to be loaded for us to access slots.
                 let info = self.db.basic(address)?;
                 let (account, value) = if info.is_some() {
@@ -278,8 +388,14 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
         match self.contracts.entry(code_hash) {
-            Entry::Occupied(entry) => Ok(entry.get().clone()),
+            Entry::Occupied(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::HitRecord::new();
+                Ok(entry.get().clone())
+            }
             Entry::Vacant(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::MissRecord::new();
                 // if you return code bytes when basic fn is called this function is not needed.
                 Ok(entry.insert(self.db.code_by_hash(code_hash)?).clone())
             }

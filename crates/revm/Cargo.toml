@@ -28,6 +28,10 @@ ethers-providers = { version = "2.0", optional = true }
 ethers-core = { version = "2.0", optional = true }
 futures = { version = "0.3.27", optional = true }
 
+# metric
+revm-utils = {path = "../utils", optional = true}
+tracking-allocator = { git = "https://github.com/anonymousGiga/tracking-allocator", optional = true }
+
 [dev-dependencies]
 hex-literal = "0.4"
 ethers-contract = { version = "2.0.3", default-features = false }
@@ -57,6 +61,8 @@ std = ["revm-interpreter/std"]
 ethersdb = ["std", "tokio", "futures", "ethers-providers", "ethers-core"]
 serde = ["dep:serde", "dep:serde_json", "revm-interpreter/serde"]
 arbitrary = ["revm-interpreter/arbitrary"]
+enable_opcode_metrics = ["revm-interpreter/enable_opcode_metrics", "revm-utils"]
+enable_cache_record = ["revm-utils", "tracking-allocator"]
 # deprecated feature
 web3db = []
 with-serde = []

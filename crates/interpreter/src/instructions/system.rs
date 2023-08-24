@@ -9,7 +9,10 @@ use core::cmp::min;
 pub fn sha3(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     pop!(interpreter, from, len);
     let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(interpreter, gas::sha3_cost(len as u64));
+    let cost = gas::sha3_cost(len as u64);
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::SHA3, cost.unwrap_or(0));
     let hash = if len == 0 {
         KECCAK_EMPTY
     } else {
@@ -39,7 +42,10 @@ pub fn codesize(interpreter: &mut Interpreter, _host: &mut dyn Host) {
 pub fn codecopy(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     pop!(interpreter, memory_offset, code_offset, len);
     let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(interpreter, gas::verylowcopy_cost(len as u64));
+    let cost = gas::verylowcopy_cost(len as u64);
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::CODECOPY, cost.unwrap_or(0));
     if len == 0 {
         return;
     }
@@ -90,7 +96,10 @@ pub fn callvalue(interpreter: &mut Interpreter, _host: &mut dyn Host) {
 pub fn calldatacopy(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     pop!(interpreter, memory_offset, data_offset, len);
     let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(interpreter, gas::verylowcopy_cost(len as u64));
+    let cost = gas::verylowcopy_cost(len as u64);
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::CALLDATACOPY, cost.unwrap_or(0));
     if len == 0 {
         return;
     }
@@ -123,7 +132,10 @@ pub fn returndatacopy<SPEC: Spec>(interpreter: &mut Interpreter, _host: &mut dyn
     check!(interpreter, SPEC::enabled(BYZANTIUM));
     pop!(interpreter, memory_offset, offset, len);
     let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(interpreter, gas::verylowcopy_cost(len as u64));
+    let cost = gas::verylowcopy_cost(len as u64);
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::RETURNDATACOPY, cost.unwrap_or(0));
     let data_offset = as_usize_saturated!(offset);
     let (data_end, overflow) = data_offset.overflowing_add(len);
     if overflow || data_end > interpreter.return_data_buffer.len() {

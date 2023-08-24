@@ -17,17 +17,17 @@ pub fn balance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
         return;
     }
     let (balance, is_cold) = ret.unwrap();
-    gas!(
-        interpreter,
-        if SPEC::enabled(ISTANBUL) {
-            // EIP-1884: Repricing for trie-size-dependent opcodes
-            gas::account_access_gas::<SPEC>(is_cold)
-        } else if SPEC::enabled(TANGERINE) {
-            400
-        } else {
-            20
-        }
-    );
+    let cost = if SPEC::enabled(ISTANBUL) {
+        // EIP-1884: Repricing for trie-size-dependent opcodes
+        gas::account_access_gas::<SPEC>(is_cold)
+    } else if SPEC::enabled(TANGERINE) {
+        400
+    } else {
+        20
+    };
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::BALANCE, cost);
     push!(interpreter, balance);
 }
 
@@ -52,21 +52,20 @@ pub fn extcodesize<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
         return;
     }
     let (code, is_cold) = ret.unwrap();
-    if SPEC::enabled(BERLIN) {
-        gas!(
-            interpreter,
-            if is_cold {
-                COLD_ACCOUNT_ACCESS_COST
-            } else {
-                WARM_STORAGE_READ_COST
-            }
-        );
+    let cost = if SPEC::enabled(BERLIN) {
+        if is_cold {
+            COLD_ACCOUNT_ACCESS_COST
+        } else {
+            WARM_STORAGE_READ_COST
+        }
     } else if SPEC::enabled(TANGERINE) {
-        gas!(interpreter, 700);
+        700
     } else {
-        gas!(interpreter, 20);
-    }
-
+        20
+    };
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::EXTCODESIZE, cost);
     push!(interpreter, U256::from(code.len()));
 }
 
@@ -79,20 +78,20 @@ pub fn extcodehash<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
         return;
     }
     let (code_hash, is_cold) = ret.unwrap();
-    if SPEC::enabled(BERLIN) {
-        gas!(
-            interpreter,
-            if is_cold {
-                COLD_ACCOUNT_ACCESS_COST
-            } else {
-                WARM_STORAGE_READ_COST
-            }
-        );
+    let cost = if SPEC::enabled(BERLIN) {
+        if is_cold {
+            COLD_ACCOUNT_ACCESS_COST
+        } else {
+            WARM_STORAGE_READ_COST
+        }
     } else if SPEC::enabled(ISTANBUL) {
-        gas!(interpreter, 700);
+        700
     } else {
-        gas!(interpreter, 400);
-    }
+        400
+    };
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::EXTCODEHASH, cost);
     push_b256!(interpreter, code_hash);
 }
 
@@ -108,10 +107,10 @@ pub fn extcodecopy<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
     let (code, is_cold) = ret.unwrap();
 
     let len = as_usize_or_fail!(interpreter, len_u256, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(
-        interpreter,
-        gas::extcodecopy_cost::<SPEC>(len as u64, is_cold)
-    );
+    let cost = gas::extcodecopy_cost::<SPEC>(len as u64, is_cold);
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::EXTCODECOPY, cost.unwrap_or(0));
     if len == 0 {
         return;
     }
@@ -158,7 +157,10 @@ pub fn sload<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
         return;
     }
     let (value, is_cold) = ret.unwrap();
-    gas!(interpreter, gas::sload_cost::<SPEC>(is_cold));
+    let cost = gas::sload_cost::<SPEC>(is_cold);
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::SLOAD, cost);
     push!(interpreter, value);
 }
 
@@ -172,10 +174,13 @@ pub fn sstore<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
         return;
     }
     let (original, old, new, is_cold) = ret.unwrap();
-    gas_or_fail!(interpreter, {
+    let cost = {
         let remaining_gas = interpreter.gas.remaining();
         gas::sstore_cost::<SPEC>(original, old, new, remaining_gas, is_cold)
-    });
+    };
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::SSTORE, cost.unwrap_or(0));
     refund!(interpreter, gas::sstore_refund::<SPEC>(original, old, new));
 }
 
@@ -184,7 +189,23 @@ pub fn log<const N: u8>(interpreter: &mut Interpreter, host: &mut dyn Host) {
 
     pop!(interpreter, offset, len);
     let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(interpreter, gas::log_cost(N, len as u64));
+    let cost = gas::log_cost(N, len as u64);
+    gas_or_fail!(interpreter, cost);
+
+    #[cfg(feature = "enable_opcode_metrics")]
+    {
+        use crate::opcode::*;
+        let opcode = match N {
+            0 => LOG0,
+            1 => LOG1,
+            2 => LOG2,
+            3 => LOG3,
+            4 => LOG4,
+            _ => unreachable!(),
+        };
+        revm_utils::metrics::record_gas(opcode, cost.unwrap_or(0));
+    }
+
     let data = if len == 0 {
         Bytes::new()
     } else {
@@ -224,7 +245,10 @@ pub fn selfdestruct<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Ho
     if !SPEC::enabled(LONDON) && !res.previously_destroyed {
         refund!(interpreter, gas::SELFDESTRUCT)
     }
-    gas!(interpreter, gas::selfdestruct_cost::<SPEC>(res));
+    let cost = gas::selfdestruct_cost::<SPEC>(res);
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::SELFDESTRUCT, cost);
 
     interpreter.instruction_result = InstructionResult::SelfDestruct;
 }
@@ -234,10 +258,13 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
     host: &mut dyn Host,
 ) {
     check_staticcall!(interpreter);
-    if IS_CREATE2 {
+    let _opcode = if IS_CREATE2 {
         // EIP-1014: Skinny CREATE2
         check!(interpreter, SPEC::enabled(PETERSBURG));
-    }
+        crate::opcode::CREATE2
+    } else {
+        crate::opcode::CREATE
+    };
 
     interpreter.return_data_buffer = Bytes::new();
 
@@ -265,7 +292,10 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
                 interpreter.instruction_result = InstructionResult::CreateInitcodeSizeLimit;
                 return;
             }
-            gas!(interpreter, gas::initcode_cost(len as u64));
+            let cost = gas::initcode_cost(len as u64);
+            gas!(interpreter, cost);
+            #[cfg(feature = "enable_opcode_metrics")]
+            revm_utils::metrics::record_gas(_opcode, cost);
         }
         memory_resize!(interpreter, code_offset, len);
         Bytes::copy_from_slice(interpreter.memory.get_slice(code_offset, len))
@@ -273,10 +303,15 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
 
     let scheme = if IS_CREATE2 {
         pop!(interpreter, salt);
-        gas_or_fail!(interpreter, gas::create2_cost(len));
+        let cost = gas::create2_cost(len);
+        gas_or_fail!(interpreter, cost);
+        #[cfg(feature = "enable_opcode_metrics")]
+        revm_utils::metrics::record_gas(_opcode, cost.unwrap_or(0));
         CreateScheme::Create2 { salt }
     } else {
         gas!(interpreter, gas::CREATE);
+        #[cfg(feature = "enable_opcode_metrics")]
+        revm_utils::metrics::record_gas(_opcode, gas::CREATE);
         CreateScheme::Create
     };
 
@@ -288,6 +323,8 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
         gas_limit -= gas_limit / 64
     }
     gas!(interpreter, gas_limit);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(_opcode, gas_limit);
 
     let mut create_input = CreateInputs {
         caller: interpreter.contract.address,
@@ -310,6 +347,8 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
             push_b256!(interpreter, address.unwrap_or_default().into());
             if crate::USE_GAS {
                 interpreter.gas.erase_cost(gas.remaining());
+                #[cfg(feature = "enable_opcode_metrics")]
+                revm_utils::metrics::record_gas(_opcode, gas.remaining());
                 interpreter.gas.record_refund(gas.refunded());
             }
         }
@@ -317,6 +356,8 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
             push_b256!(interpreter, B256::zero());
             if crate::USE_GAS {
                 interpreter.gas.erase_cost(gas.remaining());
+                #[cfg(feature = "enable_opcode_metrics")]
+                revm_utils::metrics::record_gas(_opcode, gas.remaining());
             }
         }
         InstructionResult::FatalExternalError => {
@@ -329,25 +370,41 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
 }
 
 pub fn call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    call_inner::<SPEC>(interpreter, CallScheme::Call, host);
+    call_inner::<SPEC>(interpreter, CallScheme::Call, host, crate::opcode::CALL);
 }
 
 pub fn call_code<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    call_inner::<SPEC>(interpreter, CallScheme::CallCode, host);
+    call_inner::<SPEC>(
+        interpreter,
+        CallScheme::CallCode,
+        host,
+        crate::opcode::CALLCODE,
+    );
 }
 
 pub fn delegate_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    call_inner::<SPEC>(interpreter, CallScheme::DelegateCall, host);
+    call_inner::<SPEC>(
+        interpreter,
+        CallScheme::DelegateCall,
+        host,
+        crate::opcode::DELEGATECALL,
+    );
 }
 
 pub fn static_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    call_inner::<SPEC>(interpreter, CallScheme::StaticCall, host);
+    call_inner::<SPEC>(
+        interpreter,
+        CallScheme::StaticCall,
+        host,
+        crate::opcode::STATICCALL,
+    );
 }
 
 pub fn call_inner<SPEC: Spec>(
     interpreter: &mut Interpreter,
     scheme: CallScheme,
     host: &mut dyn Host,
+    _opcode: u8,
 ) {
     match scheme {
         CallScheme::DelegateCall => check!(interpreter, SPEC::enabled(HOMESTEAD)), // EIP-7: DELEGATECALL
@@ -455,16 +512,16 @@ pub fn call_inner<SPEC: Spec>(
     let (is_cold, exist) = res.unwrap();
     let is_new = !exist;
 
-    gas!(
-        interpreter,
-        gas::call_cost::<SPEC>(
-            value,
-            is_new,
-            is_cold,
-            matches!(scheme, CallScheme::Call | CallScheme::CallCode),
-            matches!(scheme, CallScheme::Call | CallScheme::StaticCall),
-        )
+    let cost = gas::call_cost::<SPEC>(
+        value,
+        is_new,
+        is_cold,
+        matches!(scheme, CallScheme::Call | CallScheme::CallCode),
+        matches!(scheme, CallScheme::Call | CallScheme::StaticCall),
     );
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(_opcode, cost);
 
     // take l64 part of gas_limit
     let mut gas_limit = if SPEC::enabled(TANGERINE) {
@@ -476,6 +533,8 @@ pub fn call_inner<SPEC: Spec>(
     };
 
     gas!(interpreter, gas_limit);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(_opcode, gas_limit);
 
     // add call stipend if there is value to be transferred.
     if matches!(scheme, CallScheme::Call | CallScheme::CallCode) && transfer.value != U256::ZERO {
@@ -504,6 +563,8 @@ pub fn call_inner<SPEC: Spec>(
             // return unspend gas.
             if crate::USE_GAS {
                 interpreter.gas.erase_cost(gas.remaining());
+                #[cfg(feature = "enable_opcode_metrics")]
+                revm_utils::metrics::record_gas(_opcode, gas.remaining());
                 interpreter.gas.record_refund(gas.refunded());
             }
             interpreter
@@ -514,6 +575,8 @@ pub fn call_inner<SPEC: Spec>(
         return_revert!() => {
             if crate::USE_GAS {
                 interpreter.gas.erase_cost(gas.remaining());
+                #[cfg(feature = "enable_opcode_metrics")]
+                revm_utils::metrics::record_gas(_opcode, gas.remaining());
             }
             interpreter
                 .memory

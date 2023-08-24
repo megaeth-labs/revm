@@ -31,3 +31,4 @@ pub use revm_interpreter::primitives;
 /// Reexport Inspector implementations
 pub use inspector::inspectors;
 pub use inspector::Inspector;
+pub use revm_interpreter::OpCode;
