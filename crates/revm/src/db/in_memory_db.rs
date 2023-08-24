@@ -7,6 +7,9 @@ use crate::Database;
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
+#[cfg(feature = "open_revm_metrics_record")]
+use revm_utils::time::TimeRecorder;
+
 pub type InMemoryDB = CacheDB<EmptyDB>;
 
 impl Default for InMemoryDB {
@@ -25,6 +28,14 @@ pub struct CacheDB<ExtDB: DatabaseRef> {
     pub logs: Vec<Log>,
     pub block_hashes: HashMap<U256, B256>,
     pub db: ExtDB,
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub cache_hits: (u64, u64, u64, u64),
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub cache_misses: (u64, u64, u64, u64),
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub cache_misses_penalty: (u128, u128, u128, u128),
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub cpu_frequency: f64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -49,6 +60,10 @@ impl DbAccount {
         } else {
             Some(self.info.clone())
         }
+    }
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub fn size(&self) -> usize {
+        std::mem::size_of::<DbAccount>() + self.storage.len() * 32 + self.info.code_size()
     }
 }
 
@@ -109,6 +124,14 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
             logs: Vec::default(),
             block_hashes: HashMap::new(),
             db,
+            #[cfg(feature = "open_revm_metrics_record")]
+            cache_hits: (0u64, 0u64, 0u64, 0u64),
+            #[cfg(feature = "open_revm_metrics_record")]
+            cache_misses: (0u64, 0u64, 0u64, 0u64),
+            #[cfg(feature = "open_revm_metrics_record")]
+            cache_misses_penalty: (0u128, 0u128, 0u128, 0u128),
+            #[cfg(feature = "open_revm_metrics_record")]
+            cpu_frequency: 0f64,
         }
     }
 
@@ -170,6 +193,23 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
         account.storage = storage.into_iter().collect();
         Ok(())
     }
+
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub fn size(&self) -> usize {
+        let accounts_size = self
+            .accounts
+            .iter()
+            .map(|(_, account)| 20 + account.size())
+            .sum::<usize>();
+        let contracts_size = self
+            .contracts
+            .iter()
+            .map(|(_, bytecode)| 32 + bytecode.size())
+            .sum::<usize>();
+        let logs_size = self.logs.iter().map(|log| log.size()).sum::<usize>();
+        let block_hashes_size = self.block_hashes.len() * 64;
+        accounts_size + contracts_size + logs_size + block_hashes_size
+    }
 }
 
 impl<ExtDB: DatabaseRef> DatabaseCommit for CacheDB<ExtDB> {
@@ -211,10 +251,37 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
 
     fn block_hash(&mut self, number: U256) -> Result<B256, Self::Error> {
         match self.block_hashes.entry(number) {
-            Entry::Occupied(entry) => Ok(*entry.get()),
+            Entry::Occupied(entry) => {
+                #[cfg(feature = "open_revm_metrics_record")]
+                {
+                    self.cache_hits.0 += 1;
+                }
+                Ok(*entry.get())
+            }
             Entry::Vacant(entry) => {
+                #[cfg(feature = "open_revm_metrics_record")]
+                let mut time_record = TimeRecorder::now();
+
+                // if storage was cleared, we dont need to ping db.
                 let hash = self.db.block_hash(number)?;
                 entry.insert(hash);
+
+                #[cfg(feature = "open_revm_metrics_record")]
+                {
+                    self.cache_misses_penalty.0 = self
+                        .cache_misses_penalty
+                        .0
+                        .checked_add(
+                            time_record
+                                .elapsed()
+                                .to_nanoseconds(self.cpu_frequency)
+                                .into(),
+                        )
+                        .expect("cache_misses_penalty overflow");
+
+                    self.cache_misses.0 += 1;
+                }
+
                 Ok(hash)
             }
         }
@@ -222,16 +289,44 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
 
     fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
         let basic = match self.accounts.entry(address) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(
-                self.db
-                    .basic(address)?
-                    .map(|info| DbAccount {
-                        info,
-                        ..Default::default()
-                    })
-                    .unwrap_or_else(DbAccount::new_not_existing),
-            ),
+            Entry::Occupied(entry) => {
+                #[cfg(feature = "open_revm_metrics_record")]
+                {
+                    self.cache_hits.1 += 1;
+                }
+                entry.into_mut()
+            }
+            Entry::Vacant(entry) => {
+                #[cfg(feature = "open_revm_metrics_record")]
+                let mut time_record = TimeRecorder::now();
+
+                let ret = entry.insert(
+                    self.db
+                        .basic(address)?
+                        .map(|info| DbAccount {
+                            info,
+                            ..Default::default()
+                        })
+                        .unwrap_or_else(DbAccount::new_not_existing),
+                );
+
+                #[cfg(feature = "open_revm_metrics_record")]
+                {
+                    self.cache_misses_penalty.1 = self
+                        .cache_misses_penalty
+                        .1
+                        .checked_add(
+                            time_record
+                                .elapsed()
+                                .to_nanoseconds(self.cpu_frequency)
+                                .into(),
+                        )
+                        .expect("cache_misses_penalty overflow");
+
+                    self.cache_misses.1 += 1;
+                }
+                ret
+            }
         };
         Ok(basic.info())
     }
@@ -244,22 +339,54 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
             Entry::Occupied(mut acc_entry) => {
                 let acc_entry = acc_entry.get_mut();
                 match acc_entry.storage.entry(index) {
-                    Entry::Occupied(entry) => Ok(*entry.get()),
+                    Entry::Occupied(entry) => {
+                        #[cfg(feature = "open_revm_metrics_record")]
+                        {
+                            self.cache_hits.2 += 1;
+                        }
+                        Ok(*entry.get())
+                    }
                     Entry::Vacant(entry) => {
                         if matches!(
                             acc_entry.account_state,
                             AccountState::StorageCleared | AccountState::NotExisting
                         ) {
+                            #[cfg(feature = "open_revm_metrics_record")]
+                            {
+                                self.cache_hits.2 += 1;
+                            }
                             Ok(U256::ZERO)
                         } else {
+                            #[cfg(feature = "open_revm_metrics_record")]
+                            let mut time_record = TimeRecorder::now();
+
                             let slot = self.db.storage(address, index)?;
                             entry.insert(slot);
+                            #[cfg(feature = "open_revm_metrics_record")]
+                            {
+                                self.cache_misses_penalty.2 = self
+                                    .cache_misses_penalty
+                                    .2
+                                    .checked_add(
+                                        time_record
+                                            .elapsed()
+                                            .to_nanoseconds(self.cpu_frequency)
+                                            .into(),
+                                    )
+                                    .expect("cache_misses_penalty overflow");
+
+                                self.cache_misses.2 += 1;
+                            }
+
                             Ok(slot)
                         }
                     }
                 }
             }
             Entry::Vacant(acc_entry) => {
+                #[cfg(feature = "open_revm_metrics_record")]
+                let mut time_record = TimeRecorder::now();
+
                 // acc needs to be loaded for us to access slots.
                 let info = self.db.basic(address)?;
                 let (account, value) = if info.is_some() {
@@ -271,6 +398,22 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                     (info.into(), U256::ZERO)
                 };
                 acc_entry.insert(account);
+                #[cfg(feature = "open_revm_metrics_record")]
+                {
+                    self.cache_misses_penalty.2 = self
+                        .cache_misses_penalty
+                        .2
+                        .checked_add(
+                            time_record
+                                .elapsed()
+                                .to_nanoseconds(self.cpu_frequency)
+                                .into(),
+                        )
+                        .expect("cache_misses_penalty overflow");
+
+                    self.cache_misses.2 += 1;
+                }
+
                 Ok(value)
             }
         }
@@ -278,12 +421,59 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
         match self.contracts.entry(code_hash) {
-            Entry::Occupied(entry) => Ok(entry.get().clone()),
+            Entry::Occupied(entry) => {
+                #[cfg(feature = "open_revm_metrics_record")]
+                {
+                    self.cache_hits.3 += 1;
+                }
+
+                Ok(entry.get().clone())
+            }
             Entry::Vacant(entry) => {
+                #[cfg(feature = "open_revm_metrics_record")]
+                let mut time_record = TimeRecorder::now();
+
                 // if you return code bytes when basic fn is called this function is not needed.
-                Ok(entry.insert(self.db.code_by_hash(code_hash)?).clone())
+                let ret = entry.insert(self.db.code_by_hash(code_hash)?).clone();
+                #[cfg(feature = "open_revm_metrics_record")]
+                {
+                    self.cache_misses_penalty.3 = self
+                        .cache_misses_penalty
+                        .3
+                        .checked_add(
+                            time_record
+                                .elapsed()
+                                .to_nanoseconds(self.cpu_frequency)
+                                .into(),
+                        )
+                        .expect("cache_misses_penalty overflow");
+
+                    self.cache_misses.3 += 1;
+                }
+
+                Ok(ret)
             }
         }
+    }
+    #[cfg(feature = "open_revm_metrics_record")]
+    fn get_metric(
+        &mut self,
+    ) -> (
+        (u64, u64, u64, u64),
+        (u64, u64, u64, u64),
+        (u128, u128, u128, u128),
+    ) {
+        (
+            self.cache_hits,
+            self.cache_misses,
+            self.cache_misses_penalty,
+        )
+    }
+
+    // Set cpu frequency.
+    #[cfg(feature = "open_revm_metrics_record")]
+    fn set_cpu_frequency(&mut self, cpu_frequency: f64) {
+        self.cpu_frequency = cpu_frequency;
     }
 }
 

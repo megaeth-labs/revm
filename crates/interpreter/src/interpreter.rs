@@ -14,6 +14,10 @@ use crate::{
     Gas, Host,
 };
 use core::ops::Range;
+#[cfg(feature = "open_revm_metrics_record")]
+use revm_utils::time::TimeRecorder;
+#[cfg(feature = "open_revm_metrics_record")]
+use std::collections::{hash_map::Entry, HashMap};
 
 pub const STACK_LIMIT: u64 = 1024;
 pub const CALL_STACK_LIMIT: u64 = 1024;
@@ -46,6 +50,12 @@ pub struct Interpreter {
     /// Memory limit. See [`crate::CfgEnv`].
     #[cfg(feature = "memory_limit")]
     pub memory_limit: u64,
+    /// Used for record duration of instruction.
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub opcode_time: HashMap<u8, (u64, u64)>,
+    /// CPU frequency.
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub cpu_frequency: f64,
 }
 
 impl Interpreter {
@@ -68,6 +78,10 @@ impl Interpreter {
                 instruction_result: InstructionResult::Continue,
                 is_static,
                 gas: Gas::new(gas_limit),
+                #[cfg(feature = "open_revm_metrics_record")]
+                opcode_time: HashMap::new(),
+                #[cfg(feature = "open_revm_metrics_record")]
+                cpu_frequency: 0f64,
             }
         }
 
@@ -96,6 +110,11 @@ impl Interpreter {
             gas: Gas::new(gas_limit),
             memory_limit,
         }
+    }
+
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub fn set_cpu_frequency(&mut self, cpu_frequency: f64) {
+        self.cpu_frequency = cpu_frequency;
     }
 
     pub fn contract(&self) -> &Contract {
@@ -134,7 +153,27 @@ impl Interpreter {
         // byte instruction is STOP so we are safe to just increment program_counter bcs on last instruction
         // it will do noop and just stop execution of this contract
         self.instruction_pointer = unsafe { self.instruction_pointer.offset(1) };
+
+        #[cfg(feature = "open_revm_metrics_record")]
+        let mut time_record = TimeRecorder::now();
+
         eval::<H, SPEC>(opcode, self, host);
+
+        #[cfg(feature = "open_revm_metrics_record")]
+        {
+            let duration = time_record.elapsed().to_nanoseconds(self.cpu_frequency);
+
+            match self.opcode_time.entry(opcode) {
+                Entry::Vacant(entry) => {
+                    entry.insert((1, duration));
+                }
+                Entry::Occupied(mut entry) => {
+                    let existing_value = entry.get_mut();
+                    existing_value.0 += 1;
+                    existing_value.1 += duration;
+                }
+            }
+        }
     }
 
     /// loop steps until we are finished with execution

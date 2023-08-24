@@ -141,4 +141,12 @@ impl AccountInfo {
             ..Default::default()
         }
     }
+
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub fn code_size(&self) -> usize {
+        self.code
+            .as_ref()
+            .map(|c| std::mem::size_of_val(&c))
+            .unwrap_or(0)
+    }
 }

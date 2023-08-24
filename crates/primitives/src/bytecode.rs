@@ -157,4 +157,9 @@ impl Bytecode {
             _ => self,
         }
     }
+
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub fn size(&self) -> usize {
+        self.bytecode.len()
+    }
 }

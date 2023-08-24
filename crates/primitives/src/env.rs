@@ -8,6 +8,8 @@ pub struct Env {
     pub cfg: CfgEnv,
     pub block: BlockEnv,
     pub tx: TxEnv,
+    // #[cfg(feature = "open_revm_metrics_record")]
+    pub cpu_frequency: f64,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

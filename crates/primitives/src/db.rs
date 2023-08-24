@@ -23,6 +23,25 @@ pub trait Database {
 
     // History related
     fn block_hash(&mut self, number: U256) -> Result<B256, Self::Error>;
+
+    // Get metrics
+    #[cfg(feature = "open_revm_metrics_record")]
+    fn get_metric(
+        &mut self,
+    ) -> (
+        (u64, u64, u64, u64),
+        (u64, u64, u64, u64),
+        (u128, u128, u128, u128),
+    ) {
+        (
+            (0u64, 0u64, 0u64, 0u64),
+            (0u64, 0u64, 0u64, 0u64),
+            (0u128, 0u128, 0u128, 0u128),
+        )
+    }
+    // Set cpu frequency.
+    #[cfg(feature = "open_revm_metrics_record")]
+    fn set_cpu_frequency(&mut self, _cpu_frequency: f64) {}
 }
 
 #[auto_impl(& mut, Box)]

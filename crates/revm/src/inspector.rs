@@ -138,4 +138,10 @@ pub trait Inspector<DB: Database> {
 
     /// Called when a contract has been self-destructed with funds transferred to target.
     fn selfdestruct(&mut self, _contract: B160, _target: B160) {}
+
+    /// Get record of instruction execution duration.
+    #[cfg(feature = "open_revm_metrics_record")]
+    fn open_revm_metrics_record(&self) -> Vec<(u8, u64)> {
+        vec![]
+    }
 }

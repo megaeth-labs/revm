@@ -5,6 +5,8 @@ use crate::primitives::{
 };
 use alloc::{vec, vec::Vec};
 use core::mem::{self};
+#[cfg(feature = "open_revm_metrics_record")]
+use revm_utils::time::TimeRecorder;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -24,6 +26,15 @@ pub struct JournaledState {
     /// It is assumed that precompiles start from 0x1 address and spand next N addresses.
     /// we are using that assumption here
     pub num_of_precompiles: usize,
+    /// Memory hit times when execute sload.
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub cache_hits: u64,
+    /// Memory not hit times when execute sload.
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub cache_misses: u64,
+    /// Additional overhead when not hit memory.
+    #[cfg(feature = "open_revm_metrics_record")]
+    pub cache_misses_penalty: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -87,6 +98,12 @@ impl JournaledState {
             depth: 0,
             is_before_spurious_dragon: false,
             num_of_precompiles,
+            #[cfg(feature = "open_revm_metrics_record")]
+            cache_hits: 0u64,
+            #[cfg(feature = "open_revm_metrics_record")]
+            cache_misses: 0u64,
+            #[cfg(feature = "open_revm_metrics_record")]
+            cache_misses_penalty: vec![],
         }
     }
 
@@ -474,8 +491,18 @@ impl JournaledState {
     ) -> Result<(U256, bool), DB::Error> {
         let account = self.state.get_mut(&address).unwrap(); // asume acc is hot
         let load = match account.storage.entry(key) {
-            Entry::Occupied(occ) => (occ.get().present_value, false),
+            Entry::Occupied(occ) => {
+                #[cfg(feature = "open_revm_metrics_record")]
+                {
+                    self.cache_hits += 1;
+                }
+
+                (occ.get().present_value, false)
+            }
             Entry::Vacant(vac) => {
+                #[cfg(feature = "open_revm_metrics_record")]
+                let mut time_record = TimeRecorder::now();
+
                 // if storage was cleared, we dont need to ping db.
                 let value = if account.storage_cleared {
                     U256::ZERO
@@ -493,6 +520,12 @@ impl JournaledState {
                     });
 
                 vac.insert(StorageSlot::new(value));
+                #[cfg(feature = "open_revm_metrics_record")]
+                {
+                    self.cache_misses_penalty
+                        .push(time_record.elapsed().to_cycles());
+                    self.cache_misses += 1;
+                }
 
                 (value, true)
             }

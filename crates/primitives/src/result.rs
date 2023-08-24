@@ -1,6 +1,8 @@
 use crate::{Log, State, B160};
 use alloc::vec::Vec;
 use bytes::Bytes;
+#[cfg(feature = "open_revm_metrics_record")]
+use revm_utils::types::RevmMetricRecord;
 use ruint::aliases::U256;
 
 pub type EVMResult<DB> = core::result::Result<ResultAndState, EVMError<DB>>;
@@ -12,6 +14,10 @@ pub struct ResultAndState {
     pub result: ExecutionResult,
     /// State that got updated
     pub state: State,
+    /// Used for record duration of instruction.
+    #[cfg(feature = "open_revm_metrics_record")]
+    // pub opcode_time: Vec<(u8, u64)>,
+    pub revm_metric_record: RevmMetricRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
