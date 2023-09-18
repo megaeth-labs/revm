@@ -92,13 +92,11 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
             return Err(InvalidTransaction::CallerGasLimitMoreThanBlock.into());
         }
 
-        println!("before load ================= ");
         // load acc
         self.data
             .journaled_state
             .load_account(caller, self.data.db)
             .map_err(EVMError::Database)?;
-        println!("after load ================= ");
 
         #[cfg(feature = "optional_eip3607")]
         let disable_eip3607 = self.env().cfg.disable_eip3607;
@@ -310,9 +308,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
             }
         }
 
-        println!("before finalize ================= ");
         let (state, logs, gas_used, gas_refunded) = self.finalize::<GSPEC>(caller, &gas);
-        println!("after finalize ================= ");
 
         let result = match exit_reason.into() {
             SuccessOrHalt::Success(reason) => ExecutionResult::Success {
@@ -1305,7 +1301,6 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
 
         let mut gas = Gas::new(inputs.gas_limit);
 
-        println!("before call code +++++++++++++++++++++++++++ ");
         // Load account and get code. Account is now hot.
         let bytecode = if let Some((bytecode, _)) = self.code(inputs.contract) {
             bytecode
@@ -1315,7 +1310,6 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
                 None,
             );
         };
-        println!("after call code +++++++++++++++++++++++++++ ");
 
         // Check depth
         if self.data.journaled_state.depth() > CALL_STACK_LIMIT {
