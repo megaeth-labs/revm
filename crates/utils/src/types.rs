@@ -94,19 +94,21 @@ impl RevmMetricRecord {
     }
 
     pub fn update(&mut self, other: &mut RevmMetricRecord) {
-        if self.opcode_time.is_none() {
-            self.opcode_time = other.opcode_time.take();
-        } else {
-            for (key, value) in other.opcode_time.take().unwrap() {
-                self.opcode_time
-                    .as_mut()
-                    .expect("None")
-                    .entry(key)
-                    .and_modify(|(v1, v2)| {
-                        v1.checked_add(value.0).expect("overflow");
-                        v2.checked_add(value.1).expect("overflow");
-                    })
-                    .or_insert(value);
+        if let Some(other_opcode_time) = other.opcode_time.take() {
+            if self.opcode_time.is_none() {
+                self.opcode_time = Some(other_opcode_time);
+            } else {
+                for (key, value) in other_opcode_time {
+                    self.opcode_time
+                        .as_mut()
+                        .expect("None")
+                        .entry(key)
+                        .and_modify(|(v1, v2)| {
+                            v1.checked_add(value.0).expect("overflow");
+                            v2.checked_add(value.1).expect("overflow");
+                        })
+                        .or_insert(value);
+                }
             }
         }
 
