@@ -72,11 +72,11 @@ pub struct RevmMetricRecord {
     pub opcode_time: Option<HashMap<u8, (u64, u64)>>,
     /// Total host time.
     pub host_time: HostTime,
-    /// cache_hits: (hit_in_basic, hit_in_code_by_hash, hit_in_storage, hit_in_block_hash).
+    /// cache_hits: (hit_in_block_hash, hit_in_basic, hit_in_storage, hit_in_code_by_hash).
     pub cache_hits: (u64, u64, u64, u64),
-    /// cache_misses: (misses_in_basic, misses_in_code_by_hash, misses_in_storage, misses_in_block_hash).
+    /// cache_misses: (misses_in_block_hash, misses_in_basic, misses_in_storage, misses_in_code_by_hash).
     pub cache_misses: (u64, u64, u64, u64),
-    /// cache_misses_penalty: (penalty_in_basic, penalty_in_code_by_hash, penalty_in_storage, penalty_in_block_hash).
+    /// cache_misses_penalty: (misses_in_block_hash, penalty_in_basic, penalty_in_storage, penalty_in_code_by_hash).
     pub cache_misses_penalty: (u128, u128, u128, u128),
 }
 
@@ -104,8 +104,8 @@ impl RevmMetricRecord {
                         .expect("None")
                         .entry(key)
                         .and_modify(|(v1, v2)| {
-                            v1.checked_add(value.0).expect("overflow");
-                            v2.checked_add(value.1).expect("overflow");
+                            *v1 = v1.checked_add(value.0).expect("overflow");
+                            *v2 = v2.checked_add(value.1).expect("overflow");
                         })
                         .or_insert(value);
                 }

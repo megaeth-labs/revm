@@ -1464,7 +1464,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("step time overflow");
         }
@@ -1494,7 +1495,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("step_end time overflow");
         }
@@ -1526,7 +1528,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("block_hash time overflow");
         }
@@ -1554,7 +1557,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("load_account time overflow");
         }
@@ -1584,7 +1588,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("balance time overflow");
         }
@@ -1614,7 +1619,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("code time overflow");
         }
@@ -1648,7 +1654,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                         time_record
                             .elapsed()
                             .to_nanoseconds(self.data.env.cpu_frequency)
-                            as u128,
+                            .into(),
                     )
                     .expect("code_hash time overflow");
             }
@@ -1666,7 +1672,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                         time_record
                             .elapsed()
                             .to_nanoseconds(self.data.env.cpu_frequency)
-                            as u128,
+                            .into(),
                     )
                     .expect("code_hash time overflow");
             }
@@ -1684,7 +1690,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("code_hash time overflow");
         }
@@ -1712,7 +1719,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("sload time overflow");
         }
@@ -1745,7 +1753,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("sstore time overflow");
         }
@@ -1775,7 +1784,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("log time overflow");
         }
@@ -1804,7 +1814,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("selfdestruct time overflow");
         }
@@ -1827,7 +1838,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("create time overflow");
             return ret;
@@ -1850,7 +1862,8 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .checked_add(
                     time_record
                         .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency) as u128,
+                        .to_nanoseconds(self.data.env.cpu_frequency)
+                        .into(),
                 )
                 .expect("call time overflow");
             return ret;
