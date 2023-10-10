@@ -51,8 +51,10 @@ pub struct Interpreter {
     #[cfg(feature = "memory_limit")]
     pub memory_limit: u64,
     /// Used for record duration of instruction.
+    ///     Note:   This opcode_code means: (opcode_time, host_create, host_call),
+    ///             we need to refactor here in the future.
     #[cfg(feature = "open_revm_metrics_record")]
-    pub opcode_time: HashMap<u8, (u64, u64)>,
+    pub opcode_time: (HashMap<u8, (u64, u128)>, u128, u128),
     /// CPU frequency.
     #[cfg(feature = "open_revm_metrics_record")]
     pub cpu_frequency: f64,
@@ -79,7 +81,7 @@ impl Interpreter {
                 is_static,
                 gas: Gas::new(gas_limit),
                 #[cfg(feature = "open_revm_metrics_record")]
-                opcode_time: HashMap::new(),
+                opcode_time: (HashMap::new(), 0, 0),
                 #[cfg(feature = "open_revm_metrics_record")]
                 cpu_frequency: 0f64,
             }
@@ -157,21 +159,44 @@ impl Interpreter {
         #[cfg(feature = "open_revm_metrics_record")]
         let mut time_record = TimeRecorder::now();
 
+        #[cfg(not(feature = "open_revm_metrics_record"))]
         eval::<H, SPEC>(opcode, self, host);
 
         #[cfg(feature = "open_revm_metrics_record")]
         {
-            let duration = time_record.elapsed().to_nanoseconds(self.cpu_frequency);
+            let mut create_cycles: u64 = 0;
+            let mut call_cycles: u64 = 0;
+            eval::<H, SPEC>(opcode, self, host, &mut create_cycles, &mut call_cycles);
+            let duration = time_record.elapsed().to_cycles();
 
-            match self.opcode_time.entry(opcode) {
+            match self.opcode_time.0.entry(opcode) {
                 Entry::Vacant(entry) => {
-                    entry.insert((1, duration));
+                    entry.insert((1, duration.into()));
                 }
                 Entry::Occupied(mut entry) => {
                     let existing_value = entry.get_mut();
                     existing_value.0 += 1;
-                    existing_value.1 += duration;
+                    existing_value.1 = existing_value
+                        .1
+                        .checked_add(duration.into())
+                        .expect("overflow");
                 }
+            }
+
+            if create_cycles != 0 {
+                self.opcode_time.1 = self
+                    .opcode_time
+                    .1
+                    .checked_add(create_cycles.into())
+                    .expect("overflow");
+            }
+
+            if call_cycles != 0 {
+                self.opcode_time.2 = self
+                    .opcode_time
+                    .2
+                    .checked_add(call_cycles.into())
+                    .expect("overflow");
             }
         }
     }

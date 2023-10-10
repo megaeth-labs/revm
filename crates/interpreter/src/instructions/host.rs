@@ -13,6 +13,9 @@ use revm_utils::time::TimeRecorder;
 #[cfg(feature = "open_revm_instruction_log")]
 use tracing::*;
 
+#[cfg(feature = "open_revm_metrics_record")]
+use revm_utils::time::TimeRecorder;
+
 pub fn balance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     #[cfg(feature = "open_revm_instruction_log")]
     let mut time_record = TimeRecorder::now();
@@ -321,6 +324,7 @@ pub fn selfdestruct<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Ho
     info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "selfdestruct");
 }
 
+#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
     interpreter: &mut Interpreter,
     host: &mut dyn Host,
@@ -428,6 +432,114 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
     info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "create");
 }
 
+#[cfg(feature = "open_revm_metrics_record")]
+pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
+    interpreter: &mut Interpreter,
+    host: &mut dyn Host,
+    create_cycles: &mut u64,
+) {
+    check_staticcall!(interpreter);
+    if IS_CREATE2 {
+        // EIP-1014: Skinny CREATE2
+        check!(interpreter, SPEC::enabled(PETERSBURG));
+    }
+
+    interpreter.return_data_buffer = Bytes::new();
+
+    pop!(interpreter, value, code_offset, len);
+    let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
+
+    let code = if len == 0 {
+        Bytes::new()
+    } else {
+        let code_offset = as_usize_or_fail!(
+            interpreter,
+            code_offset,
+            InstructionResult::InvalidOperandOOG
+        );
+        // EIP-3860: Limit and meter initcode
+        if SPEC::enabled(SHANGHAI) {
+            // Limit is set as double of max contract bytecode size
+            let max_initcode_size = host
+                .env()
+                .cfg
+                .limit_contract_code_size
+                .map(|limit| limit.saturating_mul(2))
+                .unwrap_or(MAX_INITCODE_SIZE);
+            if len > max_initcode_size {
+                interpreter.instruction_result = InstructionResult::CreateInitcodeSizeLimit;
+                #[cfg(feature = "open_revm_instruction_log")]
+                info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "create");
+
+                return;
+            }
+            gas!(interpreter, gas::initcode_cost(len as u64));
+        }
+        memory_resize!(interpreter, code_offset, len);
+        Bytes::copy_from_slice(interpreter.memory.get_slice(code_offset, len))
+    };
+
+    let scheme = if IS_CREATE2 {
+        pop!(interpreter, salt);
+        gas_or_fail!(interpreter, gas::create2_cost(len));
+        CreateScheme::Create2 { salt }
+    } else {
+        gas!(interpreter, gas::CREATE);
+        CreateScheme::Create
+    };
+
+    let mut gas_limit = interpreter.gas().remaining();
+
+    // EIP-150: Gas cost changes for IO-heavy operations
+    if SPEC::enabled(TANGERINE) {
+        // take remaining gas and deduce l64 part of it.
+        gas_limit -= gas_limit / 64
+    }
+    gas!(interpreter, gas_limit);
+
+    let mut create_input = CreateInputs {
+        caller: interpreter.contract.address,
+        scheme,
+        value,
+        init_code: code,
+        gas_limit,
+    };
+
+    let mut time_record = TimeRecorder::now();
+    let (return_reason, address, gas, return_data) = host.create(&mut create_input);
+    *create_cycles = time_record.elapsed().to_cycles();
+
+    interpreter.return_data_buffer = match return_reason {
+        // Save data to return data buffer if the create reverted
+        return_revert!() => return_data,
+        // Otherwise clear it
+        _ => Bytes::new(),
+    };
+
+    match return_reason {
+        return_ok!() => {
+            push_b256!(interpreter, address.unwrap_or_default().into());
+            if crate::USE_GAS {
+                interpreter.gas.erase_cost(gas.remaining());
+                interpreter.gas.record_refund(gas.refunded());
+            }
+        }
+        return_revert!() => {
+            push_b256!(interpreter, B256::zero());
+            if crate::USE_GAS {
+                interpreter.gas.erase_cost(gas.remaining());
+            }
+        }
+        InstructionResult::FatalExternalError => {
+            interpreter.instruction_result = InstructionResult::FatalExternalError;
+        }
+        _ => {
+            push_b256!(interpreter, B256::zero());
+        }
+    }
+}
+
+#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     #[cfg(feature = "open_revm_instruction_log")]
     let mut time_record = TimeRecorder::now();
@@ -437,6 +549,7 @@ pub fn call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "call");
 }
 
+#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn call_code<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     #[cfg(feature = "open_revm_instruction_log")]
     let mut time_record = TimeRecorder::now();
@@ -446,6 +559,7 @@ pub fn call_code<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host)
     info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "call_code");
 }
 
+#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn delegate_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     #[cfg(feature = "open_revm_instruction_log")]
     let mut time_record = TimeRecorder::now();
@@ -455,6 +569,7 @@ pub fn delegate_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn H
     info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "delegate_call");
 }
 
+#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn static_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     #[cfg(feature = "open_revm_instruction_log")]
     let mut time_record = TimeRecorder::now();
@@ -464,6 +579,7 @@ pub fn static_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
     info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "static_call");
 }
 
+#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn call_inner<SPEC: Spec>(
     interpreter: &mut Interpreter,
     scheme: CallScheme,
@@ -614,6 +730,226 @@ pub fn call_inner<SPEC: Spec>(
 
     // Call host to interuct with target contract
     let (reason, gas, return_data) = host.call(&mut call_input);
+
+    interpreter.return_data_buffer = return_data;
+
+    let target_len = min(out_len, interpreter.return_data_buffer.len());
+
+    match reason {
+        return_ok!() => {
+            // return unspend gas.
+            if crate::USE_GAS {
+                interpreter.gas.erase_cost(gas.remaining());
+                interpreter.gas.record_refund(gas.refunded());
+            }
+            interpreter
+                .memory
+                .set(out_offset, &interpreter.return_data_buffer[..target_len]);
+            push!(interpreter, U256::from(1));
+        }
+        return_revert!() => {
+            if crate::USE_GAS {
+                interpreter.gas.erase_cost(gas.remaining());
+            }
+            interpreter
+                .memory
+                .set(out_offset, &interpreter.return_data_buffer[..target_len]);
+            push!(interpreter, U256::ZERO);
+        }
+        InstructionResult::FatalExternalError => {
+            interpreter.instruction_result = InstructionResult::FatalExternalError;
+        }
+        _ => {
+            push!(interpreter, U256::ZERO);
+        }
+    }
+}
+
+#[cfg(feature = "open_revm_metrics_record")]
+pub fn call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host, call_cycles: &mut u64) {
+    call_inner::<SPEC>(interpreter, CallScheme::Call, host, call_cycles);
+}
+
+#[cfg(feature = "open_revm_metrics_record")]
+pub fn call_code<SPEC: Spec>(
+    interpreter: &mut Interpreter,
+    host: &mut dyn Host,
+    call_cycles: &mut u64,
+) {
+    call_inner::<SPEC>(interpreter, CallScheme::CallCode, host, call_cycles);
+}
+
+#[cfg(feature = "open_revm_metrics_record")]
+pub fn delegate_call<SPEC: Spec>(
+    interpreter: &mut Interpreter,
+    host: &mut dyn Host,
+    call_cycles: &mut u64,
+) {
+    call_inner::<SPEC>(interpreter, CallScheme::DelegateCall, host, call_cycles);
+}
+
+#[cfg(feature = "open_revm_metrics_record")]
+pub fn static_call<SPEC: Spec>(
+    interpreter: &mut Interpreter,
+    host: &mut dyn Host,
+    call_cycles: &mut u64,
+) {
+    call_inner::<SPEC>(interpreter, CallScheme::StaticCall, host, call_cycles);
+}
+#[cfg(feature = "open_revm_metrics_record")]
+pub fn call_inner<SPEC: Spec>(
+    interpreter: &mut Interpreter,
+    scheme: CallScheme,
+    host: &mut dyn Host,
+    call_cycles: &mut u64,
+) {
+    match scheme {
+        CallScheme::DelegateCall => check!(interpreter, SPEC::enabled(HOMESTEAD)), // EIP-7: DELEGATECALL
+        CallScheme::StaticCall => check!(interpreter, SPEC::enabled(BYZANTIUM)), // EIP-214: New opcode STATICCALL
+        _ => (),
+    }
+    interpreter.return_data_buffer = Bytes::new();
+
+    pop!(interpreter, local_gas_limit);
+    pop_address!(interpreter, to);
+    let local_gas_limit = u64::try_from(local_gas_limit).unwrap_or(u64::MAX);
+
+    let value = match scheme {
+        CallScheme::CallCode => {
+            pop!(interpreter, value);
+            value
+        }
+        CallScheme::Call => {
+            pop!(interpreter, value);
+            if interpreter.is_static && value != U256::ZERO {
+                interpreter.instruction_result = InstructionResult::CallNotAllowedInsideStatic;
+                return;
+            }
+            value
+        }
+        CallScheme::DelegateCall | CallScheme::StaticCall => U256::ZERO,
+    };
+
+    pop!(interpreter, in_offset, in_len, out_offset, out_len);
+
+    let in_len = as_usize_or_fail!(interpreter, in_len, InstructionResult::InvalidOperandOOG);
+    let input = if in_len != 0 {
+        let in_offset =
+            as_usize_or_fail!(interpreter, in_offset, InstructionResult::InvalidOperandOOG);
+        memory_resize!(interpreter, in_offset, in_len);
+        Bytes::copy_from_slice(interpreter.memory.get_slice(in_offset, in_len))
+    } else {
+        Bytes::new()
+    };
+
+    let out_len = as_usize_or_fail!(interpreter, out_len, InstructionResult::InvalidOperandOOG);
+    let out_offset = if out_len != 0 {
+        let out_offset = as_usize_or_fail!(
+            interpreter,
+            out_offset,
+            InstructionResult::InvalidOperandOOG
+        );
+        memory_resize!(interpreter, out_offset, out_len);
+        out_offset
+    } else {
+        usize::MAX //unrealistic value so we are sure it is not used
+    };
+
+    let context = match scheme {
+        CallScheme::Call | CallScheme::StaticCall => CallContext {
+            address: to,
+            caller: interpreter.contract.address,
+            code_address: to,
+            apparent_value: value,
+            scheme,
+        },
+        CallScheme::CallCode => CallContext {
+            address: interpreter.contract.address,
+            caller: interpreter.contract.address,
+            code_address: to,
+            apparent_value: value,
+            scheme,
+        },
+        CallScheme::DelegateCall => CallContext {
+            address: interpreter.contract.address,
+            caller: interpreter.contract.caller,
+            code_address: to,
+            apparent_value: interpreter.contract.value,
+            scheme,
+        },
+    };
+
+    let transfer = if scheme == CallScheme::Call {
+        Transfer {
+            source: interpreter.contract.address,
+            target: to,
+            value,
+        }
+    } else if scheme == CallScheme::CallCode {
+        Transfer {
+            source: interpreter.contract.address,
+            target: interpreter.contract.address,
+            value,
+        }
+    } else {
+        //this is dummy send for StaticCall and DelegateCall, it should do nothing and dont touch anything.
+        Transfer {
+            source: interpreter.contract.address,
+            target: interpreter.contract.address,
+            value: U256::ZERO,
+        }
+    };
+
+    // load account and calculate gas cost.
+    let res = host.load_account(to);
+    if res.is_none() {
+        interpreter.instruction_result = InstructionResult::FatalExternalError;
+        return;
+    }
+    let (is_cold, exist) = res.unwrap();
+    let is_new = !exist;
+
+    gas!(
+        interpreter,
+        gas::call_cost::<SPEC>(
+            value,
+            is_new,
+            is_cold,
+            matches!(scheme, CallScheme::Call | CallScheme::CallCode),
+            matches!(scheme, CallScheme::Call | CallScheme::StaticCall),
+        )
+    );
+
+    // take l64 part of gas_limit
+    let mut gas_limit = if SPEC::enabled(TANGERINE) {
+        //EIP-150: Gas cost changes for IO-heavy operations
+        let gas = interpreter.gas().remaining();
+        min(gas - gas / 64, local_gas_limit)
+    } else {
+        local_gas_limit
+    };
+
+    gas!(interpreter, gas_limit);
+
+    // add call stipend if there is value to be transferred.
+    if matches!(scheme, CallScheme::Call | CallScheme::CallCode) && transfer.value != U256::ZERO {
+        gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
+    }
+    let is_static = matches!(scheme, CallScheme::StaticCall) || interpreter.is_static;
+
+    let mut call_input = CallInputs {
+        contract: to,
+        transfer,
+        input,
+        gas_limit,
+        context,
+        is_static,
+    };
+
+    // Call host to interuct with target contract
+    let mut time_record = TimeRecorder::now();
+    let (reason, gas, return_data) = host.call(&mut call_input);
+    *call_cycles = time_record.elapsed().to_cycles();
 
     interpreter.return_data_buffer = return_data;
 
