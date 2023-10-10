@@ -217,7 +217,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
             InstructionResult,
             Gas,
             Output,
-            Option<StdHashMap<u8, (u64, u64)>>,
+            Option<(StdHashMap<u8, (u64, u128)>, u128, u128)>,
         ) = match self.data.env.tx.transact_to {
             TransactTo::Call(address) => {
                 if self.data.journaled_state.inc_nonce(caller).is_some() {
@@ -250,7 +250,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
                         InstructionResult,
                         Gas,
                         Output,
-                        Option<StdHashMap<u8, (u64, u64)>>,
+                        Option<(StdHashMap<u8, (u64, u128)>, u128, u128)>,
                     ) = (exit, gas, Output::Call(bytes), None);
 
                     #[cfg(feature = "open_revm_metrics_record")]
@@ -286,7 +286,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
                     InstructionResult,
                     Gas,
                     Output,
-                    Option<StdHashMap<u8, (u64, u64)>>,
+                    Option<(StdHashMap<u8, (u64, u128)>, u128, u128)>,
                 ) = (exit, ret_gas, Output::Create(bytes, address), None);
                 #[cfg(feature = "open_revm_metrics_record")]
                 let ret = (exit, ret_gas, Output::Create(bytes, address), opcode_time);
@@ -360,8 +360,16 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
                     current_cache_misses_penalty.3 - pre_cache_misses_penalty.3,
                 ),
             );
+            let opcode_time = match _opcode_time {
+                Some(v) => {
+                    self.data.host_time.create = v.1.into();
+                    self.data.host_time.call = v.2.into();
+                    Some(v.0)
+                }
+                None => None,
+            };
             let revm_metric_record = RevmMetricRecord {
-                opcode_time: _opcode_time,
+                opcode_time,
                 host_time: self.data.host_time,
                 cache_hits,
                 cache_misses,
@@ -995,7 +1003,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         inputs: &mut CreateInputs,
     ) -> (
         (InstructionResult, Option<B160>, Gas, Bytes),
-        Option<StdHashMap<u8, (u64, u64)>>,
+        Option<(StdHashMap<u8, (u64, u128)>, u128, u128)>,
     ) {
         // Call inspector
         if INSPECT {
@@ -1277,7 +1285,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         inputs: &mut CallInputs,
     ) -> (
         (InstructionResult, Gas, Bytes),
-        Option<StdHashMap<u8, (u64, u64)>>,
+        Option<(StdHashMap<u8, (u64, u128)>, u128, u128)>,
     ) {
         // Call the inspector
         if INSPECT {
@@ -1461,12 +1469,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .step
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("step time overflow");
         }
 
@@ -1492,12 +1495,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .step_end
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("step_end time overflow");
         }
 
@@ -1525,12 +1523,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .block_hash
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("block_hash time overflow");
         }
 
@@ -1554,12 +1547,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .load_account
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("load_account time overflow");
         }
 
@@ -1585,12 +1573,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .balance
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("balance time overflow");
         }
 
@@ -1616,12 +1599,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .code
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("code time overflow");
         }
 
@@ -1650,12 +1628,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                     .data
                     .host_time
                     .code_hash
-                    .checked_add(
-                        time_record
-                            .elapsed()
-                            .to_nanoseconds(self.data.env.cpu_frequency)
-                            .into(),
-                    )
+                    .checked_add(time_record.elapsed().to_cycles().into())
                     .expect("code_hash time overflow");
             }
 
@@ -1668,12 +1641,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                     .data
                     .host_time
                     .code_hash
-                    .checked_add(
-                        time_record
-                            .elapsed()
-                            .to_nanoseconds(self.data.env.cpu_frequency)
-                            .into(),
-                    )
+                    .checked_add(time_record.elapsed().to_cycles().into())
                     .expect("code_hash time overflow");
             }
 
@@ -1687,12 +1655,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .code_hash
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("code_hash time overflow");
         }
         Some((acc.info.code_hash, is_cold))
@@ -1716,12 +1679,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .sload
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("sload time overflow");
         }
 
@@ -1750,12 +1708,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .sstore
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("sstore time overflow");
         }
 
@@ -1781,12 +1734,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .log
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("log time overflow");
         }
     }
@@ -1811,12 +1759,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
                 .data
                 .host_time
                 .selfdestruct
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
+                .checked_add(time_record.elapsed().to_cycles().into())
                 .expect("selfdestruct time overflow");
         }
 
@@ -1828,22 +1771,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
         inputs: &mut CreateInputs,
     ) -> (InstructionResult, Option<B160>, Gas, Bytes) {
         #[cfg(feature = "open_revm_metrics_record")]
-        {
-            let mut time_record = TimeRecorder::now();
-            let ret = self.create_inner(inputs).0;
-            self.data.host_time.create = self
-                .data
-                .host_time
-                .create
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
-                .expect("create time overflow");
-            return ret;
-        }
+        return self.create_inner(inputs).0;
 
         #[cfg(not(feature = "open_revm_metrics_record"))]
         self.create_inner(inputs)
@@ -1851,23 +1779,7 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
 
     fn call(&mut self, inputs: &mut CallInputs) -> (InstructionResult, Gas, Bytes) {
         #[cfg(feature = "open_revm_metrics_record")]
-        {
-            let mut time_record = TimeRecorder::now();
-
-            let ret = self.call_inner(inputs).0;
-            self.data.host_time.call = self
-                .data
-                .host_time
-                .call
-                .checked_add(
-                    time_record
-                        .elapsed()
-                        .to_nanoseconds(self.data.env.cpu_frequency)
-                        .into(),
-                )
-                .expect("call time overflow");
-            return ret;
-        }
+        return self.call_inner(inputs).0;
 
         #[cfg(not(feature = "open_revm_metrics_record"))]
         self.call_inner(inputs)

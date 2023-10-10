@@ -271,12 +271,7 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                     self.cache_misses_penalty.0 = self
                         .cache_misses_penalty
                         .0
-                        .checked_add(
-                            time_record
-                                .elapsed()
-                                .to_nanoseconds(self.cpu_frequency)
-                                .into(),
-                        )
+                        .checked_add(time_record.elapsed().to_cycles().into())
                         .expect("cache_misses_penalty overflow");
 
                     self.cache_misses.0 += 1;
@@ -315,12 +310,7 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                     self.cache_misses_penalty.1 = self
                         .cache_misses_penalty
                         .1
-                        .checked_add(
-                            time_record
-                                .elapsed()
-                                .to_nanoseconds(self.cpu_frequency)
-                                .into(),
-                        )
+                        .checked_add(time_record.elapsed().to_cycles().into())
                         .expect("cache_misses_penalty overflow");
 
                     self.cache_misses.1 += 1;
@@ -367,12 +357,7 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                                 self.cache_misses_penalty.2 = self
                                     .cache_misses_penalty
                                     .2
-                                    .checked_add(
-                                        time_record
-                                            .elapsed()
-                                            .to_nanoseconds(self.cpu_frequency)
-                                            .into(),
-                                    )
+                                    .checked_add(time_record.elapsed().to_cycles().into())
                                     .expect("cache_misses_penalty overflow");
 
                                 self.cache_misses.2 += 1;
@@ -403,12 +388,7 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                     self.cache_misses_penalty.2 = self
                         .cache_misses_penalty
                         .2
-                        .checked_add(
-                            time_record
-                                .elapsed()
-                                .to_nanoseconds(self.cpu_frequency)
-                                .into(),
-                        )
+                        .checked_add(time_record.elapsed().to_cycles().into())
                         .expect("cache_misses_penalty overflow");
 
                     self.cache_misses.2 += 1;
@@ -440,12 +420,7 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                     self.cache_misses_penalty.3 = self
                         .cache_misses_penalty
                         .3
-                        .checked_add(
-                            time_record
-                                .elapsed()
-                                .to_nanoseconds(self.cpu_frequency)
-                                .into(),
-                        )
+                        .checked_add(time_record.elapsed().to_cycles().into())
                         .expect("cache_misses_penalty overflow");
 
                     self.cache_misses.3 += 1;

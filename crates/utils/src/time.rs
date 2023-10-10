@@ -27,6 +27,15 @@ pub fn convert_to_nanoseconds(cycles: u64, frequency: f64) -> u64 {
     (cycles as f64 * ns_per_cycle) as u64
 }
 
+pub fn convert_u128_cycles_to_nanoseconds(cycles: u128, frequency: f64) -> u64 {
+    let max = u64::MAX as u128;
+    if cycles > max {
+        panic!("Cycles is overflow!");
+    }
+    let ns_per_cycle = 1_000_000_000 as f64 / frequency;
+    (cycles as f64 * ns_per_cycle) as u64
+}
+
 pub fn convert_ns_to_secs(nanoseconds: u128) -> f64 {
     let seconds = nanoseconds / 1_000_000_000;
     let subsec_nanos = (nanoseconds % 1_000_000_000) as f64 / 1_000_000_000.0;
