@@ -140,8 +140,8 @@ pub trait Inspector<DB: Database> {
     fn selfdestruct(&mut self, _contract: B160, _target: B160) {}
 
     /// Get record of instruction execution duration.
-    #[cfg(feature = "open_revm_metrics_record")]
-    fn open_revm_metrics_record(&self) -> Vec<(u8, u64)> {
+    #[cfg(feature = "enable_opcode_metrics")]
+    fn enable_opcode_metrics(&self) -> Vec<(u8, u64)> {
         vec![]
     }
 }

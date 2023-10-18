@@ -10,7 +10,7 @@ pub struct Log {
     pub data: Bytes,
 }
 
-#[cfg(feature = "open_revm_metrics_record")]
+#[cfg(feature = "enable_opcode_metrics")]
 impl Log {
     pub fn size(&self) -> usize {
         self.topics.len() * 32 + std::mem::size_of::<Log>()

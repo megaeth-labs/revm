@@ -85,4 +85,4 @@ arbitrary = [
     "dep:proptest",
     "dep:proptest-derive",
 ]
-open_revm_metrics_record = []
+enable_opcode_metrics = []

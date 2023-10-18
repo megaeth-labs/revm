@@ -59,12 +59,14 @@ std = ["revm-interpreter/std"]
 ethersdb = ["std", "tokio", "futures", "ethers-providers", "ethers-core"]
 serde = ["dep:serde", "dep:serde_json", "revm-interpreter/serde"]
 arbitrary = ["revm-interpreter/arbitrary"]
+
+enable_opcode_metrics = ["revm-interpreter/enable_opcode_metrics"]
+
+
 # deprecated feature
 web3db = []
 with-serde = []
 
-open_revm_instruction_log = ["revm-interpreter/open_revm_instruction_log"]
-open_revm_metrics_record = ["revm-interpreter/open_revm_metrics_record"]
 
 
 [[example]]

@@ -142,7 +142,7 @@ impl AccountInfo {
         }
     }
 
-    #[cfg(feature = "open_revm_metrics_record")]
+    #[cfg(feature = "enable_opcode_metrics")]
     pub fn code_size(&self) -> usize {
         self.code
             .as_ref()

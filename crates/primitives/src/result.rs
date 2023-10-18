@@ -1,7 +1,7 @@
 use crate::{Log, State, B160};
 use alloc::vec::Vec;
 use bytes::Bytes;
-#[cfg(feature = "open_revm_metrics_record")]
+#[cfg(feature = "enable_opcode_metrics")]
 use revm_utils::types::RevmMetricRecord;
 use ruint::aliases::U256;
 
@@ -15,7 +15,7 @@ pub struct ResultAndState {
     /// State that got updated
     pub state: State,
     /// Used for record duration of instruction.
-    #[cfg(feature = "open_revm_metrics_record")]
+    #[cfg(feature = "enable_opcode_metrics")]
     // pub opcode_time: Vec<(u8, u64)>,
     pub revm_metric_record: RevmMetricRecord,
 }
