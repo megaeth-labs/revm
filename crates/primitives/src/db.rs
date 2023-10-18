@@ -25,7 +25,7 @@ pub trait Database {
     fn block_hash(&mut self, number: U256) -> Result<B256, Self::Error>;
 
     // Get metrics
-    #[cfg(feature = "open_revm_metrics_record")]
+    #[cfg(feature = "enable_opcode_metrics")]
     fn get_metric(
         &mut self,
     ) -> (
@@ -40,7 +40,7 @@ pub trait Database {
         )
     }
     // Set cpu frequency.
-    #[cfg(feature = "open_revm_metrics_record")]
+    #[cfg(feature = "enable_opcode_metrics")]
     fn set_cpu_frequency(&mut self, _cpu_frequency: f64) {}
 }
 

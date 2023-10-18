@@ -8,24 +8,12 @@ use crate::{
     Host, InstructionResult, Transfer,
 };
 use core::cmp::min;
-#[cfg(feature = "open_revm_instruction_log")]
-use revm_utils::time::TimeRecorder;
-#[cfg(feature = "open_revm_instruction_log")]
-use tracing::*;
-
-#[cfg(feature = "open_revm_metrics_record")]
-use revm_utils::time::TimeRecorder;
 
 pub fn balance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     pop_address!(interpreter, address);
     let ret = host.balance(address);
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "balance");
 
         return;
     }
@@ -42,41 +30,27 @@ pub fn balance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
         }
     );
     push!(interpreter, balance);
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "balance");
 }
 
 pub fn selfbalance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     // EIP-1884: Repricing for trie-size-dependent opcodes
     check!(interpreter, SPEC::enabled(ISTANBUL));
     gas!(interpreter, gas::LOW);
     let ret = host.balance(interpreter.contract.address);
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "selfbalance");
 
         return;
     }
     let (balance, _) = ret.unwrap();
     push!(interpreter, balance);
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "selfbalance");
 }
 
 pub fn extcodesize<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     pop_address!(interpreter, address);
     let ret = host.code(address);
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "extcodesize");
 
         return;
     }
@@ -97,21 +71,14 @@ pub fn extcodesize<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
     }
 
     push!(interpreter, U256::from(code.len()));
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "extcodesize");
 }
 
 pub fn extcodehash<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     check!(interpreter, SPEC::enabled(CONSTANTINOPLE)); // EIP-1052: EXTCODEHASH opcode
     pop_address!(interpreter, address);
     let ret = host.code_hash(address);
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "extcodehash");
 
         return;
     }
@@ -131,22 +98,15 @@ pub fn extcodehash<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
         gas!(interpreter, 400);
     }
     push_b256!(interpreter, code_hash);
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "extcodehash");
 }
 
 pub fn extcodecopy<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     pop_address!(interpreter, address);
     pop!(interpreter, memory_offset, code_offset, len_u256);
 
     let ret = host.code(address);
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "extcodecopy");
 
         return;
     }
@@ -158,9 +118,6 @@ pub fn extcodecopy<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
         gas::extcodecopy_cost::<SPEC>(len as u64, is_cold)
     );
     if len == 0 {
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "extcodecopy");
-
         return;
     }
     let memory_offset = as_usize_or_fail!(
@@ -175,14 +132,9 @@ pub fn extcodecopy<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Hos
     interpreter
         .memory
         .set_data(memory_offset, code_offset, len, code.bytes());
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "extcodecopy");
 }
 
 pub fn blockhash(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     gas!(interpreter, gas::BLOCKHASH);
     pop_top!(interpreter, number);
 
@@ -193,57 +145,38 @@ pub fn blockhash(interpreter: &mut Interpreter, host: &mut dyn Host) {
             let ret = host.block_hash(*number);
             if ret.is_none() {
                 interpreter.instruction_result = InstructionResult::FatalExternalError;
-                #[cfg(feature = "open_revm_instruction_log")]
-                info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "blockhash");
 
                 return;
             }
             *number = U256::from_be_bytes(*ret.unwrap());
-            #[cfg(feature = "open_revm_instruction_log")]
-            info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "blockhash");
 
             return;
         }
     }
     *number = U256::ZERO;
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "blockhash");
 }
 
 pub fn sload<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     pop!(interpreter, index);
 
     let ret = host.sload(interpreter.contract.address, index);
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "sload");
 
         return;
     }
     let (value, is_cold) = ret.unwrap();
     gas!(interpreter, gas::sload_cost::<SPEC>(is_cold));
     push!(interpreter, value);
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "sload");
 }
 
 pub fn sstore<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     check_staticcall!(interpreter);
 
     pop!(interpreter, index, value);
     let ret = host.sstore(interpreter.contract.address, index, value);
     if ret.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
-
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "sstore");
 
         return;
     }
@@ -253,14 +186,9 @@ pub fn sstore<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
         gas::sstore_cost::<SPEC>(original, old, new, remaining_gas, is_cold)
     });
     refund!(interpreter, gas::sstore_refund::<SPEC>(original, old, new));
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "sstore");
 }
 
 pub fn log<const N: u8>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     check_staticcall!(interpreter);
 
     pop!(interpreter, offset, len);
@@ -277,9 +205,6 @@ pub fn log<const N: u8>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     if interpreter.stack.len() < n {
         interpreter.instruction_result = InstructionResult::StackUnderflow;
 
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "log");
-
         return;
     }
 
@@ -292,22 +217,15 @@ pub fn log<const N: u8>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     }
 
     host.log(interpreter.contract.address, topics, data);
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "log");
 }
 
 pub fn selfdestruct<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     check_staticcall!(interpreter);
     pop_address!(interpreter, target);
 
     let res = host.selfdestruct(interpreter.contract.address, target);
     if res.is_none() {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
-        #[cfg(feature = "open_revm_instruction_log")]
-        info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "selfdestruct");
 
         return;
     }
@@ -320,18 +238,12 @@ pub fn selfdestruct<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Ho
     gas!(interpreter, gas::selfdestruct_cost::<SPEC>(res));
 
     interpreter.instruction_result = InstructionResult::SelfDestruct;
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "selfdestruct");
 }
 
-#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
     interpreter: &mut Interpreter,
     host: &mut dyn Host,
 ) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     check_staticcall!(interpreter);
     if IS_CREATE2 {
         // EIP-1014: Skinny CREATE2
@@ -362,8 +274,6 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
                 .unwrap_or(MAX_INITCODE_SIZE);
             if len > max_initcode_size {
                 interpreter.instruction_result = InstructionResult::CreateInitcodeSizeLimit;
-                #[cfg(feature = "open_revm_instruction_log")]
-                info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "create");
 
                 return;
             }
@@ -397,6 +307,8 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
         value,
         init_code: code,
         gas_limit,
+        #[cfg(feature = "enable_opcode_metrics")]
+        enable_metric_record: false,
     };
 
     let (return_reason, address, gas, return_data) = host.create(&mut create_input);
@@ -428,158 +340,24 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
             push_b256!(interpreter, B256::zero());
         }
     }
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "create");
 }
 
-#[cfg(feature = "open_revm_metrics_record")]
-pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
-    interpreter: &mut Interpreter,
-    host: &mut dyn Host,
-    create_cycles: &mut u64,
-) {
-    check_staticcall!(interpreter);
-    if IS_CREATE2 {
-        // EIP-1014: Skinny CREATE2
-        check!(interpreter, SPEC::enabled(PETERSBURG));
-    }
-
-    interpreter.return_data_buffer = Bytes::new();
-
-    pop!(interpreter, value, code_offset, len);
-    let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-
-    let code = if len == 0 {
-        Bytes::new()
-    } else {
-        let code_offset = as_usize_or_fail!(
-            interpreter,
-            code_offset,
-            InstructionResult::InvalidOperandOOG
-        );
-        // EIP-3860: Limit and meter initcode
-        if SPEC::enabled(SHANGHAI) {
-            // Limit is set as double of max contract bytecode size
-            let max_initcode_size = host
-                .env()
-                .cfg
-                .limit_contract_code_size
-                .map(|limit| limit.saturating_mul(2))
-                .unwrap_or(MAX_INITCODE_SIZE);
-            if len > max_initcode_size {
-                interpreter.instruction_result = InstructionResult::CreateInitcodeSizeLimit;
-                #[cfg(feature = "open_revm_instruction_log")]
-                info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "create");
-
-                return;
-            }
-            gas!(interpreter, gas::initcode_cost(len as u64));
-        }
-        memory_resize!(interpreter, code_offset, len);
-        Bytes::copy_from_slice(interpreter.memory.get_slice(code_offset, len))
-    };
-
-    let scheme = if IS_CREATE2 {
-        pop!(interpreter, salt);
-        gas_or_fail!(interpreter, gas::create2_cost(len));
-        CreateScheme::Create2 { salt }
-    } else {
-        gas!(interpreter, gas::CREATE);
-        CreateScheme::Create
-    };
-
-    let mut gas_limit = interpreter.gas().remaining();
-
-    // EIP-150: Gas cost changes for IO-heavy operations
-    if SPEC::enabled(TANGERINE) {
-        // take remaining gas and deduce l64 part of it.
-        gas_limit -= gas_limit / 64
-    }
-    gas!(interpreter, gas_limit);
-
-    let mut create_input = CreateInputs {
-        caller: interpreter.contract.address,
-        scheme,
-        value,
-        init_code: code,
-        gas_limit,
-    };
-
-    let mut time_record = TimeRecorder::now();
-    let (return_reason, address, gas, return_data) = host.create(&mut create_input);
-    *create_cycles = time_record.elapsed().to_cycles();
-
-    interpreter.return_data_buffer = match return_reason {
-        // Save data to return data buffer if the create reverted
-        return_revert!() => return_data,
-        // Otherwise clear it
-        _ => Bytes::new(),
-    };
-
-    match return_reason {
-        return_ok!() => {
-            push_b256!(interpreter, address.unwrap_or_default().into());
-            if crate::USE_GAS {
-                interpreter.gas.erase_cost(gas.remaining());
-                interpreter.gas.record_refund(gas.refunded());
-            }
-        }
-        return_revert!() => {
-            push_b256!(interpreter, B256::zero());
-            if crate::USE_GAS {
-                interpreter.gas.erase_cost(gas.remaining());
-            }
-        }
-        InstructionResult::FatalExternalError => {
-            interpreter.instruction_result = InstructionResult::FatalExternalError;
-        }
-        _ => {
-            push_b256!(interpreter, B256::zero());
-        }
-    }
-}
-
-#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     call_inner::<SPEC>(interpreter, CallScheme::Call, host);
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "call");
 }
 
-#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn call_code<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     call_inner::<SPEC>(interpreter, CallScheme::CallCode, host);
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "call_code");
 }
 
-#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn delegate_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     call_inner::<SPEC>(interpreter, CallScheme::DelegateCall, host);
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "delegate_call");
 }
 
-#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn static_call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
-    #[cfg(feature = "open_revm_instruction_log")]
-    let mut time_record = TimeRecorder::now();
-
     call_inner::<SPEC>(interpreter, CallScheme::StaticCall, host);
-    #[cfg(feature = "open_revm_instruction_log")]
-    info!(target: "revm::interpreter", took = ?time_record.elapsed().to_cycles(), "static_call");
 }
 
-#[cfg(not(feature = "open_revm_metrics_record"))]
 pub fn call_inner<SPEC: Spec>(
     interpreter: &mut Interpreter,
     scheme: CallScheme,
@@ -726,230 +504,12 @@ pub fn call_inner<SPEC: Spec>(
         gas_limit,
         context,
         is_static,
+        #[cfg(feature = "enable_opcode_metrics")]
+        enable_metric_record: false,
     };
 
     // Call host to interuct with target contract
     let (reason, gas, return_data) = host.call(&mut call_input);
-
-    interpreter.return_data_buffer = return_data;
-
-    let target_len = min(out_len, interpreter.return_data_buffer.len());
-
-    match reason {
-        return_ok!() => {
-            // return unspend gas.
-            if crate::USE_GAS {
-                interpreter.gas.erase_cost(gas.remaining());
-                interpreter.gas.record_refund(gas.refunded());
-            }
-            interpreter
-                .memory
-                .set(out_offset, &interpreter.return_data_buffer[..target_len]);
-            push!(interpreter, U256::from(1));
-        }
-        return_revert!() => {
-            if crate::USE_GAS {
-                interpreter.gas.erase_cost(gas.remaining());
-            }
-            interpreter
-                .memory
-                .set(out_offset, &interpreter.return_data_buffer[..target_len]);
-            push!(interpreter, U256::ZERO);
-        }
-        InstructionResult::FatalExternalError => {
-            interpreter.instruction_result = InstructionResult::FatalExternalError;
-        }
-        _ => {
-            push!(interpreter, U256::ZERO);
-        }
-    }
-}
-
-#[cfg(feature = "open_revm_metrics_record")]
-pub fn call<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host, call_cycles: &mut u64) {
-    call_inner::<SPEC>(interpreter, CallScheme::Call, host, call_cycles);
-}
-
-#[cfg(feature = "open_revm_metrics_record")]
-pub fn call_code<SPEC: Spec>(
-    interpreter: &mut Interpreter,
-    host: &mut dyn Host,
-    call_cycles: &mut u64,
-) {
-    call_inner::<SPEC>(interpreter, CallScheme::CallCode, host, call_cycles);
-}
-
-#[cfg(feature = "open_revm_metrics_record")]
-pub fn delegate_call<SPEC: Spec>(
-    interpreter: &mut Interpreter,
-    host: &mut dyn Host,
-    call_cycles: &mut u64,
-) {
-    call_inner::<SPEC>(interpreter, CallScheme::DelegateCall, host, call_cycles);
-}
-
-#[cfg(feature = "open_revm_metrics_record")]
-pub fn static_call<SPEC: Spec>(
-    interpreter: &mut Interpreter,
-    host: &mut dyn Host,
-    call_cycles: &mut u64,
-) {
-    call_inner::<SPEC>(interpreter, CallScheme::StaticCall, host, call_cycles);
-}
-#[cfg(feature = "open_revm_metrics_record")]
-pub fn call_inner<SPEC: Spec>(
-    interpreter: &mut Interpreter,
-    scheme: CallScheme,
-    host: &mut dyn Host,
-    call_cycles: &mut u64,
-) {
-    match scheme {
-        CallScheme::DelegateCall => check!(interpreter, SPEC::enabled(HOMESTEAD)), // EIP-7: DELEGATECALL
-        CallScheme::StaticCall => check!(interpreter, SPEC::enabled(BYZANTIUM)), // EIP-214: New opcode STATICCALL
-        _ => (),
-    }
-    interpreter.return_data_buffer = Bytes::new();
-
-    pop!(interpreter, local_gas_limit);
-    pop_address!(interpreter, to);
-    let local_gas_limit = u64::try_from(local_gas_limit).unwrap_or(u64::MAX);
-
-    let value = match scheme {
-        CallScheme::CallCode => {
-            pop!(interpreter, value);
-            value
-        }
-        CallScheme::Call => {
-            pop!(interpreter, value);
-            if interpreter.is_static && value != U256::ZERO {
-                interpreter.instruction_result = InstructionResult::CallNotAllowedInsideStatic;
-                return;
-            }
-            value
-        }
-        CallScheme::DelegateCall | CallScheme::StaticCall => U256::ZERO,
-    };
-
-    pop!(interpreter, in_offset, in_len, out_offset, out_len);
-
-    let in_len = as_usize_or_fail!(interpreter, in_len, InstructionResult::InvalidOperandOOG);
-    let input = if in_len != 0 {
-        let in_offset =
-            as_usize_or_fail!(interpreter, in_offset, InstructionResult::InvalidOperandOOG);
-        memory_resize!(interpreter, in_offset, in_len);
-        Bytes::copy_from_slice(interpreter.memory.get_slice(in_offset, in_len))
-    } else {
-        Bytes::new()
-    };
-
-    let out_len = as_usize_or_fail!(interpreter, out_len, InstructionResult::InvalidOperandOOG);
-    let out_offset = if out_len != 0 {
-        let out_offset = as_usize_or_fail!(
-            interpreter,
-            out_offset,
-            InstructionResult::InvalidOperandOOG
-        );
-        memory_resize!(interpreter, out_offset, out_len);
-        out_offset
-    } else {
-        usize::MAX //unrealistic value so we are sure it is not used
-    };
-
-    let context = match scheme {
-        CallScheme::Call | CallScheme::StaticCall => CallContext {
-            address: to,
-            caller: interpreter.contract.address,
-            code_address: to,
-            apparent_value: value,
-            scheme,
-        },
-        CallScheme::CallCode => CallContext {
-            address: interpreter.contract.address,
-            caller: interpreter.contract.address,
-            code_address: to,
-            apparent_value: value,
-            scheme,
-        },
-        CallScheme::DelegateCall => CallContext {
-            address: interpreter.contract.address,
-            caller: interpreter.contract.caller,
-            code_address: to,
-            apparent_value: interpreter.contract.value,
-            scheme,
-        },
-    };
-
-    let transfer = if scheme == CallScheme::Call {
-        Transfer {
-            source: interpreter.contract.address,
-            target: to,
-            value,
-        }
-    } else if scheme == CallScheme::CallCode {
-        Transfer {
-            source: interpreter.contract.address,
-            target: interpreter.contract.address,
-            value,
-        }
-    } else {
-        //this is dummy send for StaticCall and DelegateCall, it should do nothing and dont touch anything.
-        Transfer {
-            source: interpreter.contract.address,
-            target: interpreter.contract.address,
-            value: U256::ZERO,
-        }
-    };
-
-    // load account and calculate gas cost.
-    let res = host.load_account(to);
-    if res.is_none() {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
-        return;
-    }
-    let (is_cold, exist) = res.unwrap();
-    let is_new = !exist;
-
-    gas!(
-        interpreter,
-        gas::call_cost::<SPEC>(
-            value,
-            is_new,
-            is_cold,
-            matches!(scheme, CallScheme::Call | CallScheme::CallCode),
-            matches!(scheme, CallScheme::Call | CallScheme::StaticCall),
-        )
-    );
-
-    // take l64 part of gas_limit
-    let mut gas_limit = if SPEC::enabled(TANGERINE) {
-        //EIP-150: Gas cost changes for IO-heavy operations
-        let gas = interpreter.gas().remaining();
-        min(gas - gas / 64, local_gas_limit)
-    } else {
-        local_gas_limit
-    };
-
-    gas!(interpreter, gas_limit);
-
-    // add call stipend if there is value to be transferred.
-    if matches!(scheme, CallScheme::Call | CallScheme::CallCode) && transfer.value != U256::ZERO {
-        gas_limit = gas_limit.saturating_add(gas::CALL_STIPEND);
-    }
-    let is_static = matches!(scheme, CallScheme::StaticCall) || interpreter.is_static;
-
-    let mut call_input = CallInputs {
-        contract: to,
-        transfer,
-        input,
-        gas_limit,
-        context,
-        is_static,
-    };
-
-    // Call host to interuct with target contract
-    let mut time_record = TimeRecorder::now();
-    let (reason, gas, return_data) = host.call(&mut call_input);
-    *call_cycles = time_record.elapsed().to_cycles();
 
     interpreter.return_data_buffer = return_data;
 

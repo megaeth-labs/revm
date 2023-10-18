@@ -28,6 +28,8 @@ proptest-derive = { version = "0.3", optional = true }
 revm-utils = {path = "../utils"}
 tracing = "0.1.0"
 
+minstant = "0.1.3"
+
 [dev-dependencies]
 arbitrary = { version = "1.3", features = ["derive"] }
 proptest = { version = "1.1" }
@@ -62,5 +64,4 @@ arbitrary = [
     "dep:proptest-derive",
     "revm-primitives/arbitrary",
 ]
-open_revm_instruction_log = []
-open_revm_metrics_record = ["revm-primitives/open_revm_metrics_record"]
+enable_opcode_metrics = ["revm-primitives/enable_opcode_metrics"]

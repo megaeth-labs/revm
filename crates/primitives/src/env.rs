@@ -8,7 +8,7 @@ pub struct Env {
     pub cfg: CfgEnv,
     pub block: BlockEnv,
     pub tx: TxEnv,
-    // #[cfg(feature = "open_revm_metrics_record")]
+    // #[cfg(feature = "enable_opcode_metrics")]
     pub cpu_frequency: f64,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]

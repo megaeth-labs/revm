@@ -14,10 +14,6 @@ use crate::{
     Gas, Host,
 };
 use core::ops::Range;
-#[cfg(feature = "open_revm_metrics_record")]
-use revm_utils::time::TimeRecorder;
-#[cfg(feature = "open_revm_metrics_record")]
-use std::collections::{hash_map::Entry, HashMap};
 
 pub const STACK_LIMIT: u64 = 1024;
 pub const CALL_STACK_LIMIT: u64 = 1024;
@@ -50,14 +46,16 @@ pub struct Interpreter {
     /// Memory limit. See [`crate::CfgEnv`].
     #[cfg(feature = "memory_limit")]
     pub memory_limit: u64,
-    /// Used for record duration of instruction.
-    ///     Note:   This opcode_code means: (opcode_time, host_create, host_call),
-    ///             we need to refactor here in the future.
-    #[cfg(feature = "open_revm_metrics_record")]
-    pub opcode_time: (HashMap<u8, (u64, u128)>, u128, u128),
-    /// CPU frequency.
-    #[cfg(feature = "open_revm_metrics_record")]
-    pub cpu_frequency: f64,
+    /// Used for record duration of instruction. This opcode_code means: (counter, time),
+    #[cfg(feature = "enable_opcode_metrics")]
+    // pub opcode_record: [(u64, std::time::Duration); 256],
+    pub opcode_record: revm_utils::types::OpcodeRecord,
+    /// Used for record time.
+    #[cfg(feature = "enable_opcode_metrics")]
+    pre_time: Option<minstant::Instant>,
+    /// Enable metric record.
+    #[cfg(feature = "enable_opcode_metrics")]
+    enable_metric_record: bool,
 }
 
 impl Interpreter {
@@ -67,6 +65,7 @@ impl Interpreter {
     }
 
     /// Create new interpreter
+    #[cfg(not(feature = "enable_opcode_metrics"))]
     pub fn new(contract: Contract, gas_limit: u64, is_static: bool) -> Self {
         #[cfg(not(feature = "memory_limit"))]
         {
@@ -80,10 +79,6 @@ impl Interpreter {
                 instruction_result: InstructionResult::Continue,
                 is_static,
                 gas: Gas::new(gas_limit),
-                #[cfg(feature = "open_revm_metrics_record")]
-                opcode_time: (HashMap::new(), 0, 0),
-                #[cfg(feature = "open_revm_metrics_record")]
-                cpu_frequency: 0f64,
             }
         }
 
@@ -93,6 +88,39 @@ impl Interpreter {
         }
     }
 
+    /// Create new interpreter
+    #[cfg(feature = "enable_opcode_metrics")]
+    pub fn new(
+        contract: Contract,
+        gas_limit: u64,
+        is_static: bool,
+        enable_metric_record: bool,
+    ) -> Self {
+        #[cfg(not(feature = "memory_limit"))]
+        {
+            Self {
+                instruction_pointer: contract.bytecode.as_ptr(),
+                return_range: Range::default(),
+                memory: Memory::new(),
+                stack: Stack::new(),
+                return_data_buffer: Bytes::new(),
+                contract,
+                instruction_result: InstructionResult::Continue,
+                is_static,
+                gas: Gas::new(gas_limit),
+                opcode_record: revm_utils::types::OpcodeRecord::default(),
+                pre_time: None,
+                enable_metric_record,
+            }
+        }
+
+        #[cfg(feature = "memory_limit")]
+        {
+            Self::new_with_memory_limit(contract, gas_limit, is_static, u64::MAX)
+        }
+    }
+
+    #[cfg(not(feature = "enable_opcode_metrics"))]
     #[cfg(feature = "memory_limit")]
     pub fn new_with_memory_limit(
         contract: Contract,
@@ -114,9 +142,29 @@ impl Interpreter {
         }
     }
 
-    #[cfg(feature = "open_revm_metrics_record")]
-    pub fn set_cpu_frequency(&mut self, cpu_frequency: f64) {
-        self.cpu_frequency = cpu_frequency;
+    #[cfg(all(feature = "memory_limit", feature = "enable_opcode_metrics"))]
+    pub fn new_with_memory_limit(
+        contract: Contract,
+        gas_limit: u64,
+        is_static: bool,
+        memory_limit: u64,
+        enable_metric_record: bool,
+    ) -> Self {
+        Self {
+            instruction_pointer: contract.bytecode.as_ptr(),
+            return_range: Range::default(),
+            memory: Memory::new(),
+            stack: Stack::new(),
+            return_data_buffer: Bytes::new(),
+            contract,
+            instruction_result: InstructionResult::Continue,
+            is_static,
+            gas: Gas::new(gas_limit),
+            memory_limit,
+            opcode_record: revm_utils::types::OpcodeRecord::default(),
+            pre_time: None,
+            enable_metric_record,
+        }
     }
 
     pub fn contract(&self) -> &Contract {
@@ -156,53 +204,36 @@ impl Interpreter {
         // it will do noop and just stop execution of this contract
         self.instruction_pointer = unsafe { self.instruction_pointer.offset(1) };
 
-        #[cfg(feature = "open_revm_metrics_record")]
-        let mut time_record = TimeRecorder::now();
-
-        #[cfg(not(feature = "open_revm_metrics_record"))]
         eval::<H, SPEC>(opcode, self, host);
 
-        #[cfg(feature = "open_revm_metrics_record")]
-        {
-            let mut create_cycles: u64 = 0;
-            let mut call_cycles: u64 = 0;
-            eval::<H, SPEC>(opcode, self, host, &mut create_cycles, &mut call_cycles);
-            let duration = time_record.elapsed().to_cycles();
-
-            match self.opcode_time.0.entry(opcode) {
-                Entry::Vacant(entry) => {
-                    entry.insert((1, duration.into()));
-                }
-                Entry::Occupied(mut entry) => {
-                    let existing_value = entry.get_mut();
-                    existing_value.0 += 1;
-                    existing_value.1 = existing_value
-                        .1
-                        .checked_add(duration.into())
-                        .expect("overflow");
-                }
-            }
-
-            if create_cycles != 0 {
-                self.opcode_time.1 = self
-                    .opcode_time
-                    .1
-                    .checked_add(create_cycles.into())
-                    .expect("overflow");
-            }
-
-            if call_cycles != 0 {
-                self.opcode_time.2 = self
-                    .opcode_time
-                    .2
-                    .checked_add(call_cycles.into())
-                    .expect("overflow");
-            }
+        #[cfg(feature = "enable_opcode_metrics")]
+        if self.enable_metric_record {
+            let now = minstant::Instant::now();
+            self.opcode_record.opcode_record[opcode as usize].0 = self.opcode_record.opcode_record
+                [opcode as usize]
+                .0
+                .checked_add(1)
+                .expect("overflow");
+            let duration = now
+                .checked_duration_since(self.pre_time.expect("pre time is empty"))
+                .expect("overflow");
+            self.opcode_record.opcode_record[opcode as usize].1 = self.opcode_record.opcode_record
+                [opcode as usize]
+                .1
+                .checked_add(duration)
+                .expect("overflow");
+            self.opcode_record.is_updated = true;
+            self.pre_time = Some(now);
         }
     }
 
     /// loop steps until we are finished with execution
     pub fn run<H: Host, SPEC: Spec>(&mut self, host: &mut H) -> InstructionResult {
+        #[cfg(feature = "enable_opcode_metrics")]
+        {
+            let now = minstant::Instant::now();
+            self.pre_time = Some(now);
+        }
         while self.instruction_result == InstructionResult::Continue {
             self.step::<H, SPEC>(host)
         }
