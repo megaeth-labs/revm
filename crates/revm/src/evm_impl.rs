@@ -354,8 +354,6 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
             JournaledState::new_legacy(precompiles.len())
         };
 
-        #[cfg(feature = "enable_opcode_metrics")]
-        db.set_cpu_frequency(env.cpu_frequency);
         Self {
             data: EVMData {
                 env,
