@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 pub type RevmMetricRecord = OpcodeRecord;
@@ -6,14 +8,14 @@ pub type RevmMetricRecord = OpcodeRecord;
 pub struct OpcodeRecord {
     /// The abscissa is opcode type, the first element of a tuple is opcode counter, and the second element is total execute time.
     #[serde(with = "serde_arrays")]
-    pub opcode_record: [(u64, std::time::Duration); 256],
+    pub opcode_record: [(u64, Duration); 256],
     pub is_updated: bool,
 }
 
 impl Default for OpcodeRecord {
     fn default() -> Self {
         Self {
-            opcode_record: [(0, std::time::Duration::default()); 256],
+            opcode_record: [(0, Duration::default()); 256],
             is_updated: false,
         }
     }
@@ -46,4 +48,35 @@ impl OpcodeRecord {
     pub fn not_empty(&self) -> bool {
         self.is_updated
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
+pub struct CacheHits {
+    pub hits_in_block_hash: u64,
+    pub hits_in_basic: u64,
+    pub hits_in_storage: u64,
+    pub hits_in_code_by_hash: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
+pub struct CacheMisses {
+    pub misses_in_block_hash: u64,
+    pub misses_in_basic: u64,
+    pub misses_in_storage: u64,
+    pub misses_in_code_by_hash: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
+pub struct CacheMissesPenalty {
+    pub penalty_in_block_hash: Duration,
+    pub penalty_in_basic: Duration,
+    pub penalty_in_storage: Duration,
+    pub penalty_in_code_by_hash: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
+pub struct CacheDbRecord {
+    pub hits: CacheHits,
+    pub misses: CacheMisses,
+    pub penalty: CacheMissesPenalty,
 }

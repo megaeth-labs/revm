@@ -4,11 +4,16 @@ use crate::primitives::{
     KECCAK_EMPTY, U256,
 };
 use crate::Database;
+#[cfg(not(feature = "enable_cache_record"))]
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
-#[cfg(feature = "enable_opcode_metrics")]
-use revm_utils::time::TimeRecorder;
+#[cfg(feature = "enable_cache_record")]
+use myalloc::{TrackingAllocator, Vec};
+#[cfg(feature = "enable_cache_record")]
+use revm_interpreter::primitives::hash_map::DefaultHashBuilder;
+#[cfg(feature = "enable_cache_record")]
+pub use revm_utils::types::CacheDbRecord;
 
 pub type InMemoryDB = CacheDB<EmptyDB>;
 
@@ -19,6 +24,7 @@ impl Default for InMemoryDB {
 }
 
 /// Memory backend, storing all state values in a `Map` in memory.
+#[cfg(not(feature = "enable_cache_record"))]
 #[derive(Debug, Clone)]
 pub struct CacheDB<ExtDB: DatabaseRef> {
     /// Account info where None means it is not existing. Not existing state is needed for Pre TANGERINE forks.
@@ -28,14 +34,19 @@ pub struct CacheDB<ExtDB: DatabaseRef> {
     pub logs: Vec<Log>,
     pub block_hashes: HashMap<U256, B256>,
     pub db: ExtDB,
-    #[cfg(feature = "enable_opcode_metrics")]
-    pub cache_hits: (u64, u64, u64, u64),
-    #[cfg(feature = "enable_opcode_metrics")]
-    pub cache_misses: (u64, u64, u64, u64),
-    #[cfg(feature = "enable_opcode_metrics")]
-    pub cache_misses_penalty: (u128, u128, u128, u128),
-    #[cfg(feature = "enable_opcode_metrics")]
-    pub cpu_frequency: f64,
+}
+
+#[cfg(feature = "enable_cache_record")]
+#[derive(Debug, Clone)]
+pub struct CacheDB<ExtDB: DatabaseRef> {
+    /// Account info where None means it is not existing. Not existing state is needed for Pre TANGERINE forks.
+    /// `code` is always `None`, and bytecode can be found in `contracts`.
+    pub accounts: HashMap<B160, DbAccount, DefaultHashBuilder, TrackingAllocator>,
+    pub contracts: HashMap<B256, Bytecode, DefaultHashBuilder, TrackingAllocator>,
+    pub logs: Vec<Log, TrackingAllocator>,
+    pub block_hashes: HashMap<U256, B256, DefaultHashBuilder, TrackingAllocator>,
+    pub db: ExtDB,
+    pub cache_record: CacheDbRecord,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -60,10 +71,6 @@ impl DbAccount {
         } else {
             Some(self.info.clone())
         }
-    }
-    #[cfg(feature = "enable_opcode_metrics")]
-    pub fn size(&self) -> usize {
-        std::mem::size_of::<DbAccount>() + self.storage.len() * 32 + self.info.code_size()
     }
 }
 
@@ -114,6 +121,7 @@ impl AccountState {
 }
 
 impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
+    #[cfg(not(feature = "enable_cache_record"))]
     pub fn new(db: ExtDB) -> Self {
         let mut contracts = HashMap::new();
         contracts.insert(KECCAK_EMPTY, Bytecode::new());
@@ -124,14 +132,26 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
             logs: Vec::default(),
             block_hashes: HashMap::new(),
             db,
-            #[cfg(feature = "enable_opcode_metrics")]
-            cache_hits: (0u64, 0u64, 0u64, 0u64),
-            #[cfg(feature = "enable_opcode_metrics")]
-            cache_misses: (0u64, 0u64, 0u64, 0u64),
-            #[cfg(feature = "enable_opcode_metrics")]
-            cache_misses_penalty: (0u128, 0u128, 0u128, 0u128),
-            #[cfg(feature = "enable_opcode_metrics")]
-            cpu_frequency: 0f64,
+        }
+    }
+
+    #[cfg(feature = "enable_cache_record")]
+    pub fn new(db: ExtDB) -> Self {
+        let mut contracts = HashMap::new_in(TrackingAllocator);
+        contracts.insert(KECCAK_EMPTY, Bytecode::new());
+        contracts.insert(B256::zero(), Bytecode::new());
+
+        let accounts = HashMap::new_in(TrackingAllocator);
+        let logs = Vec::new_in(TrackingAllocator);
+        let block_hashes = HashMap::new_in(TrackingAllocator);
+        myalloc::reset();
+        Self {
+            accounts,
+            contracts,
+            logs,
+            block_hashes,
+            db,
+            cache_record: CacheDbRecord::default(),
         }
     }
 
@@ -194,21 +214,16 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
         Ok(())
     }
 
-    #[cfg(feature = "enable_opcode_metrics")]
+    #[cfg(feature = "enable_cache_record")]
     pub fn size(&self) -> usize {
-        let accounts_size = self
-            .accounts
-            .iter()
-            .map(|(_, account)| 20 + account.size())
-            .sum::<usize>();
-        let contracts_size = self
-            .contracts
-            .iter()
-            .map(|(_, bytecode)| 32 + bytecode.size())
-            .sum::<usize>();
-        let logs_size = self.logs.iter().map(|log| log.size()).sum::<usize>();
-        let block_hashes_size = self.block_hashes.len() * 64;
-        accounts_size + contracts_size + logs_size + block_hashes_size
+        let ret = myalloc::stats();
+
+        ret.alloc as usize
+    }
+
+    #[cfg(feature = "enable_cache_record")]
+    pub fn get_metric(&self) -> CacheDbRecord {
+        self.cache_record
     }
 }
 
@@ -252,29 +267,32 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
     fn block_hash(&mut self, number: U256) -> Result<B256, Self::Error> {
         match self.block_hashes.entry(number) {
             Entry::Occupied(entry) => {
-                #[cfg(feature = "enable_opcode_metrics")]
+                #[cfg(feature = "enable_cache_record")]
                 {
-                    self.cache_hits.0 += 1;
+                    self.cache_record.hits.hits_in_block_hash += 1;
                 }
                 Ok(*entry.get())
             }
             Entry::Vacant(entry) => {
-                #[cfg(feature = "enable_opcode_metrics")]
-                let mut time_record = TimeRecorder::now();
+                #[cfg(feature = "enable_cache_record")]
+                let time_record = minstant::Instant::now();
 
                 // if storage was cleared, we dont need to ping db.
                 let hash = self.db.block_hash(number)?;
                 entry.insert(hash);
 
-                #[cfg(feature = "enable_opcode_metrics")]
+                #[cfg(feature = "enable_cache_record")]
                 {
-                    self.cache_misses_penalty.0 = self
-                        .cache_misses_penalty
-                        .0
-                        .checked_add(time_record.elapsed().to_cycles().into())
+                    let duration = time_record.elapsed();
+
+                    self.cache_record.penalty.penalty_in_block_hash = self
+                        .cache_record
+                        .penalty
+                        .penalty_in_block_hash
+                        .checked_add(duration)
                         .expect("cache_misses_penalty overflow");
 
-                    self.cache_misses.0 += 1;
+                    self.cache_record.misses.misses_in_block_hash += 1;
                 }
 
                 Ok(hash)
@@ -285,15 +303,15 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
     fn basic(&mut self, address: B160) -> Result<Option<AccountInfo>, Self::Error> {
         let basic = match self.accounts.entry(address) {
             Entry::Occupied(entry) => {
-                #[cfg(feature = "enable_opcode_metrics")]
+                #[cfg(feature = "enable_cache_record")]
                 {
-                    self.cache_hits.1 += 1;
+                    self.cache_record.hits.hits_in_basic += 1;
                 }
                 entry.into_mut()
             }
             Entry::Vacant(entry) => {
-                #[cfg(feature = "enable_opcode_metrics")]
-                let mut time_record = TimeRecorder::now();
+                #[cfg(feature = "enable_cache_record")]
+                let time_record = minstant::Instant::now();
 
                 let ret = entry.insert(
                     self.db
@@ -305,15 +323,17 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                         .unwrap_or_else(DbAccount::new_not_existing),
                 );
 
-                #[cfg(feature = "enable_opcode_metrics")]
+                #[cfg(feature = "enable_cache_record")]
                 {
-                    self.cache_misses_penalty.1 = self
-                        .cache_misses_penalty
-                        .1
-                        .checked_add(time_record.elapsed().to_cycles().into())
+                    let duration = time_record.elapsed();
+                    self.cache_record.penalty.penalty_in_basic = self
+                        .cache_record
+                        .penalty
+                        .penalty_in_basic
+                        .checked_add(duration)
                         .expect("cache_misses_penalty overflow");
 
-                    self.cache_misses.1 += 1;
+                    self.cache_record.misses.misses_in_basic += 1;
                 }
                 ret
             }
@@ -330,9 +350,9 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                 let acc_entry = acc_entry.get_mut();
                 match acc_entry.storage.entry(index) {
                     Entry::Occupied(entry) => {
-                        #[cfg(feature = "enable_opcode_metrics")]
+                        #[cfg(feature = "enable_cache_record")]
                         {
-                            self.cache_hits.2 += 1;
+                            self.cache_record.hits.hits_in_storage += 1;
                         }
                         Ok(*entry.get())
                     }
@@ -341,26 +361,28 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                             acc_entry.account_state,
                             AccountState::StorageCleared | AccountState::NotExisting
                         ) {
-                            #[cfg(feature = "enable_opcode_metrics")]
+                            #[cfg(feature = "enable_cache_record")]
                             {
-                                self.cache_hits.2 += 1;
+                                self.cache_record.hits.hits_in_storage += 1;
                             }
                             Ok(U256::ZERO)
                         } else {
-                            #[cfg(feature = "enable_opcode_metrics")]
-                            let mut time_record = TimeRecorder::now();
+                            #[cfg(feature = "enable_cache_record")]
+                            let time_record = minstant::Instant::now();
 
                             let slot = self.db.storage(address, index)?;
                             entry.insert(slot);
-                            #[cfg(feature = "enable_opcode_metrics")]
+                            #[cfg(feature = "enable_cache_record")]
                             {
-                                self.cache_misses_penalty.2 = self
-                                    .cache_misses_penalty
-                                    .2
-                                    .checked_add(time_record.elapsed().to_cycles().into())
+                                let duration = time_record.elapsed();
+                                self.cache_record.penalty.penalty_in_storage = self
+                                    .cache_record
+                                    .penalty
+                                    .penalty_in_storage
+                                    .checked_add(duration)
                                     .expect("cache_misses_penalty overflow");
 
-                                self.cache_misses.2 += 1;
+                                self.cache_record.misses.misses_in_storage += 1;
                             }
 
                             Ok(slot)
@@ -369,8 +391,8 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                 }
             }
             Entry::Vacant(acc_entry) => {
-                #[cfg(feature = "enable_opcode_metrics")]
-                let mut time_record = TimeRecorder::now();
+                #[cfg(feature = "enable_cache_record")]
+                let time_record = minstant::Instant::now();
 
                 // acc needs to be loaded for us to access slots.
                 let info = self.db.basic(address)?;
@@ -383,15 +405,17 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                     (info.into(), U256::ZERO)
                 };
                 acc_entry.insert(account);
-                #[cfg(feature = "enable_opcode_metrics")]
+                #[cfg(feature = "enable_cache_record")]
                 {
-                    self.cache_misses_penalty.2 = self
-                        .cache_misses_penalty
-                        .2
-                        .checked_add(time_record.elapsed().to_cycles().into())
+                    let duration = time_record.elapsed();
+                    self.cache_record.penalty.penalty_in_storage = self
+                        .cache_record
+                        .penalty
+                        .penalty_in_storage
+                        .checked_add(duration)
                         .expect("cache_misses_penalty overflow");
 
-                    self.cache_misses.2 += 1;
+                    self.cache_record.misses.misses_in_storage += 1;
                 }
 
                 Ok(value)
@@ -402,53 +426,35 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
         match self.contracts.entry(code_hash) {
             Entry::Occupied(entry) => {
-                #[cfg(feature = "enable_opcode_metrics")]
+                #[cfg(feature = "enable_cache_record")]
                 {
-                    self.cache_hits.3 += 1;
+                    self.cache_record.hits.hits_in_code_by_hash += 1;
                 }
 
                 Ok(entry.get().clone())
             }
             Entry::Vacant(entry) => {
-                #[cfg(feature = "enable_opcode_metrics")]
-                let mut time_record = TimeRecorder::now();
+                #[cfg(feature = "enable_cache_record")]
+                let time_record = minstant::Instant::now();
 
                 // if you return code bytes when basic fn is called this function is not needed.
                 let ret = entry.insert(self.db.code_by_hash(code_hash)?).clone();
-                #[cfg(feature = "enable_opcode_metrics")]
+                #[cfg(feature = "enable_cache_record")]
                 {
-                    self.cache_misses_penalty.3 = self
-                        .cache_misses_penalty
-                        .3
-                        .checked_add(time_record.elapsed().to_cycles().into())
+                    let duration = time_record.elapsed();
+                    self.cache_record.penalty.penalty_in_code_by_hash = self
+                        .cache_record
+                        .penalty
+                        .penalty_in_code_by_hash
+                        .checked_add(duration)
                         .expect("cache_misses_penalty overflow");
 
-                    self.cache_misses.3 += 1;
+                    self.cache_record.misses.misses_in_code_by_hash += 1;
                 }
 
                 Ok(ret)
             }
         }
-    }
-    #[cfg(feature = "enable_opcode_metrics")]
-    fn get_metric(
-        &mut self,
-    ) -> (
-        (u64, u64, u64, u64),
-        (u64, u64, u64, u64),
-        (u128, u128, u128, u128),
-    ) {
-        (
-            self.cache_hits,
-            self.cache_misses,
-            self.cache_misses_penalty,
-        )
-    }
-
-    // Set cpu frequency.
-    #[cfg(feature = "enable_opcode_metrics")]
-    fn set_cpu_frequency(&mut self, cpu_frequency: f64) {
-        self.cpu_frequency = cpu_frequency;
     }
 }
 
