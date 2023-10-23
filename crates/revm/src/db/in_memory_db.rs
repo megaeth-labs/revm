@@ -218,7 +218,7 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
     pub fn size(&self) -> usize {
         let ret = myalloc::stats();
 
-        ret.alloc as usize
+        ret.diff as usize
     }
 
     #[cfg(feature = "enable_cache_record")]
