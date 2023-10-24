@@ -4,18 +4,25 @@ use serde::{Deserialize, Serialize};
 
 pub type RevmMetricRecord = OpcodeRecord;
 
+const STEP_LEN: usize = 4;
+const SLOAD_OPCODE_TIME_STEP: [u128; STEP_LEN] = [1, 10, 100, u128::MAX];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
     /// The abscissa is opcode type, the first element of a tuple is opcode counter, and the second element is total execute time.
     #[serde(with = "serde_arrays")]
     pub opcode_record: [(u64, Duration); 256],
+    #[serde(with = "serde_arrays")]
+    pub sload_opcode_record: [(u128, u128); STEP_LEN],
     pub is_updated: bool,
 }
 
 impl Default for OpcodeRecord {
     fn default() -> Self {
+        let sload_opcode_record_init = SLOAD_OPCODE_TIME_STEP.map(|v| (v, 0));
         Self {
             opcode_record: [(0, Duration::default()); 256],
+            sload_opcode_record: sload_opcode_record_init,
             is_updated: false,
         }
     }
@@ -42,6 +49,22 @@ impl OpcodeRecord {
                 .1
                 .checked_add(other.opcode_record[i].1)
                 .expect("overflow");
+        }
+
+        for index in 0..self.sload_opcode_record.len() {
+            self.sload_opcode_record[index].1 = self.sload_opcode_record[index]
+                .1
+                .checked_add(other.sload_opcode_record[index].1)
+                .expect("overflow");
+        }
+    }
+
+    pub fn add_sload_opcode_record(&mut self, op_time: u128) {
+        for index in 0..SLOAD_OPCODE_TIME_STEP.len() {
+            if op_time <= SLOAD_OPCODE_TIME_STEP[index] {
+                self.sload_opcode_record[index].1 = self.sload_opcode_record[index].1 + 1;
+                return;
+            }
         }
     }
 

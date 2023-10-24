@@ -224,6 +224,11 @@ impl Interpreter {
                 .expect("overflow");
             self.opcode_record.is_updated = true;
             self.pre_time = Some(now);
+
+            use crate::instructions;
+            if opcode == instructions::opcode::SLOAD {
+                self.opcode_record.add_sload_opcode_record(duration.as_micros());
+            }
         }
     }
 
