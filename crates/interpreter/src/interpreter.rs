@@ -50,6 +50,9 @@ pub struct Interpreter {
     #[cfg(feature = "enable_opcode_metrics")]
     // pub opcode_record: [(u64, std::time::Duration); 256],
     pub opcode_record: revm_utils::types::OpcodeRecord,
+    /// Interpreter start time.
+    #[cfg(feature = "enable_opcode_metrics")]
+    start_time: Option<minstant::Instant>,
     /// Used for record time.
     #[cfg(feature = "enable_opcode_metrics")]
     pre_time: Option<minstant::Instant>,
@@ -109,6 +112,7 @@ impl Interpreter {
                 is_static,
                 gas: Gas::new(gas_limit),
                 opcode_record: revm_utils::types::OpcodeRecord::default(),
+                start_time: None,
                 pre_time: None,
                 enable_metric_record,
             }
@@ -162,6 +166,7 @@ impl Interpreter {
             gas: Gas::new(gas_limit),
             memory_limit,
             opcode_record: revm_utils::types::OpcodeRecord::default(),
+            start_time: None,
             pre_time: None,
             enable_metric_record,
         }
@@ -204,26 +209,45 @@ impl Interpreter {
         // it will do noop and just stop execution of this contract
         self.instruction_pointer = unsafe { self.instruction_pointer.offset(1) };
 
+        #[cfg(not(feature = "enable_opcode_metrics"))]
         eval::<H, SPEC>(opcode, self, host);
 
         #[cfg(feature = "enable_opcode_metrics")]
-        if self.enable_metric_record {
-            let now = minstant::Instant::now();
-            self.opcode_record.opcode_record[opcode as usize].0 = self.opcode_record.opcode_record
+        {
+            let mut gas_used = 0u64;
+            let mut gas_refund = 0i64;
+            eval::<H, SPEC>(opcode, self, host, &mut gas_used, &mut gas_refund);
+            self.opcode_record.opcode_record[opcode as usize].2 = self.opcode_record.opcode_record
                 [opcode as usize]
-                .0
-                .checked_add(1)
+                .2
+                .checked_add(gas_used.into())
                 .expect("overflow");
-            let duration = now
-                .checked_duration_since(self.pre_time.expect("pre time is empty"))
-                .expect("overflow");
-            self.opcode_record.opcode_record[opcode as usize].1 = self.opcode_record.opcode_record
-                [opcode as usize]
-                .1
-                .checked_add(duration)
-                .expect("overflow");
-            self.opcode_record.is_updated = true;
-            self.pre_time = Some(now);
+            if gas_refund != 0 {
+                self.opcode_record.opcode_record[opcode as usize].2 =
+                    self.opcode_record.opcode_record[opcode as usize]
+                        .2
+                        .checked_add(gas_refund.into())
+                        .expect("overflow");
+            }
+
+            if self.enable_metric_record {
+                let now = minstant::Instant::now();
+                self.opcode_record.opcode_record[opcode as usize].0 =
+                    self.opcode_record.opcode_record[opcode as usize]
+                        .0
+                        .checked_add(1)
+                        .expect("overflow");
+                let duration = now
+                    .checked_duration_since(self.pre_time.expect("pre time is empty"))
+                    .expect("overflow");
+                self.opcode_record.opcode_record[opcode as usize].1 =
+                    self.opcode_record.opcode_record[opcode as usize]
+                        .1
+                        .checked_add(duration)
+                        .expect("overflow");
+                self.opcode_record.is_updated = true;
+                self.pre_time = Some(now);
+            }
         }
     }
 
@@ -232,11 +256,20 @@ impl Interpreter {
         #[cfg(feature = "enable_opcode_metrics")]
         {
             let now = minstant::Instant::now();
+            self.start_time = Some(now);
             self.pre_time = Some(now);
         }
         while self.instruction_result == InstructionResult::Continue {
             self.step::<H, SPEC>(host)
         }
+        #[cfg(feature = "enable_opcode_metrics")]
+        {
+            let now = minstant::Instant::now();
+            self.opcode_record.total_time = now
+                .checked_duration_since(self.start_time.expect("start time is empty"))
+                .expect("overflow");
+        }
+
         self.instruction_result
     }
 

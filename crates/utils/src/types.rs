@@ -6,16 +6,18 @@ pub type RevmMetricRecord = OpcodeRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
-    /// The abscissa is opcode type, the first element of a tuple is opcode counter, and the second element is total execute time.
+    /// The abscissa is opcode type, tuple means: (opcode counter, time, gas).
     #[serde(with = "serde_arrays")]
-    pub opcode_record: [(u64, Duration); 256],
+    pub opcode_record: [(u64, Duration, i128); 256],
+    pub total_time: Duration,
     pub is_updated: bool,
 }
 
 impl Default for OpcodeRecord {
     fn default() -> Self {
         Self {
-            opcode_record: [(0, Duration::default()); 256],
+            opcode_record: [(0, Duration::default(), 0); 256],
+            total_time: Duration::default(),
             is_updated: false,
         }
     }
@@ -42,7 +44,16 @@ impl OpcodeRecord {
                 .1
                 .checked_add(other.opcode_record[i].1)
                 .expect("overflow");
+            self.opcode_record[i].2 = self.opcode_record[i]
+                .2
+                .checked_add(other.opcode_record[i].2)
+                .expect("overflow");
         }
+
+        self.total_time = self
+            .total_time
+            .checked_add(other.total_time)
+            .expect("overflow");
     }
 
     pub fn not_empty(&self) -> bool {
