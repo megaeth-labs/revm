@@ -9,11 +9,13 @@ const SLOAD_OPCODE_TIME_STEP: [u128; STEP_LEN] = [1, 10, 100, u128::MAX];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
-    /// The abscissa is opcode type, the first element of a tuple is opcode counter, and the second element is total execute time.
+    /// The abscissa is opcode type, tuple means: (opcode counter, time, gas).
     #[serde(with = "serde_arrays")]
-    pub opcode_record: [(u64, Duration); 256],
+    pub opcode_record: [(u64, Duration, i128); 256],
     #[serde(with = "serde_arrays")]
     pub sload_opcode_record: [(u128, u128); STEP_LEN],
+    /// The total time of all opcode.
+    pub total_time: Duration,
     pub is_updated: bool,
 }
 
@@ -21,8 +23,9 @@ impl Default for OpcodeRecord {
     fn default() -> Self {
         let sload_opcode_record_init = SLOAD_OPCODE_TIME_STEP.map(|v| (v, 0));
         Self {
-            opcode_record: [(0, Duration::default()); 256],
+            opcode_record: [(0, Duration::default(), 0); 256],
             sload_opcode_record: sload_opcode_record_init,
+            total_time: Duration::default(),
             is_updated: false,
         }
     }
@@ -49,7 +52,16 @@ impl OpcodeRecord {
                 .1
                 .checked_add(other.opcode_record[i].1)
                 .expect("overflow");
+            self.opcode_record[i].2 = self.opcode_record[i]
+                .2
+                .checked_add(other.opcode_record[i].2)
+                .expect("overflow");
         }
+
+        self.total_time = self
+            .total_time
+            .checked_add(other.total_time)
+            .expect("overflow");
 
         for index in 0..self.sload_opcode_record.len() {
             self.sload_opcode_record[index].1 = self.sload_opcode_record[index]
