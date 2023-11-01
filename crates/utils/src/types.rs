@@ -12,7 +12,7 @@ pub struct OpcodeRecord {
     /// The abscissa is opcode type, tuple means: (opcode counter, time, gas).
     #[serde(with = "serde_arrays")]
     pub opcode_record: [(u64, Duration, i128); 256],
-    /// tuple means:(the ladder of sload opcode excution time, sload opcode counter).
+    /// tuple means:(the ladder of sload opcode excution time, sload counter).
     #[serde(with = "serde_arrays")]
     pub sload_opcode_record: [(u128, u128); STEP_LEN],
     /// The total time of all opcode.
@@ -40,7 +40,8 @@ impl OpcodeRecord {
 
         if !self.is_updated {
             self.opcode_record = std::mem::replace(&mut other.opcode_record, self.opcode_record);
-            self.sload_opcode_record = std::mem::replace(&mut other.sload_opcode_record, self.sload_opcode_record);
+            self.sload_opcode_record =
+                std::mem::replace(&mut other.sload_opcode_record, self.sload_opcode_record);
             self.is_updated = true;
             return;
         }
