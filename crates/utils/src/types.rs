@@ -4,14 +4,15 @@ use serde::{Deserialize, Serialize};
 
 pub type RevmMetricRecord = OpcodeRecord;
 
-const STEP_LEN: usize = 4;
-const SLOAD_OPCODE_TIME_STEP: [u128; STEP_LEN] = [1, 10, 100, u128::MAX];
+pub const STEP_LEN: usize = 4;
+pub const SLOAD_OPCODE_TIME_STEP: [u128; STEP_LEN] = [1, 10, 100, u128::MAX];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
     /// The abscissa is opcode type, tuple means: (opcode counter, time, gas).
     #[serde(with = "serde_arrays")]
     pub opcode_record: [(u64, Duration, i128); 256],
+    /// tuple means:(the ladder of sload opcode excution time, sload opcode counter).
     #[serde(with = "serde_arrays")]
     pub sload_opcode_record: [(u128, u128); STEP_LEN],
     /// The total time of all opcode.
@@ -39,6 +40,7 @@ impl OpcodeRecord {
 
         if !self.is_updated {
             self.opcode_record = std::mem::replace(&mut other.opcode_record, self.opcode_record);
+            self.sload_opcode_record = std::mem::replace(&mut other.sload_opcode_record, self.sload_opcode_record);
             self.is_updated = true;
             return;
         }
