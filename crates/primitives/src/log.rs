@@ -9,10 +9,3 @@ pub struct Log {
     #[cfg_attr(feature = "serde", serde(with = "crate::utilities::serde_hex_bytes"))]
     pub data: Bytes,
 }
-
-#[cfg(feature = "enable_opcode_metrics")]
-impl Log {
-    pub fn size(&self) -> usize {
-        self.topics.len() * 32 + std::mem::size_of::<Log>()
-    }
-}

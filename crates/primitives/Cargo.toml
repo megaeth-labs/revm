@@ -38,8 +38,6 @@ arbitrary = { version = "1.3", features = ["derive"], optional = true }
 proptest = { version = "1.1", optional = true }
 proptest-derive = { version = "0.3", optional = true }
 
-revm-utils = {path = "../utils"}
-
 [dev-dependencies]
 arbitrary = { version = "1.3", features = ["derive"] }
 proptest = { version = "1.1" }
@@ -85,4 +83,3 @@ arbitrary = [
     "dep:proptest",
     "dep:proptest-derive",
 ]
-enable_opcode_metrics = []
