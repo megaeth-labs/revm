@@ -16,7 +16,6 @@ use core::cmp::Ordering;
 use core::{cmp::min, marker::PhantomData};
 use revm_interpreter::{MAX_CODE_SIZE, MAX_INITCODE_SIZE};
 use revm_precompile::{Precompile, Precompiles};
-use revm_utils::types::OpcodeRecord;
 
 pub struct EVMData<'a, DB: Database> {
     pub env: &'a mut Env,
@@ -202,12 +201,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
 
         // call inner handling of call/create
         // TODO can probably be refactored to look nicer.
-        let (exit_reason, ret_gas, output, _opcode_record): (
-            InstructionResult,
-            Gas,
-            Output,
-            Option<OpcodeRecord>,
-        ) = match self.data.env.tx.transact_to {
+        let (exit_reason, ret_gas, output) = match self.data.env.tx.transact_to {
             TransactTo::Call(address) => {
                 if self.data.journaled_state.inc_nonce(caller).is_some() {
                     let context = CallContext {
@@ -228,32 +222,14 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
                         gas_limit,
                         context,
                         is_static: false,
-                        #[cfg(feature = "enable_opcode_metrics")]
-                        enable_metric_record: true,
                     };
-                    #[cfg(not(feature = "enable_opcode_metrics"))]
                     let (exit, gas, bytes) = self.call_inner(&mut call_input);
-                    #[cfg(feature = "enable_opcode_metrics")]
-                    let ((exit, gas, bytes), opcode_record) = self.call_inner(&mut call_input);
-
-                    #[cfg(not(feature = "enable_opcode_metrics"))]
-                    let ret: (
-                        InstructionResult,
-                        Gas,
-                        Output,
-                        Option<OpcodeRecord>,
-                    ) = (exit, gas, Output::Call(bytes), None);
-
-                    #[cfg(feature = "enable_opcode_metrics")]
-                    let ret = (exit, gas, Output::Call(bytes), opcode_record);
-
-                    ret
+                    (exit, gas, Output::Call(bytes))
                 } else {
                     (
                         InstructionResult::NonceOverflow,
                         gas,
                         Output::Call(Bytes::new()),
-                        None,
                     )
                 }
             }
@@ -264,24 +240,9 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
                     value,
                     init_code: data,
                     gas_limit,
-                    #[cfg(feature = "enable_opcode_metrics")]
-                    enable_metric_record: true,
                 };
-                #[cfg(not(feature = "enable_opcode_metrics"))]
                 let (exit, address, ret_gas, bytes) = self.create_inner(&mut create_input);
-
-                #[cfg(feature = "enable_opcode_metrics")]
-                let ((exit, address, ret_gas, bytes), opcode_record) =
-                    self.create_inner(&mut create_input);
-
-                #[cfg(not(feature = "enable_opcode_metrics"))]
-                let ret: (InstructionResult, Gas, Output, Option<OpcodeRecord>) =
-                    (exit, ret_gas, Output::Create(bytes, address), None);
-
-                #[cfg(feature = "enable_opcode_metrics")]
-                let ret = (exit, ret_gas, Output::Create(bytes, address), opcode_record);
-
-                ret
+                (exit, ret_gas, Output::Create(bytes, address))
             }
         };
 
@@ -324,20 +285,7 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> Transact<DB::Error>
             }
         };
 
-        #[cfg(not(feature = "enable_opcode_metrics"))]
-        let result_and_state = ResultAndState { result, state };
-        #[cfg(feature = "enable_opcode_metrics")]
-        let result_and_state = {
-            let revm_metric_record = _opcode_record.unwrap_or(OpcodeRecord::default());
-
-            ResultAndState {
-                result,
-                state,
-                revm_metric_record,
-            }
-        };
-
-        Ok(result_and_state)
+        Ok(ResultAndState { result, state })
     }
 }
 
@@ -353,7 +301,6 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         } else {
             JournaledState::new_legacy(precompiles.len())
         };
-
         Self {
             data: EVMData {
                 env,
@@ -532,7 +479,6 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         }
     }
 
-    #[cfg(not(feature = "enable_opcode_metrics"))]
     fn create_inner(
         &mut self,
         inputs: &mut CreateInputs,
@@ -790,7 +736,6 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         }
     }
 
-    #[cfg(not(feature = "enable_opcode_metrics"))]
     fn call_inner(&mut self, inputs: &mut CallInputs) -> (InstructionResult, Gas, Bytes) {
         // Call the inspector
         if INSPECT {
@@ -936,464 +881,6 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
             (ret, gas, out)
         }
     }
-
-    #[cfg(feature = "enable_opcode_metrics")]
-    fn create_inner(
-        &mut self,
-        inputs: &mut CreateInputs,
-    ) -> (
-        (InstructionResult, Option<B160>, Gas, Bytes),
-        Option<OpcodeRecord>,
-    ) {
-        // Call inspector
-        if INSPECT {
-            let (ret, address, gas, out) = self.inspector.create(&mut self.data, inputs);
-            if ret != InstructionResult::Continue {
-                return (
-                    self.inspector
-                        .create_end(&mut self.data, inputs, ret, address, gas, out),
-                    None,
-                );
-            }
-        }
-
-        let gas = Gas::new(inputs.gas_limit);
-        self.load_account(inputs.caller);
-
-        // Check depth of calls
-        if self.data.journaled_state.depth() > CALL_STACK_LIMIT {
-            return (
-                self.create_end(
-                    inputs,
-                    InstructionResult::CallTooDeep,
-                    None,
-                    gas,
-                    Bytes::new(),
-                ),
-                None,
-            );
-        }
-        // Check balance of caller and value. Do this before increasing nonce
-        match self.balance(inputs.caller) {
-            Some(i) if i.0 < inputs.value => {
-                return (
-                    self.create_end(
-                        inputs,
-                        InstructionResult::OutOfFund,
-                        None,
-                        gas,
-                        Bytes::new(),
-                    ),
-                    None,
-                )
-            }
-            Some(_) => (),
-            _ => {
-                return (
-                    self.create_end(
-                        inputs,
-                        InstructionResult::FatalExternalError,
-                        None,
-                        gas,
-                        Bytes::new(),
-                    ),
-                    None,
-                )
-            }
-        }
-
-        // Increase nonce of caller and check if it overflows
-        let old_nonce;
-        if let Some(nonce) = self.data.journaled_state.inc_nonce(inputs.caller) {
-            old_nonce = nonce - 1;
-        } else {
-            return (
-                self.create_end(inputs, InstructionResult::Return, None, gas, Bytes::new()),
-                None,
-            );
-        }
-
-        // Create address
-        let code_hash = keccak256(&inputs.init_code);
-        let created_address = match inputs.scheme {
-            CreateScheme::Create => create_address(inputs.caller, old_nonce),
-            CreateScheme::Create2 { salt } => create2_address(inputs.caller, code_hash, salt),
-        };
-        let ret = Some(created_address);
-
-        // Load account so that it will be hot
-        self.load_account(created_address);
-
-        // Enter subroutine
-        let checkpoint = self.data.journaled_state.checkpoint();
-
-        // Create contract account and check for collision
-        match self.data.journaled_state.create_account(
-            created_address,
-            self.data.precompiles.contains(&created_address),
-            self.data.db,
-        ) {
-            Ok(false) => {
-                self.data.journaled_state.checkpoint_revert(checkpoint);
-                return (
-                    self.create_end(
-                        inputs,
-                        InstructionResult::CreateCollision,
-                        ret,
-                        gas,
-                        Bytes::new(),
-                    ),
-                    None,
-                );
-            }
-            Err(err) => {
-                self.data.error = Some(err);
-                return (
-                    self.create_end(
-                        inputs,
-                        InstructionResult::FatalExternalError,
-                        ret,
-                        gas,
-                        Bytes::new(),
-                    ),
-                    None,
-                );
-            }
-            Ok(true) => (),
-        }
-
-        // Transfer value to contract address
-        if let Err(e) = self.data.journaled_state.transfer(
-            &inputs.caller,
-            &created_address,
-            inputs.value,
-            self.data.db,
-        ) {
-            self.data.journaled_state.checkpoint_revert(checkpoint);
-            return (self.create_end(inputs, e, ret, gas, Bytes::new()), None);
-        }
-
-        // EIP-161: State trie clearing (invariant-preserving alternative)
-        if GSPEC::enabled(SPURIOUS_DRAGON)
-            && self
-                .data
-                .journaled_state
-                .inc_nonce(created_address)
-                .is_none()
-        {
-            // overflow
-            self.data.journaled_state.checkpoint_revert(checkpoint);
-            return (
-                self.create_end(inputs, InstructionResult::Return, None, gas, Bytes::new()),
-                None,
-            );
-        }
-
-        // Create new interpreter and execute initcode
-        let contract = Contract::new(
-            Bytes::new(),
-            Bytecode::new_raw(inputs.init_code.clone()),
-            created_address,
-            inputs.caller,
-            inputs.value,
-        );
-
-        #[cfg(feature = "memory_limit")]
-        let mut interpreter = Interpreter::new_with_memory_limit(
-            contract,
-            gas.limit(),
-            false,
-            self.data.env.cfg.memory_limit,
-            inputs.enable_metric_record,
-        );
-
-        #[cfg(not(feature = "memory_limit"))]
-        let mut interpreter =
-            Interpreter::new(contract, gas.limit(), false, inputs.enable_metric_record);
-
-        if INSPECT {
-            self.inspector
-                .initialize_interp(&mut interpreter, &mut self.data, false);
-        }
-        let exit_reason = if INSPECT {
-            interpreter.run_inspect::<Self, GSPEC>(self)
-        } else {
-            interpreter.run::<Self, GSPEC>(self)
-        };
-        // Host error if present on execution\
-        let (ret, address, gas, out) = match exit_reason {
-            return_ok!() => {
-                // if ok, check contract creation limit and calculate gas deduction on output len.
-                let mut bytes = interpreter.return_value();
-
-                // EIP-3541: Reject new contract code starting with the 0xEF byte
-                if GSPEC::enabled(LONDON) && !bytes.is_empty() && bytes.first() == Some(&0xEF) {
-                    self.data.journaled_state.checkpoint_revert(checkpoint);
-                    return (
-                        self.create_end(
-                            inputs,
-                            InstructionResult::CreateContractStartingWithEF,
-                            ret,
-                            interpreter.gas,
-                            bytes,
-                        ),
-                        Some(std::mem::take(&mut interpreter.opcode_record)),
-                    );
-                }
-
-                // EIP-170: Contract code size limit
-                // By default limit is 0x6000 (~25kb)
-                if GSPEC::enabled(SPURIOUS_DRAGON)
-                    && bytes.len()
-                        > self
-                            .data
-                            .env
-                            .cfg
-                            .limit_contract_code_size
-                            .unwrap_or(MAX_CODE_SIZE)
-                {
-                    self.data.journaled_state.checkpoint_revert(checkpoint);
-                    return (
-                        self.create_end(
-                            inputs,
-                            InstructionResult::CreateContractSizeLimit,
-                            ret,
-                            interpreter.gas,
-                            bytes,
-                        ),
-                        Some(std::mem::take(&mut interpreter.opcode_record)),
-                    );
-                }
-                if crate::USE_GAS {
-                    let gas_for_code = bytes.len() as u64 * gas::CODEDEPOSIT;
-                    if !interpreter.gas.record_cost(gas_for_code) {
-                        // record code deposit gas cost and check if we are out of gas.
-                        // EIP-2 point 3: If contract creation does not have enough gas to pay for the
-                        // final gas fee for adding the contract code to the state, the contract
-                        //  creation fails (i.e. goes out-of-gas) rather than leaving an empty contract.
-                        if GSPEC::enabled(HOMESTEAD) {
-                            self.data.journaled_state.checkpoint_revert(checkpoint);
-                            return (
-                                self.create_end(
-                                    inputs,
-                                    InstructionResult::OutOfGas,
-                                    ret,
-                                    interpreter.gas,
-                                    bytes,
-                                ),
-                                Some(std::mem::take(&mut interpreter.opcode_record)),
-                            );
-                        } else {
-                            bytes = Bytes::new();
-                        }
-                    }
-                }
-                // if we have enough gas
-                self.data.journaled_state.checkpoint_commit();
-                // Do analysis of bytecode straight away.
-                let bytecode = match self.data.env.cfg.perf_analyse_created_bytecodes {
-                    AnalysisKind::Raw => Bytecode::new_raw(bytes.clone()),
-                    AnalysisKind::Check => Bytecode::new_raw(bytes.clone()).to_checked(),
-                    AnalysisKind::Analyse => to_analysed(Bytecode::new_raw(bytes.clone())),
-                };
-
-                self.data
-                    .journaled_state
-                    .set_code(created_address, bytecode);
-                (InstructionResult::Return, ret, interpreter.gas, bytes)
-            }
-            _ => {
-                self.data.journaled_state.checkpoint_revert(checkpoint);
-                (
-                    exit_reason,
-                    ret,
-                    interpreter.gas,
-                    interpreter.return_value(),
-                )
-            }
-        };
-
-        (
-            self.create_end(inputs, ret, address, gas, out),
-            Some(std::mem::take(&mut interpreter.opcode_record)),
-        )
-    }
-
-    #[cfg(feature = "enable_opcode_metrics")]
-    fn call_inner(
-        &mut self,
-        inputs: &mut CallInputs,
-    ) -> ((InstructionResult, Gas, Bytes), Option<OpcodeRecord>) {
-        // Call the inspector
-        if INSPECT {
-            let (ret, gas, out) = self
-                .inspector
-                .call(&mut self.data, inputs, inputs.is_static);
-            if ret != InstructionResult::Continue {
-                return (
-                    self.inspector.call_end(
-                        &mut self.data,
-                        inputs,
-                        gas,
-                        ret,
-                        out,
-                        inputs.is_static,
-                    ),
-                    None,
-                );
-            }
-        }
-
-        let mut gas = Gas::new(inputs.gas_limit);
-
-        // Load account and get code. Account is now hot.
-        let bytecode = if let Some((bytecode, _)) = self.code(inputs.contract) {
-            bytecode
-        } else {
-            return (
-                (InstructionResult::FatalExternalError, gas, Bytes::new()),
-                None,
-            );
-        };
-
-        // Check depth
-        if self.data.journaled_state.depth() > CALL_STACK_LIMIT {
-            let (ret, gas, out) = (InstructionResult::CallTooDeep, gas, Bytes::new());
-            if INSPECT {
-                return (
-                    self.inspector.call_end(
-                        &mut self.data,
-                        inputs,
-                        gas,
-                        ret,
-                        out,
-                        inputs.is_static,
-                    ),
-                    None,
-                );
-            } else {
-                return ((ret, gas, out), None);
-            }
-        }
-
-        // Create subroutine checkpoint
-        let checkpoint = self.data.journaled_state.checkpoint();
-
-        // Touch address. For "EIP-158 State Clear", this will erase empty accounts.
-        if inputs.transfer.value == U256::ZERO {
-            self.load_account(inputs.context.address);
-            self.data.journaled_state.touch(&inputs.context.address);
-        }
-
-        // Transfer value from caller to called account
-        if let Err(e) = self.data.journaled_state.transfer(
-            &inputs.transfer.source,
-            &inputs.transfer.target,
-            inputs.transfer.value,
-            self.data.db,
-        ) {
-            self.data.journaled_state.checkpoint_revert(checkpoint);
-            let (ret, gas, out) = (e, gas, Bytes::new());
-            if INSPECT {
-                return (
-                    self.inspector.call_end(
-                        &mut self.data,
-                        inputs,
-                        gas,
-                        ret,
-                        out,
-                        inputs.is_static,
-                    ),
-                    None,
-                );
-            } else {
-                return ((ret, gas, out), None);
-            }
-        }
-
-        // Call precompiles
-        let (ret, gas, out, opcode_record) =
-            if let Some(precompile) = self.data.precompiles.get(&inputs.contract) {
-                let out = match precompile {
-                    Precompile::Standard(fun) => fun(inputs.input.as_ref(), inputs.gas_limit),
-                    Precompile::Custom(fun) => fun(inputs.input.as_ref(), inputs.gas_limit),
-                };
-                match out {
-                    Ok((gas_used, data)) => {
-                        if !crate::USE_GAS || gas.record_cost(gas_used) {
-                            self.data.journaled_state.checkpoint_commit();
-                            (InstructionResult::Return, gas, Bytes::from(data), None)
-                        } else {
-                            self.data.journaled_state.checkpoint_revert(checkpoint);
-                            (InstructionResult::PrecompileOOG, gas, Bytes::new(), None)
-                        }
-                    }
-                    Err(e) => {
-                        let ret = if let precompile::Error::OutOfGas = e {
-                            InstructionResult::PrecompileOOG
-                        } else {
-                            InstructionResult::PrecompileError
-                        };
-                        self.data.journaled_state.checkpoint_revert(checkpoint);
-                        (ret, gas, Bytes::new(), None)
-                    }
-                }
-            } else {
-                // Create interpreter and execute subcall
-                let contract =
-                    Contract::new_with_context(inputs.input.clone(), bytecode, &inputs.context);
-
-                #[cfg(feature = "memory_limit")]
-                let mut interpreter = Interpreter::new_with_memory_limit(
-                    contract,
-                    gas.limit(),
-                    inputs.is_static,
-                    self.data.env.cfg.memory_limit,
-                    inputs.enable_metric_record,
-                );
-
-                #[cfg(not(feature = "memory_limit"))]
-                let mut interpreter = Interpreter::new(
-                    contract,
-                    gas.limit(),
-                    inputs.is_static,
-                    inputs.enable_metric_record,
-                );
-
-                if INSPECT {
-                    // create is always no static call.
-                    self.inspector
-                        .initialize_interp(&mut interpreter, &mut self.data, false);
-                }
-                let exit_reason = if INSPECT {
-                    interpreter.run_inspect::<Self, GSPEC>(self)
-                } else {
-                    interpreter.run::<Self, GSPEC>(self)
-                };
-
-                if matches!(exit_reason, return_ok!()) {
-                    self.data.journaled_state.checkpoint_commit();
-                } else {
-                    self.data.journaled_state.checkpoint_revert(checkpoint);
-                }
-                (
-                    exit_reason,
-                    interpreter.gas,
-                    interpreter.return_value(),
-                    Some(std::mem::take(&mut interpreter.opcode_record)),
-                )
-            };
-
-        if INSPECT {
-            (
-                self.inspector
-                    .call_end(&mut self.data, inputs, gas, ret, out, inputs.is_static),
-                opcode_record,
-            )
-        } else {
-            ((ret, gas, out), opcode_record)
-        }
-    }
 }
 
 impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
@@ -1453,7 +940,6 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
             .load_code(address, db)
             .map_err(|e| *error = Some(e))
             .ok()?;
-
         Some((acc.info.code.clone().unwrap(), is_cold))
     }
 
@@ -1529,24 +1015,10 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
         &mut self,
         inputs: &mut CreateInputs,
     ) -> (InstructionResult, Option<B160>, Gas, Bytes) {
-        #[cfg(feature = "enable_opcode_metrics")]
-        {
-            inputs.enable_metric_record = false;
-            return self.create_inner(inputs).0;
-        }
-
-        #[cfg(not(feature = "enable_opcode_metrics"))]
         self.create_inner(inputs)
     }
 
     fn call(&mut self, inputs: &mut CallInputs) -> (InstructionResult, Gas, Bytes) {
-        #[cfg(feature = "enable_opcode_metrics")]
-        {
-            inputs.enable_metric_record = false;
-            return self.call_inner(inputs).0;
-        }
-
-        #[cfg(not(feature = "enable_opcode_metrics"))]
         self.call_inner(inputs)
     }
 }

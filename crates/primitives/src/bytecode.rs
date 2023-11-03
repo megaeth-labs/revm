@@ -157,9 +157,4 @@ impl Bytecode {
             _ => self,
         }
     }
-
-    #[cfg(feature = "enable_opcode_metrics")]
-    pub fn size(&self) -> usize {
-        self.bytecode.len()
-    }
 }

@@ -20,8 +20,6 @@ pub struct CallInputs {
     pub context: CallContext,
     /// Is static call
     pub is_static: bool,
-    #[cfg(feature = "enable_opcode_metrics")]
-    pub enable_metric_record: bool,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -35,8 +33,6 @@ pub struct CreateInputs {
     )]
     pub init_code: Bytes,
     pub gas_limit: u64,
-    #[cfg(feature = "enable_opcode_metrics")]
-    pub enable_metric_record: bool,
 }
 
 /// Call schemes.

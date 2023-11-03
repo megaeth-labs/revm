@@ -548,8 +548,6 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
         value,
         init_code: code,
         gas_limit,
-        #[cfg(feature = "enable_opcode_metrics")]
-        enable_metric_record: false,
     };
 
     let (return_reason, address, gas, return_data) = host.create(&mut create_input);
@@ -659,8 +657,6 @@ pub fn create<const IS_CREATE2: bool, SPEC: Spec>(
         value,
         init_code: code,
         gas_limit,
-        #[cfg(feature = "enable_opcode_metrics")]
-        enable_metric_record: false,
     };
 
     let (return_reason, address, gas, return_data) = host.create(&mut create_input);
@@ -922,8 +918,6 @@ pub fn call_inner<SPEC: Spec>(
         gas_limit,
         context,
         is_static,
-        #[cfg(feature = "enable_opcode_metrics")]
-        enable_metric_record: false,
     };
 
     // Call host to interuct with target contract
@@ -1112,8 +1106,6 @@ pub fn call_inner<SPEC: Spec>(
         gas_limit,
         context,
         is_static,
-        #[cfg(feature = "enable_opcode_metrics")]
-        enable_metric_record: false,
     };
 
     // Call host to interuct with target contract

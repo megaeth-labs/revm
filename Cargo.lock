@@ -2079,7 +2079,6 @@ dependencies = [
  "primitive-types",
  "proptest",
  "proptest-derive",
- "revm-utils",
  "rlp",
  "ruint",
  "serde",
@@ -2100,6 +2099,7 @@ dependencies = [
 name = "revm-utils"
 version = "0.1.0"
 dependencies = [
+ "minstant",
  "serde",
  "serde_arrays",
  "serde_json",

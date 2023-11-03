@@ -64,4 +64,4 @@ arbitrary = [
     "dep:proptest-derive",
     "revm-primitives/arbitrary",
 ]
-enable_opcode_metrics = ["revm-primitives/enable_opcode_metrics"]
+enable_opcode_metrics = []
