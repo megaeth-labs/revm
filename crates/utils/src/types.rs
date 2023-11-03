@@ -7,7 +7,7 @@ pub type RevmMetricRecord = OpcodeRecord;
 pub const STEP_LEN: usize = 4;
 pub const SLOAD_OPCODE_TIME_STEP: [u128; STEP_LEN] = [1, 10, 100, u128::MAX];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
     /// The abscissa is opcode type, tuple means: (opcode counter, time, gas).
     #[serde(with = "serde_arrays")]
@@ -96,12 +96,32 @@ pub struct CacheHits {
     pub hits_in_code_by_hash: u64,
 }
 
+impl CacheHits {
+    pub fn add(&mut self, other: &Self) {
+        self.hits_in_block_hash = self.hits_in_block_hash.checked_add(other.hits_in_block_hash).expect("overflow");
+        self.hits_in_basic = self.hits_in_basic.checked_add(other.hits_in_basic).expect("overflow");
+        self.hits_in_storage = self.hits_in_storage.checked_add(other.hits_in_storage).expect("overflow");
+        self.hits_in_code_by_hash = self.hits_in_code_by_hash.checked_add(other.hits_in_code_by_hash).expect("overflow");
+    }
+    
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
 pub struct CacheMisses {
     pub misses_in_block_hash: u64,
     pub misses_in_basic: u64,
     pub misses_in_storage: u64,
     pub misses_in_code_by_hash: u64,
+}
+
+impl CacheMisses {
+    pub fn add(&mut self, other: &Self) {
+        self.misses_in_block_hash = self.misses_in_block_hash.checked_add(other.misses_in_block_hash).expect("overflow");
+        self.misses_in_basic = self.misses_in_basic.checked_add(other.misses_in_basic).expect("overflow");
+        self.misses_in_storage = self.misses_in_storage.checked_add(other.misses_in_storage).expect("overflow");
+        self.misses_in_code_by_hash = self.misses_in_code_by_hash.checked_add(other.misses_in_code_by_hash).expect("overflow");
+    }
+    
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
@@ -111,10 +131,46 @@ pub struct CacheMissesPenalty {
     pub penalty_in_storage: Duration,
     pub penalty_in_code_by_hash: Duration,
 }
+impl CacheMissesPenalty {
+    pub fn add(&mut self, other: &Self) {
+        self.penalty_in_block_hash = self.penalty_in_block_hash.checked_add(other.penalty_in_block_hash).expect("overflow");
+        self.penalty_in_basic = self.penalty_in_basic.checked_add(other.penalty_in_basic).expect("overflow");
+        self.penalty_in_storage = self.penalty_in_storage.checked_add(other.penalty_in_storage).expect("overflow");
+        self.penalty_in_code_by_hash = self.penalty_in_code_by_hash.checked_add(other.penalty_in_code_by_hash).expect("overflow");
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
 pub struct CacheDbRecord {
     pub hits: CacheHits,
     pub misses: CacheMisses,
     pub penalty: CacheMissesPenalty,
+}
+
+impl  CacheDbRecord {
+    pub fn update(&mut self, other: &Self) {
+        self.hits.add(&other.hits);
+        self.misses.add(&other.misses);
+        self.penalty.add(&other.penalty);
+    }
+
+    pub fn print(&self) {
+        println!("\n===============================Metric of cache db record==========================================================");
+        println!("Hits In Block Hash   : {}", self.hits.hits_in_block_hash);
+        println!("Hits In Basic        : {}", self.hits.hits_in_basic);
+        println!("Hits In Storage      : {}", self.hits.hits_in_storage);
+        println!("Hits In Code By Hash : {}", self.hits.hits_in_code_by_hash);
+
+        println!("Misses In Block Hash   : {}", self.misses.misses_in_block_hash);
+        println!("Misses In Basic        : {}", self.misses.misses_in_basic);
+        println!("Misses In Storage      : {}", self.misses.misses_in_storage);
+        println!("Misses In Code By Hash : {}", self.misses.misses_in_code_by_hash);
+
+        println!("Penalty In Block Hash(ns)   : {}", self.penalty.penalty_in_block_hash.as_nanos());
+        println!("Penalty In Basic(ns)        : {}", self.penalty.penalty_in_basic.as_nanos());
+        println!("Penalty In Storage(ns)      : {}", self.penalty.penalty_in_storage.as_nanos());
+        println!("Penalty In Code By Hash(ns) : {}", self.penalty.penalty_in_code_by_hash.as_nanos());
+        
+        println!();
+    }
 }
