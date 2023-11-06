@@ -38,6 +38,11 @@ impl OpcodeRecord {
             return;
         }
 
+        self.total_time = self
+            .total_time
+            .checked_add(other.total_time)
+            .expect("overflow");
+
         if !self.is_updated {
             self.opcode_record = std::mem::replace(&mut other.opcode_record, self.opcode_record);
             self.sload_opcode_record =
@@ -60,11 +65,6 @@ impl OpcodeRecord {
                 .checked_add(other.opcode_record[i].2)
                 .expect("overflow");
         }
-
-        self.total_time = self
-            .total_time
-            .checked_add(other.total_time)
-            .expect("overflow");
 
         for index in 0..self.sload_opcode_record.len() {
             self.sload_opcode_record[index].1 = self.sload_opcode_record[index]
