@@ -209,14 +209,24 @@ impl CacheDbRecord {
     }
 
     pub fn total_hits(&self) -> u64 {
-        self.hits.hits_in_basic + self.hits.hits_in_code_by_hash + self.hits.hits_in_storage + self.hits.hits_in_block_hash
+        self.hits.hits_in_basic
+            + self.hits.hits_in_code_by_hash
+            + self.hits.hits_in_storage
+            + self.hits.hits_in_block_hash
     }
 
     pub fn total_miss(&self) -> u64 {
-        self.misses.misses_in_basic + self.misses.misses_in_code_by_hash + self.misses.misses_in_storage + self.misses.misses_in_block_hash
+        self.misses.misses_in_basic
+            + self.misses.misses_in_code_by_hash
+            + self.misses.misses_in_storage
+            + self.misses.misses_in_block_hash
     }
 
     pub fn total_penalty_times(&self) -> f64 {
-        (self.penalty.penalty_in_basic + self.penalty.penalty_in_code_by_hash + self.penalty.penalty_in_storage + self.penalty.penalty_in_block_hash).as_secs_f64()
+        (self.penalty.penalty_in_basic
+            + self.penalty.penalty_in_code_by_hash
+            + self.penalty.penalty_in_storage
+            + self.penalty.penalty_in_block_hash)
+            .as_secs_f64()
     }
 }
