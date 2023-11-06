@@ -19,8 +19,8 @@ pub fn start_record() {
 
     INSTANCE.with(|instance| {
         let mut instance = instance.borrow_mut();
-        instance.start_time = Some(now);
         if !instance.started {
+            instance.start_time = Some(now);
             instance.pre_time = Some(now);
         }
         instance.started = true;
