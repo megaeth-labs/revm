@@ -7,7 +7,7 @@ pub type RevmMetricRecord = OpcodeRecord;
 pub const STEP_LEN: usize = 4;
 pub const SLOAD_OPCODE_TIME_STEP: [u128; STEP_LEN] = [1, 10, 100, u128::MAX];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
     /// The abscissa is opcode type, tuple means: (opcode counter, time, gas).
     #[serde(with = "serde_arrays")]
@@ -47,6 +47,10 @@ impl OpcodeRecord {
             self.opcode_record = std::mem::replace(&mut other.opcode_record, self.opcode_record);
             self.sload_opcode_record =
                 std::mem::replace(&mut other.sload_opcode_record, self.sload_opcode_record);
+            self.total_time = self
+                .total_time
+                .checked_add(other.total_time)
+                .expect("overflow");
             self.is_updated = true;
             return;
         }
@@ -96,12 +100,54 @@ pub struct CacheHits {
     pub hits_in_code_by_hash: u64,
 }
 
+impl CacheHits {
+    pub fn update(&mut self, other: &Self) {
+        self.hits_in_block_hash = self
+            .hits_in_block_hash
+            .checked_add(other.hits_in_block_hash)
+            .expect("overflow");
+        self.hits_in_basic = self
+            .hits_in_basic
+            .checked_add(other.hits_in_basic)
+            .expect("overflow");
+        self.hits_in_storage = self
+            .hits_in_storage
+            .checked_add(other.hits_in_storage)
+            .expect("overflow");
+        self.hits_in_code_by_hash = self
+            .hits_in_code_by_hash
+            .checked_add(other.hits_in_code_by_hash)
+            .expect("overflow");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
 pub struct CacheMisses {
     pub misses_in_block_hash: u64,
     pub misses_in_basic: u64,
     pub misses_in_storage: u64,
     pub misses_in_code_by_hash: u64,
+}
+
+impl CacheMisses {
+    pub fn update(&mut self, other: &Self) {
+        self.misses_in_block_hash = self
+            .misses_in_block_hash
+            .checked_add(other.misses_in_block_hash)
+            .expect("overflow");
+        self.misses_in_basic = self
+            .misses_in_basic
+            .checked_add(other.misses_in_basic)
+            .expect("overflow");
+        self.misses_in_storage = self
+            .misses_in_storage
+            .checked_add(other.misses_in_storage)
+            .expect("overflow");
+        self.misses_in_code_by_hash = self
+            .misses_in_code_by_hash
+            .checked_add(other.misses_in_code_by_hash)
+            .expect("overflow");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
@@ -111,10 +157,102 @@ pub struct CacheMissesPenalty {
     pub penalty_in_storage: Duration,
     pub penalty_in_code_by_hash: Duration,
 }
+impl CacheMissesPenalty {
+    pub fn update(&mut self, other: &Self) {
+        self.penalty_in_block_hash = self
+            .penalty_in_block_hash
+            .checked_add(other.penalty_in_block_hash)
+            .expect("overflow");
+        self.penalty_in_basic = self
+            .penalty_in_basic
+            .checked_add(other.penalty_in_basic)
+            .expect("overflow");
+        self.penalty_in_storage = self
+            .penalty_in_storage
+            .checked_add(other.penalty_in_storage)
+            .expect("overflow");
+        self.penalty_in_code_by_hash = self
+            .penalty_in_code_by_hash
+            .checked_add(other.penalty_in_code_by_hash)
+            .expect("overflow");
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
 pub struct CacheDbRecord {
     pub hits: CacheHits,
     pub misses: CacheMisses,
     pub penalty: CacheMissesPenalty,
+}
+
+impl CacheDbRecord {
+    pub fn update(&mut self, other: &Self) {
+        self.hits.update(&other.hits);
+        self.misses.update(&other.misses);
+        self.penalty.update(&other.penalty);
+    }
+
+    pub fn total_in_basic(&self) -> u64 {
+        self.hits.hits_in_basic + self.misses.misses_in_basic
+    }
+
+    pub fn total_in_code_by_hash(&self) -> u64 {
+        self.hits.hits_in_code_by_hash + self.misses.misses_in_code_by_hash
+    }
+
+    pub fn total_in_storage(&self) -> u64 {
+        self.hits.hits_in_storage + self.misses.misses_in_storage
+    }
+
+    pub fn total_in_block_hash(&self) -> u64 {
+        self.hits.hits_in_block_hash + self.misses.misses_in_block_hash
+    }
+
+    pub fn total_hits(&self) -> u64 {
+        let mut total = self
+            .hits
+            .hits_in_basic
+            .checked_add(self.hits.hits_in_code_by_hash)
+            .expect("overflow");
+        total = total
+            .checked_add(self.hits.hits_in_storage)
+            .expect("overflow");
+        total = total
+            .checked_add(self.hits.hits_in_block_hash)
+            .expect("overflow");
+
+        total
+    }
+
+    pub fn total_miss(&self) -> u64 {
+        let mut total = self
+            .misses
+            .misses_in_basic
+            .checked_add(self.misses.misses_in_code_by_hash)
+            .expect("overflow");
+        total = total
+            .checked_add(self.misses.misses_in_storage)
+            .expect("overflow");
+        total = total
+            .checked_add(self.misses.misses_in_block_hash)
+            .expect("verflow");
+
+        total
+    }
+
+    pub fn total_penalty_times(&self) -> f64 {
+        let mut total = self
+            .penalty
+            .penalty_in_basic
+            .checked_add(self.penalty.penalty_in_code_by_hash)
+            .expect("overflow");
+        total = total
+            .checked_add(self.penalty.penalty_in_storage)
+            .expect("overflow");
+        total = total
+            .checked_add(self.penalty.penalty_in_block_hash)
+            .expect("overflow");
+
+        total.as_secs_f64()
+    }
 }
