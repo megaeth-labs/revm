@@ -209,24 +209,50 @@ impl CacheDbRecord {
     }
 
     pub fn total_hits(&self) -> u64 {
-        self.hits.hits_in_basic
-            + self.hits.hits_in_code_by_hash
-            + self.hits.hits_in_storage
-            + self.hits.hits_in_block_hash
+        let mut total = self
+            .hits
+            .hits_in_basic
+            .checked_add(self.hits.hits_in_code_by_hash)
+            .expect("overflow");
+        total = total
+            .checked_add(self.hits.hits_in_storage)
+            .expect("overflow");
+        total = total
+            .checked_add(self.hits.hits_in_block_hash)
+            .expect("overflow");
+
+        total
     }
 
     pub fn total_miss(&self) -> u64 {
-        self.misses.misses_in_basic
-            + self.misses.misses_in_code_by_hash
-            + self.misses.misses_in_storage
-            + self.misses.misses_in_block_hash
+        let mut total = self
+            .misses
+            .misses_in_basic
+            .checked_add(self.misses.misses_in_code_by_hash)
+            .expect("overflow");
+        total = total
+            .checked_add(self.misses.misses_in_storage)
+            .expect("overflow");
+        total = total
+            .checked_add(self.misses.misses_in_block_hash)
+            .expect("verflow");
+
+        total
     }
 
     pub fn total_penalty_times(&self) -> f64 {
-        (self.penalty.penalty_in_basic
-            + self.penalty.penalty_in_code_by_hash
-            + self.penalty.penalty_in_storage
-            + self.penalty.penalty_in_block_hash)
-            .as_secs_f64()
+        let mut total = self
+            .penalty
+            .penalty_in_basic
+            .checked_add(self.penalty.penalty_in_code_by_hash)
+            .expect("overflow");
+        total = total
+            .checked_add(self.penalty.penalty_in_storage)
+            .expect("overflow");
+        total = total
+            .checked_add(self.penalty.penalty_in_block_hash)
+            .expect("overflow");
+
+        total.as_secs_f64()
     }
 }
