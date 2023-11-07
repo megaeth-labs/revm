@@ -160,8 +160,6 @@ impl Interpreter {
         while self.instruction_result == InstructionResult::Continue {
             self.step::<H, SPEC>(host)
         }
-        #[cfg(feature = "enable_opcode_metrics")]
-        end_record();
 
         self.instruction_result
     }
