@@ -50,6 +50,11 @@ pub fn record(opcode: u8, gas_used: u64, gas_refund: i64) {
             .expect("overflow");
         instance.pre_time = Some(now);
 
+        // update total time
+        instance.record.total_time = now
+            .checked_duration_since(instance.start_time.expect("start time is empty"))
+            .expect("overflow");
+
         // SLOAD = 0x54,
         // statistical percentile of sload duration
         if opcode == 0x54 {
@@ -74,17 +79,6 @@ pub fn record(opcode: u8, gas_used: u64, gas_refund: i64) {
         }
 
         instance.record.is_updated = true;
-    });
-}
-
-pub fn end_record() {
-    let now = minstant::Instant::now();
-
-    INSTANCE.with(|instance| {
-        let mut instance = instance.borrow_mut();
-        instance.record.total_time = now
-            .checked_duration_since(instance.start_time.expect("start time is empty"))
-            .expect("overflow");
     });
 }
 

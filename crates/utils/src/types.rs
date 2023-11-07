@@ -47,10 +47,6 @@ impl OpcodeRecord {
             self.opcode_record = std::mem::replace(&mut other.opcode_record, self.opcode_record);
             self.sload_opcode_record =
                 std::mem::replace(&mut other.sload_opcode_record, self.sload_opcode_record);
-            self.total_time = self
-                .total_time
-                .checked_add(other.total_time)
-                .expect("overflow");
             self.is_updated = true;
             return;
         }
@@ -193,19 +189,31 @@ impl CacheDbRecord {
     }
 
     pub fn total_in_basic(&self) -> u64 {
-        self.hits.hits_in_basic + self.misses.misses_in_basic
+        self.hits
+            .hits_in_basic
+            .checked_add(self.misses.misses_in_basic)
+            .expect("overflow")
     }
 
     pub fn total_in_code_by_hash(&self) -> u64 {
-        self.hits.hits_in_code_by_hash + self.misses.misses_in_code_by_hash
+        self.hits
+            .hits_in_code_by_hash
+            .checked_add(self.misses.misses_in_code_by_hash)
+            .expect("overflow")
     }
 
     pub fn total_in_storage(&self) -> u64 {
-        self.hits.hits_in_storage + self.misses.misses_in_storage
+        self.hits
+            .hits_in_storage
+            .checked_add(self.misses.misses_in_storage)
+            .expect("overflow")
     }
 
     pub fn total_in_block_hash(&self) -> u64 {
-        self.hits.hits_in_block_hash + self.misses.misses_in_block_hash
+        self.hits
+            .hits_in_block_hash
+            .checked_add(self.misses.misses_in_block_hash)
+            .expect("overflow")
     }
 
     pub fn total_hits(&self) -> u64 {
