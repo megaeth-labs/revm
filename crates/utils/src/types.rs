@@ -5,18 +5,20 @@ use serde::{Deserialize, Serialize};
 pub type RevmMetricRecord = OpcodeRecord;
 
 pub const STEP_LEN: usize = 4;
-pub const SLOAD_OPCODE_TIME_STEP: [u128; STEP_LEN] = [1, 10, 100, u128::MAX];
+pub const SLOAD_OPCODE_TIME_STEP: [u64; STEP_LEN] = [1, 10, 100, u64::MAX];
 
+/// The OpcodeRecord contains all performance information for opcode executions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
     /// The abscissa is opcode type, tuple means: (opcode counter, time, gas).
     #[serde(with = "serde_arrays")]
-    pub opcode_record: [(u64, Duration, i128); 256],
+    pub opcode_record: [(u64, u64, i128); 256],
     /// tuple means:(the ladder of sload opcode excution time, sload counter).
     #[serde(with = "serde_arrays")]
-    pub sload_opcode_record: [(u128, u128); STEP_LEN],
-    /// The total time of all opcode.
-    pub total_time: Duration,
+    pub sload_opcode_record: [(u64, u64); STEP_LEN],
+    /// The total time (cpu cycles) of all opcode.
+    pub total_time: u64,
+    /// Update flag.
     pub is_updated: bool,
 }
 
@@ -24,15 +26,16 @@ impl Default for OpcodeRecord {
     fn default() -> Self {
         let sload_opcode_record_init = SLOAD_OPCODE_TIME_STEP.map(|v| (v, 0));
         Self {
-            opcode_record: [(0, Duration::default(), 0); 256],
+            opcode_record: [(0, 0, 0); 256],
             sload_opcode_record: sload_opcode_record_init,
-            total_time: Duration::default(),
+            total_time: 0,
             is_updated: false,
         }
     }
 }
 
 impl OpcodeRecord {
+    /// Update this struct with the other's data.
     pub fn update(&mut self, other: &mut OpcodeRecord) {
         if !other.is_updated {
             return;
@@ -74,10 +77,14 @@ impl OpcodeRecord {
         }
     }
 
-    pub fn add_sload_opcode_record(&mut self, op_time: u128) {
+    /// Record sload duration percentile.
+    pub fn add_sload_opcode_record(&mut self, op_time: u64) {
         for index in 0..SLOAD_OPCODE_TIME_STEP.len() {
             if op_time <= SLOAD_OPCODE_TIME_STEP[index] {
-                self.sload_opcode_record[index].1 = self.sload_opcode_record[index].1 + 1;
+                self.sload_opcode_record[index].1 = self.sload_opcode_record[index]
+                    .1
+                    .checked_add(1)
+                    .expect("overflow");
                 return;
             }
         }
@@ -88,6 +95,7 @@ impl OpcodeRecord {
     }
 }
 
+/// The number of cache hits when accessing CacheDb.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
 pub struct CacheHits {
     pub hits_in_block_hash: u64,
@@ -117,6 +125,7 @@ impl CacheHits {
     }
 }
 
+/// The number of cache misses when accessing CacheDb.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
 pub struct CacheMisses {
     pub misses_in_block_hash: u64,
@@ -146,6 +155,7 @@ impl CacheMisses {
     }
 }
 
+/// The additional cost incurred when CacheDb is not hit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
 pub struct CacheMissesPenalty {
     pub penalty_in_block_hash: Duration,
@@ -174,6 +184,7 @@ impl CacheMissesPenalty {
     }
 }
 
+/// CacheDbRecord records the relevant information of CacheDb hits during the execution process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
 pub struct CacheDbRecord {
     pub hits: CacheHits,
@@ -182,12 +193,14 @@ pub struct CacheDbRecord {
 }
 
 impl CacheDbRecord {
+    /// Update this struct with the other's data.
     pub fn update(&mut self, other: &Self) {
         self.hits.update(&other.hits);
         self.misses.update(&other.misses);
         self.penalty.update(&other.penalty);
     }
 
+    /// The number of times CacheDb is accessed in function basic.
     pub fn total_in_basic(&self) -> u64 {
         self.hits
             .hits_in_basic
@@ -195,6 +208,7 @@ impl CacheDbRecord {
             .expect("overflow")
     }
 
+    /// The number of times CacheDb is accessed in function code_by_hash.
     pub fn total_in_code_by_hash(&self) -> u64 {
         self.hits
             .hits_in_code_by_hash
@@ -202,6 +216,7 @@ impl CacheDbRecord {
             .expect("overflow")
     }
 
+    /// The number of times CacheDb is accessed in function storage.
     pub fn total_in_storage(&self) -> u64 {
         self.hits
             .hits_in_storage
@@ -209,6 +224,7 @@ impl CacheDbRecord {
             .expect("overflow")
     }
 
+    /// The number of times CacheDb is accessed in function block_hash.
     pub fn total_in_block_hash(&self) -> u64 {
         self.hits
             .hits_in_block_hash
@@ -216,6 +232,7 @@ impl CacheDbRecord {
             .expect("overflow")
     }
 
+    /// The number of cache hits when accessing CacheDB.
     pub fn total_hits(&self) -> u64 {
         let mut total = self
             .hits
@@ -232,6 +249,7 @@ impl CacheDbRecord {
         total
     }
 
+    /// The number of cache miss when accessing CacheDB.
     pub fn total_miss(&self) -> u64 {
         let mut total = self
             .misses
@@ -248,6 +266,7 @@ impl CacheDbRecord {
         total
     }
 
+    /// The additional cost incurred when accessing CacheDb without a cache hit.
     pub fn total_penalty_times(&self) -> f64 {
         let mut total = self
             .penalty

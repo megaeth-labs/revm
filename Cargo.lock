@@ -522,6 +522,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37e366bff8cd32dd8754b0991fb66b279dc48f598c3a18914852a6673deef583"
+dependencies = [
+ "quote 1.0.33",
+ "syn 2.0.38",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1449,7 +1459,7 @@ version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df94bf4a15ed69e64ea45405e504ef293a3614413e7d8f5529112c5acd4a114"
 dependencies = [
- "ctor",
+ "ctor 0.1.26",
  "libc",
  "wasi 0.7.0",
 ]
@@ -2099,6 +2109,7 @@ dependencies = [
 name = "revm-utils"
 version = "0.1.0"
 dependencies = [
+ "ctor 0.2.5",
  "minstant",
  "serde",
  "serde_arrays",

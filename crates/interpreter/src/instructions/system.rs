@@ -1,3 +1,5 @@
+#[cfg(feature = "enable_opcode_metrics")]
+use crate::opcode::*;
 use crate::{
     gas,
     interpreter::Interpreter,
@@ -5,29 +7,18 @@ use crate::{
     Host, InstructionResult,
 };
 use core::cmp::min;
-
-#[cfg(not(feature = "enable_opcode_metrics"))]
-pub fn sha3(interpreter: &mut Interpreter, _host: &mut dyn Host) {
-    pop!(interpreter, from, len);
-    let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(interpreter, gas::sha3_cost(len as u64));
-    let hash = if len == 0 {
-        KECCAK_EMPTY
-    } else {
-        let from = as_usize_or_fail!(interpreter, from, InstructionResult::InvalidOperandOOG);
-        memory_resize!(interpreter, from, len);
-        keccak256(interpreter.memory.get_slice(from, len))
-    };
-
-    push_b256!(interpreter, hash);
-}
-
 #[cfg(feature = "enable_opcode_metrics")]
-pub fn sha3(interpreter: &mut Interpreter, _host: &mut dyn Host, gas_used: &mut u64) {
+use revm_utils::metric::record_gas;
+
+pub fn sha3(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     pop!(interpreter, from, len);
     let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
     let cost = gas::sha3_cost(len as u64);
     gas_or_fail!(interpreter, cost);
+
+    #[cfg(feature = "enable_opcode_metrics")]
+    record_gas(SHA3, cost.unwrap_or(0));
+
     let hash = if len == 0 {
         KECCAK_EMPTY
     } else {
@@ -36,7 +27,6 @@ pub fn sha3(interpreter: &mut Interpreter, _host: &mut dyn Host, gas_used: &mut 
         keccak256(interpreter.memory.get_slice(from, len))
     };
 
-    *gas_used = cost.unwrap_or(0);
     push_b256!(interpreter, hash);
 }
 
@@ -55,38 +45,15 @@ pub fn codesize(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     push!(interpreter, U256::from(interpreter.contract.bytecode.len()));
 }
 
-#[cfg(not(feature = "enable_opcode_metrics"))]
 pub fn codecopy(interpreter: &mut Interpreter, _host: &mut dyn Host) {
-    pop!(interpreter, memory_offset, code_offset, len);
-    let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(interpreter, gas::verylowcopy_cost(len as u64));
-    if len == 0 {
-        return;
-    }
-    let memory_offset = as_usize_or_fail!(
-        interpreter,
-        memory_offset,
-        InstructionResult::InvalidOperandOOG
-    );
-    let code_offset = as_usize_saturated!(code_offset);
-    memory_resize!(interpreter, memory_offset, len);
-
-    // Safety: set_data is unsafe function and memory_resize ensures us that it is safe to call it
-    interpreter.memory.set_data(
-        memory_offset,
-        code_offset,
-        len,
-        interpreter.contract.bytecode.original_bytecode_slice(),
-    );
-}
-
-#[cfg(feature = "enable_opcode_metrics")]
-pub fn codecopy(interpreter: &mut Interpreter, _host: &mut dyn Host, gas_used: &mut u64) {
     pop!(interpreter, memory_offset, code_offset, len);
     let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
     let cost = gas::verylowcopy_cost(len as u64);
     gas_or_fail!(interpreter, cost);
-    *gas_used = cost.unwrap_or(0);
+
+    #[cfg(feature = "enable_opcode_metrics")]
+    record_gas(CODECOPY, cost.unwrap_or(0));
+
     if len == 0 {
         return;
     }
@@ -134,35 +101,15 @@ pub fn callvalue(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     push!(interpreter, interpreter.contract.value);
 }
 
-#[cfg(not(feature = "enable_opcode_metrics"))]
 pub fn calldatacopy(interpreter: &mut Interpreter, _host: &mut dyn Host) {
-    pop!(interpreter, memory_offset, data_offset, len);
-    let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(interpreter, gas::verylowcopy_cost(len as u64));
-    if len == 0 {
-        return;
-    }
-    let memory_offset = as_usize_or_fail!(
-        interpreter,
-        memory_offset,
-        InstructionResult::InvalidOperandOOG
-    );
-    let data_offset = as_usize_saturated!(data_offset);
-    memory_resize!(interpreter, memory_offset, len);
-
-    // Safety: set_data is unsafe function and memory_resize ensures us that it is safe to call it
-    interpreter
-        .memory
-        .set_data(memory_offset, data_offset, len, &interpreter.contract.input);
-}
-
-#[cfg(feature = "enable_opcode_metrics")]
-pub fn calldatacopy(interpreter: &mut Interpreter, _host: &mut dyn Host, gas_used: &mut u64) {
     pop!(interpreter, memory_offset, data_offset, len);
     let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
     let cost = gas::verylowcopy_cost(len as u64);
     gas_or_fail!(interpreter, cost);
-    *gas_used = cost.unwrap_or(0);
+
+    #[cfg(feature = "enable_opcode_metrics")]
+    record_gas(CALLDATACOPY, cost.unwrap_or(0));
+
     if len == 0 {
         return;
     }
@@ -179,6 +126,7 @@ pub fn calldatacopy(interpreter: &mut Interpreter, _host: &mut dyn Host, gas_use
         .memory
         .set_data(memory_offset, data_offset, len, &interpreter.contract.input);
 }
+
 pub fn returndatasize<SPEC: Spec>(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     gas!(interpreter, gas::BASE);
     // EIP-211: New opcodes: RETURNDATASIZE and RETURNDATACOPY
@@ -189,46 +137,17 @@ pub fn returndatasize<SPEC: Spec>(interpreter: &mut Interpreter, _host: &mut dyn
     );
 }
 
-#[cfg(not(feature = "enable_opcode_metrics"))]
 pub fn returndatacopy<SPEC: Spec>(interpreter: &mut Interpreter, _host: &mut dyn Host) {
-    // EIP-211: New opcodes: RETURNDATASIZE and RETURNDATACOPY
-    check!(interpreter, SPEC::enabled(BYZANTIUM));
-    pop!(interpreter, memory_offset, offset, len);
-    let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
-    gas_or_fail!(interpreter, gas::verylowcopy_cost(len as u64));
-    let data_offset = as_usize_saturated!(offset);
-    let (data_end, overflow) = data_offset.overflowing_add(len);
-    if overflow || data_end > interpreter.return_data_buffer.len() {
-        interpreter.instruction_result = InstructionResult::OutOfOffset;
-        return;
-    }
-    if len != 0 {
-        let memory_offset = as_usize_or_fail!(
-            interpreter,
-            memory_offset,
-            InstructionResult::InvalidOperandOOG
-        );
-        memory_resize!(interpreter, memory_offset, len);
-        interpreter.memory.set(
-            memory_offset,
-            &interpreter.return_data_buffer[data_offset..data_end],
-        );
-    }
-}
-
-#[cfg(feature = "enable_opcode_metrics")]
-pub fn returndatacopy<SPEC: Spec>(
-    interpreter: &mut Interpreter,
-    _host: &mut dyn Host,
-    gas_used: &mut u64,
-) {
     // EIP-211: New opcodes: RETURNDATASIZE and RETURNDATACOPY
     check!(interpreter, SPEC::enabled(BYZANTIUM));
     pop!(interpreter, memory_offset, offset, len);
     let len = as_usize_or_fail!(interpreter, len, InstructionResult::InvalidOperandOOG);
     let cost = gas::verylowcopy_cost(len as u64);
     gas_or_fail!(interpreter, cost);
-    *gas_used = cost.unwrap_or(0);
+
+    #[cfg(feature = "enable_opcode_metrics")]
+    record_gas(RETURNDATACOPY, cost.unwrap_or(0));
+
     let data_offset = as_usize_saturated!(offset);
     let (data_end, overflow) = data_offset.overflowing_add(len);
     if overflow || data_end > interpreter.return_data_buffer.len() {

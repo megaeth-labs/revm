@@ -16,7 +16,7 @@ use crate::{
 use core::ops::Range;
 
 #[cfg(feature = "enable_opcode_metrics")]
-use revm_utils::instrument::*;
+use revm_utils::metric::*;
 
 pub const STACK_LIMIT: u64 = 1024;
 pub const CALL_STACK_LIMIT: u64 = 1024;
@@ -138,18 +138,10 @@ impl Interpreter {
         // it will do noop and just stop execution of this contract
         self.instruction_pointer = unsafe { self.instruction_pointer.offset(1) };
 
-        #[cfg(not(feature = "enable_opcode_metrics"))]
         eval::<H, SPEC>(opcode, self, host);
 
         #[cfg(feature = "enable_opcode_metrics")]
-        {
-            let mut gas_used = 0u64;
-            let mut gas_refund = 0i64;
-
-            eval::<H, SPEC>(opcode, self, host, &mut gas_used, &mut gas_refund);
-
-            record(opcode, gas_used, gas_refund);
-        }
+        record(opcode);
     }
 
     /// loop steps until we are finished with execution
