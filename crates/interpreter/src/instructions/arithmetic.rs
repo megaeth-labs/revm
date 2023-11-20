@@ -1,9 +1,13 @@
 use super::i256::{i256_div, i256_mod};
+#[cfg(feature = "enable_opcode_metrics")]
+use crate::opcode::EXP;
 use crate::{
     gas,
     primitives::{Spec, U256},
     Host, InstructionResult, Interpreter,
 };
+#[cfg(feature = "enable_opcode_metrics")]
+use revm_utils::metric::record_gas;
 
 pub fn wrapped_add(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     gas!(interpreter, gas::VERYLOW);
@@ -61,24 +65,15 @@ pub fn mulmod(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     *op3 = op1.mul_mod(op2, *op3)
 }
 
-#[cfg(not(feature = "enable_opcode_metrics"))]
 pub fn eval_exp<SPEC: Spec>(interpreter: &mut Interpreter, _host: &mut dyn Host) {
-    pop_top!(interpreter, op1, op2);
-    gas_or_fail!(interpreter, gas::exp_cost::<SPEC>(*op2));
-    *op2 = op1.pow(*op2);
-}
-
-#[cfg(feature = "enable_opcode_metrics")]
-pub fn eval_exp<SPEC: Spec>(
-    interpreter: &mut Interpreter,
-    _host: &mut dyn Host,
-    gas_used: &mut u64,
-) {
     pop_top!(interpreter, op1, op2);
     let cost = gas::exp_cost::<SPEC>(*op2);
     gas_or_fail!(interpreter, cost);
+
+    #[cfg(feature = "enable_opcode_metrics")]
+    record_gas(EXP, cost.unwrap_or(0));
+
     *op2 = op1.pow(*op2);
-    *gas_used = cost.unwrap_or(0);
 }
 
 /// In the yellow paper `SIGNEXTEND` is defined to take two inputs, we will call them

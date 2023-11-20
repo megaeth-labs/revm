@@ -1,3 +1,3 @@
-pub mod instrument;
-pub mod time;
+pub mod metric;
+pub mod time_utils;
 pub mod types;
