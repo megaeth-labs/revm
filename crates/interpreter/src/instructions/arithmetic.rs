@@ -7,7 +7,7 @@ use crate::{
     Host, InstructionResult, Interpreter,
 };
 #[cfg(feature = "enable_opcode_metrics")]
-use revm_utils::metric::record_gas;
+use revm_utils::instruction_metric::record_gas;
 
 pub fn wrapped_add(interpreter: &mut Interpreter, _host: &mut dyn Host) {
     gas!(interpreter, gas::VERYLOW);
