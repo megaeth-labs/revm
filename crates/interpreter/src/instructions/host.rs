@@ -11,7 +11,7 @@ use crate::{
 };
 use core::cmp::min;
 #[cfg(feature = "enable_opcode_metrics")]
-use revm_utils::metric::record_gas;
+use revm_utils::instruction_metric::record_gas;
 
 pub fn balance<SPEC: Spec>(interpreter: &mut Interpreter, host: &mut dyn Host) {
     pop_address!(interpreter, address);

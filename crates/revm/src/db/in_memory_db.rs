@@ -4,16 +4,13 @@ use crate::primitives::{
     KECCAK_EMPTY, U256,
 };
 use crate::Database;
-#[cfg(not(feature = "enable_cache_record"))]
 use alloc::vec::Vec;
 use core::convert::Infallible;
 
 #[cfg(feature = "enable_cache_record")]
-use myalloc::{TrackingAllocator, Vec};
-#[cfg(feature = "enable_cache_record")]
 use revm_interpreter::primitives::hash_map::DefaultHashBuilder;
 #[cfg(feature = "enable_cache_record")]
-pub use revm_utils::types::CacheDbRecord;
+use tracking_allocator::TrackingAllocator;
 
 pub type InMemoryDB = CacheDB<EmptyDB>;
 
@@ -43,10 +40,9 @@ pub struct CacheDB<ExtDB: DatabaseRef> {
     /// `code` is always `None`, and bytecode can be found in `contracts`.
     pub accounts: HashMap<B160, DbAccount, DefaultHashBuilder, TrackingAllocator>,
     pub contracts: HashMap<B256, Bytecode, DefaultHashBuilder, TrackingAllocator>,
-    pub logs: Vec<Log, TrackingAllocator>,
+    pub logs: Vec<Log>,
     pub block_hashes: HashMap<U256, B256, DefaultHashBuilder, TrackingAllocator>,
     pub db: ExtDB,
-    pub cache_record: CacheDbRecord,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -55,13 +51,18 @@ pub struct DbAccount {
     /// If account is selfdestructed or newly created, storage will be cleared.
     pub account_state: AccountState,
     /// storage slots
+    #[cfg(not(feature = "enable_cache_record"))]
     pub storage: HashMap<U256, U256>,
+    #[cfg(feature = "enable_cache_record")]
+    pub storage: HashMap<U256, U256, DefaultHashBuilder, TrackingAllocator>,
 }
 
 impl DbAccount {
     pub fn new_not_existing() -> Self {
         Self {
             account_state: AccountState::NotExisting,
+            #[cfg(feature = "enable_cache_record")]
+            storage: HashMap::new_in(TrackingAllocator),
             ..Default::default()
         }
     }
@@ -80,7 +81,10 @@ impl From<Option<AccountInfo>> for DbAccount {
             Self {
                 info,
                 account_state: AccountState::None,
-                ..Default::default()
+                #[cfg(feature = "enable_cache_record")]
+                storage: HashMap::new_in(TrackingAllocator),
+                #[cfg(not(feature = "enable_cache_record"))]
+                storage: HashMap::new(),
             }
         } else {
             Self::new_not_existing()
@@ -93,7 +97,10 @@ impl From<AccountInfo> for DbAccount {
         Self {
             info,
             account_state: AccountState::None,
-            ..Default::default()
+            #[cfg(feature = "enable_cache_record")]
+            storage: HashMap::new_in(TrackingAllocator),
+            #[cfg(not(feature = "enable_cache_record"))]
+            storage: HashMap::new(),
         }
     }
 }
@@ -142,16 +149,15 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
         contracts.insert(B256::zero(), Bytecode::new());
 
         let accounts = HashMap::new_in(TrackingAllocator);
-        let logs = Vec::new_in(TrackingAllocator);
+        let logs = Vec::new();
         let block_hashes = HashMap::new_in(TrackingAllocator);
-        myalloc::reset();
+        tracking_allocator::reset();
         Self {
             accounts,
             contracts,
             logs,
             block_hashes,
             db,
-            cache_record: CacheDbRecord::default(),
         }
     }
 
@@ -178,15 +184,25 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
     pub fn load_account(&mut self, address: B160) -> Result<&mut DbAccount, ExtDB::Error> {
         let db = &self.db;
         match self.accounts.entry(address) {
-            Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => Ok(entry.insert(
-                db.basic(address)?
-                    .map(|info| DbAccount {
-                        info,
-                        ..Default::default()
-                    })
-                    .unwrap_or_else(DbAccount::new_not_existing),
-            )),
+            Entry::Occupied(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::HitRecord::new(revm_utils::FunctionType::LoadAccount);
+
+                Ok(entry.into_mut())
+            }
+            Entry::Vacant(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::MissRecord::new(revm_utils::FunctionType::LoadAccount);
+
+                Ok(entry.insert(
+                    db.basic(address)?
+                        .map(|info| DbAccount {
+                            info,
+                            ..Default::default()
+                        })
+                        .unwrap_or_else(DbAccount::new_not_existing),
+                ))
+            }
         }
     }
 
@@ -216,14 +232,16 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
 
     #[cfg(feature = "enable_cache_record")]
     pub fn size(&self) -> usize {
-        let ret = myalloc::stats();
+        let ret = tracking_allocator::stats();
 
-        ret.diff as usize
-    }
+        let topic_size = self
+            .logs
+            .iter()
+            .map(|v| v.topics.capacity() * 32 as usize)
+            .sum::<usize>();
+        let log_size = topic_size + self.logs.capacity() * std::mem::size_of::<Log>();
 
-    #[cfg(feature = "enable_cache_record")]
-    pub fn get_metric(&self) -> CacheDbRecord {
-        self.cache_record
+        log_size + ret.diff as usize + std::mem::size_of::<CacheDB<ExtDB>>()
     }
 }
 
@@ -268,32 +286,16 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
         match self.block_hashes.entry(number) {
             Entry::Occupied(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                {
-                    self.cache_record.hits.hits_in_block_hash += 1;
-                }
+                let _record = revm_utils::HitRecord::new(revm_utils::FunctionType::BlockHash);
                 Ok(*entry.get())
             }
             Entry::Vacant(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let time_record = minstant::Instant::now();
+                let _record = revm_utils::MissRecord::new(revm_utils::FunctionType::BlockHash);
 
                 // if storage was cleared, we dont need to ping db.
                 let hash = self.db.block_hash(number)?;
                 entry.insert(hash);
-
-                #[cfg(feature = "enable_cache_record")]
-                {
-                    let duration = time_record.elapsed();
-
-                    self.cache_record.penalty.penalty_in_block_hash = self
-                        .cache_record
-                        .penalty
-                        .penalty_in_block_hash
-                        .checked_add(duration)
-                        .expect("cache_misses_penalty overflow");
-
-                    self.cache_record.misses.misses_in_block_hash += 1;
-                }
 
                 Ok(hash)
             }
@@ -304,16 +306,13 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
         let basic = match self.accounts.entry(address) {
             Entry::Occupied(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                {
-                    self.cache_record.hits.hits_in_basic += 1;
-                }
+                let _record = revm_utils::HitRecord::new(revm_utils::FunctionType::Basic);
                 entry.into_mut()
             }
             Entry::Vacant(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let time_record = minstant::Instant::now();
-
-                let ret = entry.insert(
+                let _record = revm_utils::MissRecord::new(revm_utils::FunctionType::Basic);
+                entry.insert(
                     self.db
                         .basic(address)?
                         .map(|info| DbAccount {
@@ -321,21 +320,7 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                             ..Default::default()
                         })
                         .unwrap_or_else(DbAccount::new_not_existing),
-                );
-
-                #[cfg(feature = "enable_cache_record")]
-                {
-                    let duration = time_record.elapsed();
-                    self.cache_record.penalty.penalty_in_basic = self
-                        .cache_record
-                        .penalty
-                        .penalty_in_basic
-                        .checked_add(duration)
-                        .expect("cache_misses_penalty overflow");
-
-                    self.cache_record.misses.misses_in_basic += 1;
-                }
-                ret
+                )
             }
         };
         Ok(basic.info())
@@ -351,9 +336,8 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                 match acc_entry.storage.entry(index) {
                     Entry::Occupied(entry) => {
                         #[cfg(feature = "enable_cache_record")]
-                        {
-                            self.cache_record.hits.hits_in_storage += 1;
-                        }
+                        let _record = revm_utils::HitRecord::new(revm_utils::FunctionType::Storage);
+
                         Ok(*entry.get())
                     }
                     Entry::Vacant(entry) => {
@@ -362,28 +346,17 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                             AccountState::StorageCleared | AccountState::NotExisting
                         ) {
                             #[cfg(feature = "enable_cache_record")]
-                            {
-                                self.cache_record.hits.hits_in_storage += 1;
-                            }
+                            let _record =
+                                revm_utils::HitRecord::new(revm_utils::FunctionType::Storage);
+
                             Ok(U256::ZERO)
                         } else {
                             #[cfg(feature = "enable_cache_record")]
-                            let time_record = minstant::Instant::now();
+                            let _record =
+                                revm_utils::MissRecord::new(revm_utils::FunctionType::Storage);
 
                             let slot = self.db.storage(address, index)?;
                             entry.insert(slot);
-                            #[cfg(feature = "enable_cache_record")]
-                            {
-                                let duration = time_record.elapsed();
-                                self.cache_record.penalty.penalty_in_storage = self
-                                    .cache_record
-                                    .penalty
-                                    .penalty_in_storage
-                                    .checked_add(duration)
-                                    .expect("cache_misses_penalty overflow");
-
-                                self.cache_record.misses.misses_in_storage += 1;
-                            }
 
                             Ok(slot)
                         }
@@ -392,7 +365,7 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
             }
             Entry::Vacant(acc_entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let time_record = minstant::Instant::now();
+                let _record = revm_utils::MissRecord::new(revm_utils::FunctionType::Storage);
 
                 // acc needs to be loaded for us to access slots.
                 let info = self.db.basic(address)?;
@@ -405,18 +378,6 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                     (info.into(), U256::ZERO)
                 };
                 acc_entry.insert(account);
-                #[cfg(feature = "enable_cache_record")]
-                {
-                    let duration = time_record.elapsed();
-                    self.cache_record.penalty.penalty_in_storage = self
-                        .cache_record
-                        .penalty
-                        .penalty_in_storage
-                        .checked_add(duration)
-                        .expect("cache_misses_penalty overflow");
-
-                    self.cache_record.misses.misses_in_storage += 1;
-                }
 
                 Ok(value)
             }
@@ -427,32 +388,16 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
         match self.contracts.entry(code_hash) {
             Entry::Occupied(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                {
-                    self.cache_record.hits.hits_in_code_by_hash += 1;
-                }
+                let _record = revm_utils::HitRecord::new(revm_utils::FunctionType::CodeByHash);
 
                 Ok(entry.get().clone())
             }
             Entry::Vacant(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let time_record = minstant::Instant::now();
+                let _record = revm_utils::MissRecord::new(revm_utils::FunctionType::CodeByHash);
 
                 // if you return code bytes when basic fn is called this function is not needed.
-                let ret = entry.insert(self.db.code_by_hash(code_hash)?).clone();
-                #[cfg(feature = "enable_cache_record")]
-                {
-                    let duration = time_record.elapsed();
-                    self.cache_record.penalty.penalty_in_code_by_hash = self
-                        .cache_record
-                        .penalty
-                        .penalty_in_code_by_hash
-                        .checked_add(duration)
-                        .expect("cache_misses_penalty overflow");
-
-                    self.cache_record.misses.misses_in_code_by_hash += 1;
-                }
-
-                Ok(ret)
+                Ok(entry.insert(self.db.code_by_hash(code_hash)?).clone())
             }
         }
     }

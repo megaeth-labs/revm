@@ -16,7 +16,7 @@ use crate::{
 use core::ops::Range;
 
 #[cfg(feature = "enable_opcode_metrics")]
-use revm_utils::metric::*;
+use revm_utils::instruction_metric::*;
 
 pub const STACK_LIMIT: u64 = 1024;
 pub const CALL_STACK_LIMIT: u64 = 1024;
