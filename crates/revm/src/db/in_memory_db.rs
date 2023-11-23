@@ -244,13 +244,7 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
         let code_size = self
             .accounts
             .iter()
-            .map(|(_, v)| {
-                v.info
-                    .code
-                    .as_ref()
-                    .map(|c| std::mem::size_of_val(&c) + c.len())
-                    .unwrap_or(0)
-            })
+            .map(|(_, v)| v.info.code.as_ref().map(|c| c.len()).unwrap_or(0))
             .sum::<usize>();
 
         log_size + code_size + ret.diff as usize + std::mem::size_of::<CacheDB<ExtDB>>()
