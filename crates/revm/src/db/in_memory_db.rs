@@ -234,14 +234,27 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
     pub fn size(&self) -> usize {
         let ret = tracking_allocator::stats();
 
-        let topic_size = self
+        let topic_and_bytes_size = self
             .logs
             .iter()
-            .map(|v| v.topics.capacity() * 32 as usize)
+            .map(|v| v.topics.capacity() * 32 as usize + v.data.len())
             .sum::<usize>();
-        let log_size = topic_size + self.logs.capacity() * std::mem::size_of::<Log>();
 
-        log_size + ret.diff as usize + std::mem::size_of::<CacheDB<ExtDB>>()
+        let log_size = topic_and_bytes_size + self.logs.capacity() * std::mem::size_of::<Log>();
+
+        let account_code_size = self
+            .accounts
+            .iter()
+            .map(|(_, v)| v.info.code.as_ref().map(|c| c.len()).unwrap_or(0))
+            .sum::<usize>();
+
+        let contract_code_size = self.contracts.iter().map(|(_, v)| v.len()).sum::<usize>();
+
+        log_size
+            + account_code_size
+            + contract_code_size
+            + ret.diff as usize
+            + std::mem::size_of::<CacheDB<ExtDB>>()
     }
 }
 
