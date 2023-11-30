@@ -153,7 +153,7 @@ impl CacheMisses {
 }
 
 const US_PENALTY_STEP_SIZE: usize = 200;
-const NS_PENALTY_STEP_SIZE: usize = 10;
+const NS_PENALTY_STEP_SIZE: usize = 40;
 /// The additional cost (cpu cycles) incurred when CacheDb is not hit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
 pub struct CacheMissesPenalty {
@@ -212,14 +212,16 @@ impl CacheMissesPenalty {
     }
 
     pub fn percentile(&mut self, time_in_ns: f64) {
-        if time_in_ns >= 1000.0 {
+        if time_in_ns >= 4000.0 {
             let mut index = (time_in_ns / 1000.0) as usize;
             if index > US_PENALTY_STEP_SIZE - 1 {
                 index = US_PENALTY_STEP_SIZE - 1;
             }
             self.us_percentile[index] = self.us_percentile[index].checked_add(1).expect("overflow");
         } else {
-            self.us_percentile[0] = self.us_percentile[0].checked_add(1).expect("overflow");
+            let index = (time_in_ns / 1000.0) as usize;
+            self.us_percentile[index] = self.us_percentile[index].checked_add(1).expect("overflow");
+
             let index = (time_in_ns / 100.0) as usize;
             self.ns_percentile[index] = self.ns_percentile[index].checked_add(1).expect("overflow");
         }
