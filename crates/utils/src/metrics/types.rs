@@ -3,18 +3,75 @@ use serde::{Deserialize, Serialize};
 
 use crate::time_utils;
 
-pub const STEP_LEN: usize = 4;
-pub const SLOAD_OPCODE_TIME_STEP: [u64; STEP_LEN] = [1, 10, 100, u64::MAX];
+const STEP_IN_US: u64 = 1;
+const STEP_IN_NS: u64 = 100;
+
+const US_SPAN_SIZE: usize = 200;
+const NS_SPAN_SIZE: usize = 40;
+/// The additional cost (cpu cycles) incurred when CacheDb is not hit.
+
+/// This is a structure for statistical time distribution, which records the
+/// distribution of time from two levels: subtle and nanosecond.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+
+pub struct TimeDistributionStats {
+    /// The subtle range of statistical distribution, step is STEP_IN_US.
+    pub span_in_us: usize,
+    /// The nanosecond range of statistical distribution, step is STEP_IN_NS.
+    pub span_in_ns: usize,
+    /// Record the time distribution at a subtle level.
+    pub us_percentile: Vec<u64>,
+    /// Record the time distribution at a nanosecond level.
+    pub ns_percentile: Vec<u64>,
+}
+
+impl TimeDistributionStats {
+    fn new(span_in_us: usize, span_in_ns: usize) -> Self {
+        TimeDistributionStats {
+            span_in_us,
+            span_in_ns,
+            us_percentile: Vec::with_capacity(span_in_us),
+            ns_percentile: Vec::with_capacity(span_in_ns),
+        }
+    }
+
+    fn update(&mut self, other: &TimeDistributionStats) {
+        for index in 0..self.span_in_us {
+            self.us_percentile[index] = self.us_percentile[index]
+                .checked_add(other.us_percentile[index])
+                .expect("overflow");
+        }
+        for index in 0..self.span_in_ns {
+            self.ns_percentile[index] = self.ns_percentile[index]
+                .checked_add(other.ns_percentile[index])
+                .expect("overflow");
+        }
+    }
+
+    fn record(&mut self, time_in_ns: f64) {
+        // Record the time distribution at a subtle level.
+        let mut index = (time_in_ns / (1000.0 * STEP_IN_US as f64)) as usize;
+        if index > self.span_in_us - 1 {
+            index = self.span_in_us - 1;
+        }
+        self.us_percentile[index] = self.us_percentile[index].checked_add(1).expect("overflow");
+
+        // When the time is less than 4 us, record the distribution of time at the nanosecond level.
+        if time_in_ns < self.span_in_ns as f64 {
+            let index = (time_in_ns / STEP_IN_NS as f64) as usize;
+            self.ns_percentile[index] = self.ns_percentile[index].checked_add(1).expect("overflow");
+        }
+    }
+}
 
 /// The OpcodeRecord contains all performance information for opcode executions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
     /// The abscissa is opcode type, tuple means: (opcode counter, time, gas).
     #[serde(with = "serde_arrays")]
     pub opcode_record: [(u64, u64, i128); 256],
-    /// tuple means:(the ladder of sload opcode excution time, sload counter).
-    #[serde(with = "serde_arrays")]
-    pub sload_opcode_record: [(u64, u64); STEP_LEN],
+    /// Record the time distribution of the sload.
+    sload_percentile: TimeDistributionStats,
     /// The total time (cpu cycles) of all opcode.
     pub total_time: u64,
     /// Update flag.
@@ -23,10 +80,10 @@ pub struct OpcodeRecord {
 
 impl Default for OpcodeRecord {
     fn default() -> Self {
-        let sload_opcode_record_init = SLOAD_OPCODE_TIME_STEP.map(|v| (v, 0));
+        let sload_percentile = TimeDistributionStats::new(US_SPAN_SIZE, NS_SPAN_SIZE);
         Self {
             opcode_record: [(0, 0, 0); 256],
-            sload_opcode_record: sload_opcode_record_init,
+            sload_percentile,
             total_time: 0,
             is_updated: false,
         }
@@ -47,8 +104,7 @@ impl OpcodeRecord {
 
         if !self.is_updated {
             self.opcode_record = std::mem::replace(&mut other.opcode_record, self.opcode_record);
-            self.sload_opcode_record =
-                std::mem::replace(&mut other.sload_opcode_record, self.sload_opcode_record);
+            self.sload_percentile = other.sload_percentile.clone();
             self.is_updated = true;
             return;
         }
@@ -68,25 +124,12 @@ impl OpcodeRecord {
                 .expect("overflow");
         }
 
-        for index in 0..self.sload_opcode_record.len() {
-            self.sload_opcode_record[index].1 = self.sload_opcode_record[index]
-                .1
-                .checked_add(other.sload_opcode_record[index].1)
-                .expect("overflow");
-        }
+        self.sload_percentile.update(&other.sload_percentile);
     }
 
     /// Record sload duration percentile.
-    pub fn add_sload_opcode_record(&mut self, op_time: u64) {
-        for index in 0..SLOAD_OPCODE_TIME_STEP.len() {
-            if op_time < SLOAD_OPCODE_TIME_STEP[index] {
-                self.sload_opcode_record[index].1 = self.sload_opcode_record[index]
-                    .1
-                    .checked_add(1)
-                    .expect("overflow");
-                return;
-            }
-        }
+    pub fn add_sload_opcode_record(&mut self, op_time_ns: f64) {
+        self.sload_percentile.record(op_time_ns);
     }
 
     pub fn not_empty(&self) -> bool {
@@ -131,27 +174,21 @@ impl AccessStats {
     }
 }
 
-const US_PENALTY_STEP_SIZE: usize = 200;
-const NS_PENALTY_STEP_SIZE: usize = 40;
 /// The additional cost (cpu cycles) incurred when CacheDb is not hit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissesPenalty {
     // Record the penalty when each function hits the cache.
     pub time: AccessStats,
     /// Record the time distribution at a subtle level.
-    #[serde(with = "serde_arrays")]
-    pub us_percentile: [u64; US_PENALTY_STEP_SIZE],
-    /// Record the time distribution at a nanosecond level.
-    #[serde(with = "serde_arrays")]
-    pub ns_percentile: [u64; NS_PENALTY_STEP_SIZE],
+    percentile: TimeDistributionStats,
 }
 
 impl Default for MissesPenalty {
     fn default() -> Self {
+        let percentile = TimeDistributionStats::new(US_SPAN_SIZE, NS_SPAN_SIZE);
         MissesPenalty {
             time: AccessStats::default(),
-            us_percentile: [0; US_PENALTY_STEP_SIZE],
-            ns_percentile: [0; NS_PENALTY_STEP_SIZE],
+            percentile,
         }
     }
 }
@@ -159,37 +196,16 @@ impl Default for MissesPenalty {
 impl MissesPenalty {
     pub fn update(&mut self, other: &Self) {
         self.time.update(&other.time);
-
-        for index in 0..US_PENALTY_STEP_SIZE {
-            self.us_percentile[index] = self.us_percentile[index]
-                .checked_add(other.us_percentile[index])
-                .expect("overflow");
-        }
-        for index in 0..NS_PENALTY_STEP_SIZE {
-            self.ns_percentile[index] = self.ns_percentile[index]
-                .checked_add(other.ns_percentile[index])
-                .expect("overflow");
-        }
+        self.percentile.update(&other.percentile);
     }
 
     fn percentile(&mut self, time_in_ns: f64) {
-        // Record the time distribution at a subtle level.
-        let mut index = (time_in_ns / 1000.0) as usize;
-        if index > US_PENALTY_STEP_SIZE - 1 {
-            index = US_PENALTY_STEP_SIZE - 1;
-        }
-        self.us_percentile[index] = self.us_percentile[index].checked_add(1).expect("overflow");
-
-        // When the time is less than 4 us, record the distribution of time at the nanosecond level.
-        if time_in_ns < 4000.0 {
-            let index = (time_in_ns / 100.0) as usize;
-            self.ns_percentile[index] = self.ns_percentile[index].checked_add(1).expect("overflow");
-        }
+        self.percentile.record(time_in_ns);
     }
 }
 
 /// CacheDbRecord records the relevant information of CacheDb hits during the execution process.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CacheDbRecord {
     /// The number of cache hits when accessing CacheDB.
     hits: AccessStats,
@@ -226,7 +242,7 @@ impl CacheDbRecord {
 
     /// Return the penalties missed in each function and their distribution.
     pub fn penalty_stats(&self) -> MissesPenalty {
-        self.penalty
+        self.penalty.clone()
     }
 
     /// When hit, increase the number of hits count.

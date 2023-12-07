@@ -1,5 +1,5 @@
 use super::types::*;
-use crate::time_utils::{convert_cycles_to_ms, instant::Instant};
+use crate::time_utils::{convert_cycles_to_ns_f64, instant::Instant};
 
 /// This struct is used to record information during instruction execution
 /// and finally stores the data in the opcode_record field.
@@ -53,7 +53,7 @@ impl InstructionMetricRecoder {
         // statistical percentile of sload duration
         if opcode == 0x54 {
             self.record
-                .add_sload_opcode_record(convert_cycles_to_ms(cycles));
+                .add_sload_opcode_record(convert_cycles_to_ns_f64(cycles));
         }
 
         self.record.is_updated = true;
