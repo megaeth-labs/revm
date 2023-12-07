@@ -94,31 +94,71 @@ impl OpcodeRecord {
     }
 }
 
+/// This type represents in which function the access cache is accessed.
+#[derive(Copy, Clone)]
+pub enum Function {
+    Basic = 0,
+    CodeByHash,
+    Storage,
+    BlockHash,
+    LoadAccount,
+}
+/// This structure records the number of times cache hits/misses are accessed in each function.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
+pub struct AccessStats {
+    /// This array is used to store the number of hits/misses/penalty in each function,
+    /// and the index of the function corresponds to the order of the FunctionType.
+    #[serde(with = "serde_arrays")]
+    pub function: [u64; 5],
+}
+
+impl AccessStats {
+    pub fn update(&mut self, other: &Self) {
+        for i in 0..self.function.len() {
+            self.function[i] = self.function[i]
+                .checked_add(other.function[i])
+                .expect("overflow");
+        }
+    }
+
+    fn increment(&mut self, function: Function) {
+        self.add(function, 1);
+    }
+
+    fn add(&mut self, function: Function, value: u64) {
+        let index = function as usize;
+        self.function[index] = self.function[index].checked_add(value).expect("overflow");
+    }
+}
+
 const US_PENALTY_STEP_SIZE: usize = 200;
-const NS_PENALTY_STEP_SIZE: usize = 10;
+const NS_PENALTY_STEP_SIZE: usize = 40;
 /// The additional cost (cpu cycles) incurred when CacheDb is not hit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy)]
-pub struct CacheMissesPenalty {
-    pub time: u64,
+pub struct MissesPenalty {
+    // Record the penalty when each function hits the cache.
+    pub time: AccessStats,
+    /// Record the time distribution at a subtle level.
     #[serde(with = "serde_arrays")]
     pub us_percentile: [u64; US_PENALTY_STEP_SIZE],
+    /// Record the time distribution at a nanosecond level.
     #[serde(with = "serde_arrays")]
     pub ns_percentile: [u64; NS_PENALTY_STEP_SIZE],
 }
 
-impl Default for CacheMissesPenalty {
+impl Default for MissesPenalty {
     fn default() -> Self {
-        CacheMissesPenalty {
-            time: 0,
+        MissesPenalty {
+            time: AccessStats::default(),
             us_percentile: [0; US_PENALTY_STEP_SIZE],
             ns_percentile: [0; NS_PENALTY_STEP_SIZE],
         }
     }
 }
 
-impl CacheMissesPenalty {
+impl MissesPenalty {
     pub fn update(&mut self, other: &Self) {
-        self.time = self.time.checked_add(other.time).expect("overflow");
+        self.time.update(&other.time);
 
         for index in 0..US_PENALTY_STEP_SIZE {
             self.us_percentile[index] = self.us_percentile[index]
@@ -132,15 +172,16 @@ impl CacheMissesPenalty {
         }
     }
 
-    pub fn percentile(&mut self, time_in_ns: f64) {
-        if time_in_ns >= 1000.0 {
-            let mut index = (time_in_ns / 1000.0) as usize;
-            if index > US_PENALTY_STEP_SIZE - 1 {
-                index = US_PENALTY_STEP_SIZE - 1;
-            }
-            self.us_percentile[index] = self.us_percentile[index].checked_add(1).expect("overflow");
-        } else {
-            self.us_percentile[0] = self.us_percentile[0].checked_add(1).expect("overflow");
+    fn percentile(&mut self, time_in_ns: f64) {
+        // Record the time distribution at a subtle level.
+        let mut index = (time_in_ns / 1000.0) as usize;
+        if index > US_PENALTY_STEP_SIZE - 1 {
+            index = US_PENALTY_STEP_SIZE - 1;
+        }
+        self.us_percentile[index] = self.us_percentile[index].checked_add(1).expect("overflow");
+
+        // When the time is less than 4 us, record the distribution of time at the nanosecond level.
+        if time_in_ns < 4000.0 {
             let index = (time_in_ns / 100.0) as usize;
             self.ns_percentile[index] = self.ns_percentile[index].checked_add(1).expect("overflow");
         }
@@ -151,31 +192,53 @@ impl CacheMissesPenalty {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
 pub struct CacheDbRecord {
     /// The number of cache hits when accessing CacheDB.
-    pub hits: u64,
+    hits: AccessStats,
     /// The number of cache miss when accessing CacheDB.
-    pub misses: u64,
+    misses: AccessStats,
     /// The additional cost incurred when accessing CacheDb without a cache hit.
-    pub penalty: CacheMissesPenalty,
+    penalty: MissesPenalty,
 }
 
 impl CacheDbRecord {
     /// Update this struct with the other's data.
     pub fn update(&mut self, other: &Self) {
-        self.hits = self.hits.checked_add(other.hits).expect("overflow");
-        self.misses = self.misses.checked_add(other.misses).expect("overflow");
+        self.hits.update(&other.hits);
+        self.misses.update(&other.misses);
         self.penalty.update(&other.penalty);
     }
 
+    /// Returns the total number of times cache has been accessed in each function.
+    pub fn access_count(&self) -> AccessStats {
+        let mut stats = self.hits;
+        stats.update(&self.misses);
+        stats
+    }
+
+    /// Returns the number of hits in each function.
+    pub fn hit_stats(&self) -> AccessStats {
+        self.hits
+    }
+
+    /// Returns the number of misses in each function.
+    pub fn miss_stats(&self) -> AccessStats {
+        self.misses
+    }
+
+    /// Return the penalties missed in each function and their distribution.
+    pub fn penalty_stats(&self) -> MissesPenalty {
+        self.penalty
+    }
+
     /// When hit, increase the number of hits count.
-    pub(super) fn hit(&mut self) {
-        self.hits = self.hits.checked_add(1).expect("overflow");
+    pub(super) fn hit(&mut self, function: Function) {
+        self.hits.increment(function);
     }
 
     /// When a miss occurs, it is necessary to increase the number of misses count,
     /// record the increased penalty, and record the distribution of penalty.
-    pub(super) fn miss(&mut self, penalty: u64) {
-        self.misses = self.misses.checked_add(1).expect("overflow");
-        self.penalty.time = self.penalty.time.checked_add(penalty).expect("overflow");
+    pub(super) fn miss(&mut self, function: Function, penalty: u64) {
+        self.misses.increment(function);
+        self.penalty.time.add(function, penalty);
         self.penalty
             .percentile(time_utils::convert_cycles_to_ns_f64(penalty));
     }

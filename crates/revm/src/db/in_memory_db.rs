@@ -185,13 +185,13 @@ impl<ExtDB: DatabaseRef> CacheDB<ExtDB> {
         match self.accounts.entry(address) {
             Entry::Occupied(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let _record = revm_utils::HitRecord::new();
+                let _record = revm_utils::HitRecord::new(revm_utils::Function::LoadAccount);
 
                 Ok(entry.into_mut())
             }
             Entry::Vacant(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let _record = revm_utils::MissRecord::new();
+                let _record = revm_utils::MissRecord::new(revm_utils::Function::LoadAccount);
 
                 Ok(entry.insert(
                     db.basic(address)?
@@ -298,12 +298,12 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
         match self.block_hashes.entry(number) {
             Entry::Occupied(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let _record = revm_utils::HitRecord::new();
+                let _record = revm_utils::HitRecord::new(revm_utils::Function::BlockHash);
                 Ok(*entry.get())
             }
             Entry::Vacant(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let _record = revm_utils::MissRecord::new();
+                let _record = revm_utils::MissRecord::new(revm_utils::Function::BlockHash);
                 // if storage was cleared, we dont need to ping db.
                 let hash = self.db.block_hash(number)?;
                 entry.insert(hash);
@@ -316,12 +316,12 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
         let basic = match self.accounts.entry(address) {
             Entry::Occupied(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let _record = revm_utils::HitRecord::new();
+                let _record = revm_utils::HitRecord::new(revm_utils::Function::Basic);
                 entry.into_mut()
             }
             Entry::Vacant(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let _record = revm_utils::MissRecord::new();
+                let _record = revm_utils::MissRecord::new(revm_utils::Function::Basic);
                 entry.insert(
                     self.db
                         .basic(address)?
@@ -346,7 +346,7 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                 match acc_entry.storage.entry(index) {
                     Entry::Occupied(entry) => {
                         #[cfg(feature = "enable_cache_record")]
-                        let _record = revm_utils::HitRecord::new();
+                        let _record = revm_utils::HitRecord::new(revm_utils::Function::Storage);
                         Ok(*entry.get())
                     }
                     Entry::Vacant(entry) => {
@@ -355,11 +355,12 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
                             AccountState::StorageCleared | AccountState::NotExisting
                         ) {
                             #[cfg(feature = "enable_cache_record")]
-                            let _record = revm_utils::HitRecord::new();
+                            let _record = revm_utils::HitRecord::new(revm_utils::Function::Storage);
                             Ok(U256::ZERO)
                         } else {
                             #[cfg(feature = "enable_cache_record")]
-                            let _record = revm_utils::MissRecord::new();
+                            let _record =
+                                revm_utils::MissRecord::new(revm_utils::Function::Storage);
                             let slot = self.db.storage(address, index)?;
                             entry.insert(slot);
                             Ok(slot)
@@ -369,7 +370,7 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
             }
             Entry::Vacant(acc_entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let _record = revm_utils::MissRecord::new();
+                let _record = revm_utils::MissRecord::new(revm_utils::Function::Storage);
                 // acc needs to be loaded for us to access slots.
                 let info = self.db.basic(address)?;
                 let (account, value) = if info.is_some() {
@@ -390,12 +391,12 @@ impl<ExtDB: DatabaseRef> Database for CacheDB<ExtDB> {
         match self.contracts.entry(code_hash) {
             Entry::Occupied(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let _record = revm_utils::HitRecord::new();
+                let _record = revm_utils::HitRecord::new(revm_utils::Function::CodeByHash);
                 Ok(entry.get().clone())
             }
             Entry::Vacant(entry) => {
                 #[cfg(feature = "enable_cache_record")]
-                let _record = revm_utils::MissRecord::new();
+                let _record = revm_utils::MissRecord::new(revm_utils::Function::CodeByHash);
                 // if you return code bytes when basic fn is called this function is not needed.
                 Ok(entry.insert(self.db.code_by_hash(code_hash)?).clone())
             }

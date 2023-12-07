@@ -55,23 +55,23 @@ pub fn get_op_record() -> OpcodeRecord {
     }
 }
 
-pub(super) fn hit_record() {
+pub(super) fn hit_record(function: Function) {
     unsafe {
         METRIC_RECORDER
             .as_mut()
             .expect("Metric recorder should not empty!")
             .cachedb_record
-            .hit();
+            .hit(function);
     }
 }
 
-pub(super) fn miss_record(cycles: u64) {
+pub(super) fn miss_record(function: Function, cycles: u64) {
     unsafe {
         METRIC_RECORDER
             .as_mut()
             .expect("Metric recorder should not empty!")
             .cachedb_record
-            .miss(cycles);
+            .miss(function, cycles);
     }
 }
 
