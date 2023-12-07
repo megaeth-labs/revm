@@ -189,7 +189,7 @@ pub struct MissesPenalty {
     // Record the penalty when each function hits the cache.
     pub time: AccessStats,
     /// Record the time distribution at a subtle level.
-    percentile: TimeDistributionStats,
+    pub percentile: TimeDistributionStats,
 }
 
 impl Default for MissesPenalty {
