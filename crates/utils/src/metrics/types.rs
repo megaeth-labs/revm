@@ -8,11 +8,12 @@ const STEP_IN_NS: u64 = 100;
 
 const US_SPAN_SIZE: usize = 200;
 const NS_SPAN_SIZE: usize = 40;
+const MAX_ARRAY_SIZE: usize = 200;
 /// The additional cost (cpu cycles) incurred when CacheDb is not hit.
 
 /// This is a structure for statistical time distribution, which records the
 /// distribution of time from two levels: subtle and nanosecond.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 
 pub struct TimeDistributionStats {
     /// The subtle range of statistical distribution, step is STEP_IN_US.
@@ -20,9 +21,17 @@ pub struct TimeDistributionStats {
     /// The nanosecond range of statistical distribution, step is STEP_IN_NS.
     pub span_in_ns: usize,
     /// Record the time distribution at a subtle level.
-    pub us_percentile: Vec<u64>,
+    #[serde(with = "serde_arrays")]
+    pub us_percentile: [u64; MAX_ARRAY_SIZE],
     /// Record the time distribution at a nanosecond level.
-    pub ns_percentile: Vec<u64>,
+    #[serde(with = "serde_arrays")]
+    pub ns_percentile: [u64; MAX_ARRAY_SIZE],
+}
+
+impl Default for TimeDistributionStats {
+    fn default() -> Self {
+        Self::new(0, 0)
+    }
 }
 
 impl TimeDistributionStats {
@@ -30,8 +39,8 @@ impl TimeDistributionStats {
         TimeDistributionStats {
             span_in_us,
             span_in_ns,
-            us_percentile: Vec::with_capacity(span_in_us),
-            ns_percentile: Vec::with_capacity(span_in_ns),
+            us_percentile: [0; MAX_ARRAY_SIZE],
+            ns_percentile: [0; MAX_ARRAY_SIZE],
         }
     }
 
@@ -65,7 +74,7 @@ impl TimeDistributionStats {
 }
 
 /// The OpcodeRecord contains all performance information for opcode executions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
     /// The abscissa is opcode type, tuple means: (opcode counter, time, gas).
     #[serde(with = "serde_arrays")]
@@ -147,7 +156,7 @@ pub enum Function {
     LoadAccount,
 }
 /// This structure records the number of times cache hits/misses are accessed in each function.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AccessStats {
     /// This array is used to store the number of hits/misses/penalty in each function,
     /// and the index of the function corresponds to the order of the FunctionType.
@@ -175,7 +184,7 @@ impl AccessStats {
 }
 
 /// The additional cost (cpu cycles) incurred when CacheDb is not hit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissesPenalty {
     // Record the penalty when each function hits the cache.
     pub time: AccessStats,
@@ -205,7 +214,7 @@ impl MissesPenalty {
 }
 
 /// CacheDbRecord records the relevant information of CacheDb hits during the execution process.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CacheDbRecord {
     /// The number of cache hits when accessing CacheDB.
     hits: AccessStats,
