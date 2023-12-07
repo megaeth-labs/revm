@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::time_utils;
 
-const STEP_IN_US: u64 = 1;
-const STEP_IN_NS: u64 = 100;
+const STEP_IN_US: usize = 1;
+const STEP_IN_NS: usize = 100;
 
 const US_SPAN_SIZE: usize = 200;
 const NS_SPAN_SIZE: usize = 40;
@@ -66,7 +66,7 @@ impl TimeDistributionStats {
         self.us_percentile[index] = self.us_percentile[index].checked_add(1).expect("overflow");
 
         // When the time is less than 4 us, record the distribution of time at the nanosecond level.
-        if time_in_ns < self.span_in_ns as f64 {
+        if time_in_ns < (self.span_in_ns * STEP_IN_NS) as f64 {
             let index = (time_in_ns / STEP_IN_NS as f64) as usize;
             self.ns_percentile[index] = self.ns_percentile[index].checked_add(1).expect("overflow");
         }
@@ -80,7 +80,7 @@ pub struct OpcodeRecord {
     #[serde(with = "serde_arrays")]
     pub opcode_record: [(u64, u64, i128); 256],
     /// Record the time distribution of the sload.
-    sload_percentile: TimeDistributionStats,
+    pub sload_percentile: TimeDistributionStats,
     /// The total time (cpu cycles) of all opcode.
     pub total_time: u64,
     /// Update flag.
@@ -113,7 +113,7 @@ impl OpcodeRecord {
 
         if !self.is_updated {
             self.opcode_record = std::mem::replace(&mut other.opcode_record, self.opcode_record);
-            self.sload_percentile = other.sload_percentile.clone();
+            self.sload_percentile = other.sload_percentile;
             self.is_updated = true;
             return;
         }
@@ -251,7 +251,7 @@ impl CacheDbRecord {
 
     /// Return the penalties missed in each function and their distribution.
     pub fn penalty_stats(&self) -> MissesPenalty {
-        self.penalty.clone()
+        self.penalty
     }
 
     /// When hit, increase the number of hits count.
