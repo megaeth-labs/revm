@@ -1,3 +1,7 @@
+//! This module defines two structures to minimize intrusion into the original
+//! source code when recording cache related metrics.
+//! When measuring cache related metrics, these two structures will be directly
+//! used in the source code.
 use super::metric::*;
 use super::types::*;
 use crate::time_utils::instant::Instant;

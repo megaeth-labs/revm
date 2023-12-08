@@ -9,8 +9,6 @@ const STEP_IN_NS: usize = 100;
 const US_SPAN_SIZE: usize = 200;
 const NS_SPAN_SIZE: usize = 40;
 const MAX_ARRAY_SIZE: usize = 200;
-/// The additional cost (cpu cycles) incurred when CacheDb is not hit.
-
 /// This is a structure for statistical time distribution, which records the
 /// distribution of time from two levels: subtle and nanosecond.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

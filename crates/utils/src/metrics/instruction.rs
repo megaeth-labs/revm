@@ -1,3 +1,5 @@
+//! This module defines a structure to support the recording of metrics
+//! during instruction execution.
 use super::types::*;
 use crate::time_utils::{convert_cycles_to_ns_f64, instant::Instant};
 
