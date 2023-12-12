@@ -62,6 +62,11 @@ pub struct State<DB: Database> {
 impl State<EmptyDB> {
     /// Return the builder that build the State.
     pub fn builder() -> StateBuilder<EmptyDB> {
+        #[cfg(feature = "enable_cache_record")]
+        {
+            revm_utils::allocator::reset();
+            println!("Reset HashMap size of State!");
+        }
         StateBuilder::default()
     }
 }
@@ -192,9 +197,24 @@ impl<DB: Database> State<DB> {
                 let account = match info {
                     None => CacheAccount::new_loaded_not_existing(),
                     Some(acc) if acc.is_empty() => {
-                        CacheAccount::new_loaded_empty_eip161(HashMap::new())
+                        #[cfg(not(feature = "enable_cache_record"))]
+                        let ret = CacheAccount::new_loaded_empty_eip161(HashMap::new());
+                        #[cfg(feature = "enable_cache_record")]
+                        let ret = CacheAccount::new_loaded_empty_eip161(HashMap::new_in(
+                            revm_utils::TrackingAllocator,
+                        ));
+                        ret
                     }
-                    Some(acc) => CacheAccount::new_loaded(acc, HashMap::new()),
+                    Some(acc) => {
+                        #[cfg(not(feature = "enable_cache_record"))]
+                        let ret = CacheAccount::new_loaded(acc, HashMap::new());
+                        #[cfg(feature = "enable_cache_record")]
+                        let ret = CacheAccount::new_loaded(
+                            acc,
+                            HashMap::new_in(revm_utils::TrackingAllocator),
+                        );
+                        ret
+                    }
                 };
                 Ok(entry.insert(account))
             }

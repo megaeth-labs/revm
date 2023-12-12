@@ -92,7 +92,14 @@ impl BundleAccount {
             AccountInfoRevert::DoNothing => (),
             AccountInfoRevert::DeleteIt => {
                 self.info = None;
-                self.storage = HashMap::new();
+                #[cfg(not(feature = "enable_cache_record"))]
+                {
+                    self.storage = HashMap::new();
+                }
+                #[cfg(feature = "enable_cache_record")]
+                {
+                    self.storage = HashMap::new_in(revm_utils::TrackingAllocator);
+                }
                 return true;
             }
             AccountInfoRevert::RevertTo(info) => self.info = Some(info),

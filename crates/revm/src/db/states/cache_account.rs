@@ -162,7 +162,10 @@ impl CacheAccount {
                 status: self.status,
                 previous_info,
                 previous_status,
+                #[cfg(not(feature = "enable_cache_record"))]
                 storage: HashMap::default(),
+                #[cfg(feature = "enable_cache_record")]
+                storage: HashMap::new_in(revm_utils::TrackingAllocator),
                 storage_was_destroyed: true,
             })
         }
@@ -186,7 +189,10 @@ impl CacheAccount {
                 status: self.status,
                 previous_info,
                 previous_status,
+                #[cfg(not(feature = "enable_cache_record"))]
                 storage: HashMap::new(),
+                #[cfg(feature = "enable_cache_record")]
+                storage: HashMap::new_in(revm_utils::TrackingAllocator),
                 storage_was_destroyed: true,
             })
         }
@@ -259,7 +265,10 @@ impl CacheAccount {
                 status: self.status,
                 previous_info,
                 previous_status,
+                #[cfg(not(feature = "enable_cache_record"))]
                 storage: HashMap::new(),
+                #[cfg(feature = "enable_cache_record")]
+                storage: HashMap::new_in(revm_utils::TrackingAllocator),
                 storage_was_destroyed: false,
             },
         )

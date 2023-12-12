@@ -139,7 +139,10 @@ impl TransitionAccount {
         BundleAccount {
             info: self.previous_info.clone(),
             original_info: self.previous_info.clone(),
+            #[cfg(not(feature = "enable_cache_record"))]
             storage: StorageWithOriginalValues::new(),
+            #[cfg(feature = "enable_cache_record")]
+            storage: StorageWithOriginalValues::new_in(revm_utils::TrackingAllocator),
             status: self.previous_status,
         }
     }

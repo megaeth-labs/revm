@@ -31,6 +31,7 @@ futures = { version = "0.3.27", optional = true }
 
 # metric
 revm-utils = {path = "../utils", optional = true}
+hashbrown = {version = "0.14", optional = true }
 
 [dev-dependencies]
 ethers-contract = { version = "2.0.10", default-features = false }
@@ -74,8 +75,8 @@ web3db = []
 with-serde = []
 
 # support perf test
-enable_opcode_metrics = ["revm-interpreter/enable_opcode_metrics", "revm-utils"]
-enable_cache_record = ["revm-utils"]
+enable_opcode_metrics = ["revm-interpreter/enable_opcode_metrics"]
+enable_cache_record = ["revm-utils", "hashbrown", "revm-interpreter/enable_cache_record"]
 
 [[example]]
 name = "fork_ref_transact"
