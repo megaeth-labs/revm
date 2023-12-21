@@ -3,6 +3,7 @@
 //! in the source code and some functions for obtaining the final metrics
 //! externally.
 use super::instruction::*;
+use super::transact::*;
 use super::types::*;
 
 /// This structure records all metric information for measuring Revm.
@@ -12,6 +13,8 @@ struct Metric {
     instruction_record: InstructionMetricRecoder,
     /// Recording cache metrics.
     cachedb_record: CacheDbRecord,
+    /// Recording transact metrics.
+    transact_record: TransactDurationRecorder,
 }
 
 static mut METRIC_RECORDER: Option<Metric> = None;
@@ -99,5 +102,93 @@ pub fn get_cache_record() -> CacheDbRecord {
             .as_mut()
             .expect("Metric recorder should not empty!");
         std::mem::replace(&mut record.cachedb_record, CacheDbRecord::default())
+    }
+}
+
+/// Record the start time of transact.
+pub fn transact_start_record() {
+    unsafe {
+        METRIC_RECORDER
+            .as_mut()
+            .expect("Metric recorder should not empty!")
+            .transact_record
+            .start_record()
+    }
+}
+
+/// Record the start time of sub function.
+pub fn transact_sub_record() {
+    unsafe {
+        METRIC_RECORDER
+            .as_mut()
+            .expect("Metric recorder should not empty!")
+            .transact_record
+            .start_sub_record();
+    }
+}
+
+/// Record time of preverify_transaction_inner.
+pub fn preverify_transaction_inner_record() {
+    unsafe {
+        METRIC_RECORDER
+            .as_mut()
+            .expect("Metric recorder should not empty!")
+            .transact_record
+            .preverify_transaction_inner_record();
+    }
+}
+
+/// Record the time before execute opcode in transact_preverified_inner.
+pub fn before_execute_record() {
+    unsafe {
+        METRIC_RECORDER
+            .as_mut()
+            .expect("Metric recorder should not empty!")
+            .transact_record
+            .before_execute_record();
+    }
+}
+
+/// Record the time of execute opcode in transact_preverified_inner.
+pub fn execute_record() {
+    unsafe {
+        METRIC_RECORDER
+            .as_mut()
+            .expect("Metric recorder should not empty!")
+            .transact_record
+            .execute_record();
+    }
+}
+
+/// Record the time after execute opcode in transact_preverified_inner.
+pub fn after_execute_record() {
+    unsafe {
+        METRIC_RECORDER
+            .as_mut()
+            .expect("Metric recorder should not empty!")
+            .transact_record
+            .after_execute_record();
+    }
+}
+
+/// Record the time of handler.end().
+pub fn handler_end_record() {
+    unsafe {
+        METRIC_RECORDER
+            .as_mut()
+            .expect("Metric recorder should not empty!")
+            .transact_record
+            .handler_end_record();
+    }
+}
+
+/// Retrieve transact time, which will be reset after retrieval.
+pub fn get_transact_time() -> TransactTime {
+    unsafe {
+        METRIC_RECORDER
+            .as_mut()
+            .expect("Metric recorder should not empty!")
+            .transact_record
+            .get_transact_time()
     }
 }

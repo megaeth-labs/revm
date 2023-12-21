@@ -6,7 +6,7 @@ use crate::time_utils::{convert_cycles_to_ns_f64, instant::Instant};
 /// This struct is used to record information during instruction execution
 /// and finally stores the data in the opcode_record field.
 #[derive(Debug, Default)]
-pub(crate) struct InstructionMetricRecoder {
+pub(super) struct InstructionMetricRecoder {
     record: OpcodeRecord,
     start_time: Option<Instant>,
     pre_time: Option<Instant>,
@@ -15,7 +15,7 @@ pub(crate) struct InstructionMetricRecoder {
 
 impl InstructionMetricRecoder {
     /// Start record.
-    pub(crate) fn start_record(&mut self) {
+    pub(super) fn start_record(&mut self) {
         let now = Instant::now();
 
         if !self.started {
@@ -26,7 +26,7 @@ impl InstructionMetricRecoder {
     }
 
     /// Record opcode execution information, recording: count, time and sload percentile.
-    pub(crate) fn record_op(&mut self, opcode: u8) {
+    pub(super) fn record_op(&mut self, opcode: u8) {
         let now = Instant::now();
 
         // calculate count
@@ -62,7 +62,7 @@ impl InstructionMetricRecoder {
     }
 
     /// Retrieve the records of opcode execution, which will be reset after retrieval.
-    pub(crate) fn get_record(&mut self) -> OpcodeRecord {
+    pub(super) fn get_record(&mut self) -> OpcodeRecord {
         self.start_time = None;
         self.pre_time = None;
         self.started = false;
@@ -70,7 +70,7 @@ impl InstructionMetricRecoder {
     }
 
     /// Record the gas consumption during opcode execution.
-    pub(crate) fn record_gas(&mut self, opcode: u8, gas_used: u64) {
+    pub(super) fn record_gas(&mut self, opcode: u8, gas_used: u64) {
         // calculate gas
         self.record.opcode_record[opcode as usize].2 = self.record.opcode_record[opcode as usize]
             .2

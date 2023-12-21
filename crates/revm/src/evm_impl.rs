@@ -159,6 +159,8 @@ impl<'a, GSPEC: Spec + 'static, DB: Database> Transact<DB::Error> for EVMImpl<'a
 
     #[inline]
     fn transact(&mut self) -> EVMResult<DB::Error> {
+        #[cfg(feature = "enable_transact_measure")]
+        revm_utils::metrics::transact_start_record();
         let output = self
             .preverify_transaction_inner()
             .and_then(|()| self.transact_preverified_inner());
@@ -218,6 +220,8 @@ impl<'a, GSPEC: Spec + 'static, DB: Database> EVMImpl<'a, GSPEC, DB> {
 
     /// Pre verify transaction.
     pub fn preverify_transaction_inner(&mut self) -> Result<(), EVMError<DB::Error>> {
+        #[cfg(feature = "enable_transact_measure")]
+        let _record = revm_utils::metrics::PreverifyTransactionInnerRecord::new();
         let env = self.env();
 
         // Important: validate block before tx.
@@ -251,6 +255,9 @@ impl<'a, GSPEC: Spec + 'static, DB: Database> EVMImpl<'a, GSPEC, DB> {
 
     /// Transact preverified transaction.
     pub fn transact_preverified_inner(&mut self) -> EVMResult<DB::Error> {
+        #[cfg(feature = "enable_transact_measure")]
+        revm_utils::metrics::transact_sub_record();
+
         let env = &self.data.env;
         let tx_caller = env.tx.caller;
         let tx_value = env.tx.value;
@@ -341,6 +348,8 @@ impl<'a, GSPEC: Spec + 'static, DB: Database> EVMImpl<'a, GSPEC, DB> {
         let mut shared_memory = SharedMemory::new_with_memory_limit(self.data.env.cfg.memory_limit);
         #[cfg(not(feature = "memory_limit"))]
         let mut shared_memory = SharedMemory::new();
+        #[cfg(feature = "enable_transact_measure")]
+        revm_utils::metrics::before_execute_record();
 
         // call inner handling of call/create
         let (call_result, ret_gas, output) = match self.data.env.tx.transact_to {
@@ -385,6 +394,8 @@ impl<'a, GSPEC: Spec + 'static, DB: Database> EVMImpl<'a, GSPEC, DB> {
                 (exit, ret_gas, Output::Create(bytes, address))
             }
         };
+        #[cfg(feature = "enable_transact_measure")]
+        let _record = revm_utils::metrics::ExecuteEndRecord::new();
 
         let handler = &self.handler;
         let data = &mut self.data;

@@ -265,3 +265,58 @@ impl CacheDbRecord {
             .percentile(time_utils::convert_cycles_to_ns_f64(penalty));
     }
 }
+
+/// This structure is used to record the time consumption of each part of function
+/// transact_preverified_inner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TransactPreverifiedInnerTime {
+    pub before_execute: u64,
+    pub execute: u64,
+    pub after_execute: u64,
+}
+
+impl TransactPreverifiedInnerTime {
+    /// Update this struct with the other's data.
+    pub fn update(&mut self, other: &Self) {
+        self.before_execute = self
+            .before_execute
+            .checked_add(other.before_execute)
+            .expect("overflow");
+        self.execute = self.execute.checked_add(other.execute).expect("overflow");
+        self.after_execute = self
+            .after_execute
+            .checked_add(other.after_execute)
+            .expect("overflow");
+    }
+}
+
+/// This structure is used to record the time consumption of each part of function
+/// transact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TransactTime {
+    /// Record total time of trasact.
+    pub total: u64,
+    /// Record the time consumption of function preverify_transaction_inner.
+    pub preverify_transaction_inner: u64,
+    /// Record the time consumption of function transact_preverified_inner.
+    pub transact_preverified_inner: TransactPreverifiedInnerTime,
+    /// Record the time consumption of function handler.end().
+    pub handle_end: u64,
+}
+
+impl TransactTime {
+    /// Update this struct with the other's data.
+    pub fn update(&mut self, other: &Self) {
+        self.total = self.total.checked_add(other.total).expect("overflow");
+        self.preverify_transaction_inner = self
+            .preverify_transaction_inner
+            .checked_add(other.preverify_transaction_inner)
+            .expect("overflow");
+        self.transact_preverified_inner
+            .update(&other.transact_preverified_inner);
+        self.handle_end = self
+            .handle_end
+            .checked_add(other.handle_end)
+            .expect("overflow");
+    }
+}

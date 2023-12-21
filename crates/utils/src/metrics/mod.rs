@@ -1,8 +1,9 @@
-mod cachedb;
 mod instruction;
 mod metric;
+mod transact;
 pub mod types;
+mod wrapper;
 
-pub use cachedb::{HitRecord, MissRecord};
-pub use metric::{get_cache_record, get_op_record, record_gas, record_op, start_record_op};
+pub use metric::*;
 pub use types::Function;
+pub use wrapper::*;

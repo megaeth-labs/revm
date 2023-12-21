@@ -132,6 +132,8 @@ impl<DB: Database> Handler<DB> {
         data: &mut EVMData<'_, DB>,
         end_output: Result<ResultAndState, EVMError<DB::Error>>,
     ) -> Result<ResultAndState, EVMError<DB::Error>> {
+        #[cfg(feature = "enable_transact_measure")]
+        let _record = revm_utils::metrics::HandlerEndRecord::new();
         (self.end)(data, end_output)
     }
 }
