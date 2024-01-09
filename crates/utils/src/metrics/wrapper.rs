@@ -86,3 +86,18 @@ impl Drop for ExecuteEndRecord {
         after_execute_record();
     }
 }
+
+pub struct OpcodeExecuteRecord(u8);
+
+impl OpcodeExecuteRecord {
+    pub fn new(opcode: u8) -> Self {
+        record_before_op(opcode);
+        OpcodeExecuteRecord(opcode)
+    }
+}
+
+impl Drop for OpcodeExecuteRecord {
+    fn drop(&mut self) {
+        record_op(self.0)
+    }
+}

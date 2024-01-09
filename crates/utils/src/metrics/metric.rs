@@ -37,6 +37,19 @@ pub fn start_record_op() {
     }
 }
 
+/// Called before each instruction execution, it is mainly used to handle
+/// the situation that the INTERPRETER will be created circularly when the
+/// call related instructions are executed.
+pub fn record_before_op(opcode: u8) {
+    unsafe {
+        METRIC_RECORDER
+            .as_mut()
+            .expect("Metric recorder should not empty!")
+            .instruction_record
+            .record_before_op(opcode);
+    }
+}
+
 /// Record the information of opcode execution, which will be called in the
 /// source code.
 pub fn record_op(opcode: u8) {

@@ -112,6 +112,8 @@ impl<'a> Interpreter<'a> {
     {
         // Get current opcode.
         let opcode = unsafe { *self.instruction_pointer };
+        #[cfg(feature = "enable_opcode_metrics")]
+        let _opcode = revm_utils::metrics::OpcodeExecuteRecord::new(opcode);
 
         // Safety: In analysis we are doing padding of bytecode so that we are sure that last
         // byte instruction is STOP so we are safe to just increment program_counter bcs on last instruction
@@ -120,9 +122,6 @@ impl<'a> Interpreter<'a> {
 
         // execute instruction.
         (instruction_table[opcode as usize])(self, host);
-
-        #[cfg(feature = "enable_opcode_metrics")]
-        revm_utils::metrics::record_op(opcode);
     }
 
     /// Executes the interpreter until it returns or stops.

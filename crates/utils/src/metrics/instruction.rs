@@ -10,6 +10,7 @@ pub(super) struct InstructionMetricRecoder {
     record: OpcodeRecord,
     start_time: Option<Instant>,
     pre_time: Option<Instant>,
+    pre_opcode: Option<u8>,
     started: bool,
 }
 
@@ -21,21 +22,34 @@ impl InstructionMetricRecoder {
         if !self.started {
             self.start_time = Some(now);
             self.pre_time = Some(now);
+        } else if self.has_call_opcode() {
+            self.record_time(now, self.pre_opcode.expect("pre code is empty"));
         }
         self.started = true;
     }
 
-    /// Record opcode execution information, recording: count, time and sload percentile.
-    pub(super) fn record_op(&mut self, opcode: u8) {
-        let now = Instant::now();
+    /// Determine whether an instruction is a call related instruction.
+    fn has_call_opcode(&self) -> bool {
+        if let Some(opcode) = self.pre_opcode {
+            match opcode {
+                // CALL | CALLCODE | DELEGATECALL | STATICCALL
+                0xF1 | 0xF2 | 0xF4 | 0xFA => return true,
+                // other opcode
+                _ => return false,
+            }
+        }
+        false
+    }
 
-        // calculate count
-        self.record.opcode_record[opcode as usize].0 = self.record.opcode_record[opcode as usize]
-            .0
-            .checked_add(1)
-            .expect("overflow");
+    /// Called before each instruction execution, it is mainly used to handle
+    /// the situation that the INTERPRETER will be created circularly when the
+    /// call related instructions are executed.
+    pub(super) fn record_before_op(&mut self, opcode: u8) {
+        self.pre_opcode = Some(opcode)
+    }
 
-        // calculate time
+    /// Record the time taken for instruction execution.
+    fn record_time(&mut self, now: Instant, opcode: u8) -> u64 {
         let cycles = now
             .checked_cycles_since(self.pre_time.expect("pre time is empty"))
             .expect("overflow");
@@ -51,6 +65,22 @@ impl InstructionMetricRecoder {
             .expect("overflow")
             .into();
 
+        cycles
+    }
+
+    /// Record opcode execution information, recording: count, time and sload percentile.
+    pub(super) fn record_op(&mut self, opcode: u8) {
+        let now = Instant::now();
+
+        // record count
+        self.record.opcode_record[opcode as usize].0 = self.record.opcode_record[opcode as usize]
+            .0
+            .checked_add(1)
+            .expect("overflow");
+
+        // record time
+        let cycles = self.record_time(now, opcode);
+
         // SLOAD = 0x54,
         // statistical percentile of sload duration
         if opcode == 0x54 {
@@ -65,6 +95,7 @@ impl InstructionMetricRecoder {
     pub(super) fn get_record(&mut self) -> OpcodeRecord {
         self.start_time = None;
         self.pre_time = None;
+        self.pre_opcode = None;
         self.started = false;
         std::mem::replace(&mut self.record, OpcodeRecord::default())
     }

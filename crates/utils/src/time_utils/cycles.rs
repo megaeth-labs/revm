@@ -6,18 +6,26 @@ use std::time::{Duration, Instant};
 
 struct Cycles {
     nanos_per_cycle: UnsafeCell<f64>,
+    cycles_per_sec: UnsafeCell<f64>,
 }
 
 unsafe impl Sync for Cycles {}
 
 static CYCLES: Cycles = Cycles {
     nanos_per_cycle: UnsafeCell::new(1.0),
+    cycles_per_sec: UnsafeCell::new(1.0),
 };
 
 #[ctor::ctor]
 unsafe fn init() {
-    let cycles_per_sec = cycles_per_sec();
+    let cycles_per_sec = _cycles_per_sec();
+    *CYCLES.cycles_per_sec.get() = cycles_per_sec;
     *CYCLES.nanos_per_cycle.get() = 1_000_000_000.0 / cycles_per_sec;
+}
+
+#[inline]
+pub fn per_sec() -> f64 {
+    unsafe { *CYCLES.cycles_per_sec.get() }
 }
 
 #[inline]
@@ -25,7 +33,7 @@ pub(crate) fn nanos_per_cycle() -> f64 {
     unsafe { *CYCLES.nanos_per_cycle.get() }
 }
 
-fn cycles_per_sec() -> f64 {
+fn _cycles_per_sec() -> f64 {
     // Compute the frequency of the fine-grained CPU timer: to do this,
     // take parallel time readings using both rdtsc and std::time::Instant.
     // After 10ms have elapsed, take the ratio between these readings.
