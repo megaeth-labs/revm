@@ -24,6 +24,11 @@ impl InstructionMetricRecoder {
             self.pre_time = Some(now);
         } else if self.has_call_opcode() {
             self.record_time(now, self.pre_opcode.expect("pre code is empty"));
+            self.record.additional_count = self
+                .record
+                .additional_count
+                .checked_add(1)
+                .expect("overflow");
         }
         self.started = true;
     }

@@ -83,6 +83,8 @@ pub struct OpcodeRecord {
     pub total_time: u64,
     /// Update flag.
     pub is_updated: bool,
+    /// Additional rdtsc counts that may be added when measuring call related instructions.
+    pub additional_count: u64,
 }
 
 impl Default for OpcodeRecord {
@@ -93,6 +95,7 @@ impl Default for OpcodeRecord {
             sload_percentile,
             total_time: 0,
             is_updated: false,
+            additional_count: 0,
         }
     }
 }
@@ -107,6 +110,11 @@ impl OpcodeRecord {
         self.total_time = self
             .total_time
             .checked_add(other.total_time)
+            .expect("overflow");
+
+        self.additional_count = self
+            .additional_count
+            .checked_add(other.additional_count)
             .expect("overflow");
 
         if !self.is_updated {
