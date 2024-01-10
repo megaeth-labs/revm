@@ -33,7 +33,7 @@ impl Default for TimeDistributionStats {
 }
 
 impl TimeDistributionStats {
-    fn new(span_in_us: usize, span_in_ns: usize) -> Self {
+    pub fn new(span_in_us: usize, span_in_ns: usize) -> Self {
         TimeDistributionStats {
             span_in_us,
             span_in_ns,
@@ -42,7 +42,7 @@ impl TimeDistributionStats {
         }
     }
 
-    fn update(&mut self, other: &TimeDistributionStats) {
+    pub fn update(&mut self, other: &TimeDistributionStats) {
         for index in 0..self.span_in_us {
             self.us_percentile[index] = self.us_percentile[index]
                 .checked_add(other.us_percentile[index])
@@ -55,7 +55,7 @@ impl TimeDistributionStats {
         }
     }
 
-    fn record(&mut self, time_in_ns: f64) {
+    pub fn record(&mut self, time_in_ns: f64) {
         // Record the time distribution at a subtle level.
         let mut index = (time_in_ns / (1000.0 * STEP_IN_US as f64)) as usize;
         if index > self.span_in_us - 1 {
