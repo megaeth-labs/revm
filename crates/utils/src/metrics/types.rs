@@ -28,7 +28,7 @@ pub struct TimeDistributionStats {
 
 impl Default for TimeDistributionStats {
     fn default() -> Self {
-        Self::new(0, 0)
+        Self::new(US_SPAN_SIZE, NS_SPAN_SIZE)
     }
 }
 
