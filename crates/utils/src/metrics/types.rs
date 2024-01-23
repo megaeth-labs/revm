@@ -71,6 +71,7 @@ impl TimeDistributionStats {
     }
 }
 
+const CALL_OPCODE_LEN: usize = 4;
 /// The OpcodeRecord contains all performance information for opcode executions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpcodeRecord {
@@ -84,7 +85,8 @@ pub struct OpcodeRecord {
     /// Update flag.
     pub is_updated: bool,
     /// Additional rdtsc counts that may be added when measuring call related instructions.
-    pub additional_count: u64,
+    /// array means: (call, call_code, delegate_call, static_call)
+    pub additional_count: [u64; CALL_OPCODE_LEN],
 }
 
 impl Default for OpcodeRecord {
@@ -95,7 +97,7 @@ impl Default for OpcodeRecord {
             sload_percentile,
             total_time: 0,
             is_updated: false,
-            additional_count: 0,
+            additional_count: [0u64; CALL_OPCODE_LEN],
         }
     }
 }
@@ -112,10 +114,11 @@ impl OpcodeRecord {
             .checked_add(other.total_time)
             .expect("overflow");
 
-        self.additional_count = self
-            .additional_count
-            .checked_add(other.additional_count)
-            .expect("overflow");
+        for i in 0..CALL_OPCODE_LEN {
+            self.additional_count[i] = self.additional_count[i]
+                .checked_add(other.additional_count[i])
+                .expect("overflow");
+        }
 
         if !self.is_updated {
             self.opcode_record = std::mem::replace(&mut other.opcode_record, self.opcode_record);
@@ -149,6 +152,29 @@ impl OpcodeRecord {
 
     pub fn not_empty(&self) -> bool {
         self.is_updated
+    }
+
+    pub fn add_additional_count(&mut self, opcode: u8, count: u64) {
+        let index = match opcode {
+            // CALL
+            0xF1 => 0,
+            // CALLCODE
+            0xF2 => 1,
+            // DELEGATECALL
+            0xF4 => 2,
+            // STATICCALL
+            0xFA => 3,
+            _ => {
+                println!("Add additional_count with error opcode!");
+                4
+            }
+        };
+
+        if index < 4 {
+            self.additional_count[index] = self.additional_count[index]
+                .checked_add(count)
+                .expect("overflow");
+        }
     }
 }
 
