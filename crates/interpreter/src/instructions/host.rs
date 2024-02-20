@@ -370,8 +370,6 @@ pub fn create<const IS_CREATE2: bool, H: Host, SPEC: Spec>(
 
             if crate::USE_GAS {
                 interpreter.gas.erase_cost(gas.remaining());
-                #[cfg(feature = "enable_opcode_metrics")]
-                revm_utils::metrics::record_gas(_opcode, gas.remaining());
                 interpreter.gas.record_refund(gas.refunded());
             }
         }
@@ -380,8 +378,6 @@ pub fn create<const IS_CREATE2: bool, H: Host, SPEC: Spec>(
 
             if crate::USE_GAS {
                 interpreter.gas.erase_cost(gas.remaining());
-                #[cfg(feature = "enable_opcode_metrics")]
-                revm_utils::metrics::record_gas(_opcode, gas.remaining());
             }
         }
         InstructionResult::FatalExternalError => {
@@ -609,8 +605,6 @@ pub fn call_inner<SPEC: Spec, H: Host>(
             // return unspend gas.
             if crate::USE_GAS {
                 interpreter.gas.erase_cost(gas.remaining());
-                #[cfg(feature = "enable_opcode_metrics")]
-                revm_utils::metrics::record_gas(_opcode, gas.remaining());
                 interpreter.gas.record_refund(gas.refunded());
             }
             interpreter
@@ -621,8 +615,6 @@ pub fn call_inner<SPEC: Spec, H: Host>(
         return_revert!() => {
             if crate::USE_GAS {
                 interpreter.gas.erase_cost(gas.remaining());
-                #[cfg(feature = "enable_opcode_metrics")]
-                revm_utils::metrics::record_gas(_opcode, gas.remaining());
             }
             interpreter
                 .shared_memory
