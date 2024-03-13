@@ -9,7 +9,15 @@ pub type State = HashMap<Address, Account>;
 pub type TransientStorage = HashMap<(Address, U256), U256>;
 
 /// An account's Storage is a mapping from 256-bit integer keys to [StorageSlot]s.
+#[cfg(not(feature = "enable_cache_record"))]
 pub type Storage = HashMap<U256, StorageSlot>;
+#[cfg(feature = "enable_cache_record")]
+pub type Storage = HashMap<
+    U256,
+    StorageSlot,
+    hashbrown::hash_map::DefaultHashBuilder,
+    revm_utils::TrackingAllocator,
+>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -55,7 +63,10 @@ impl Account {
     pub fn new_not_existing() -> Self {
         Self {
             info: AccountInfo::default(),
+            #[cfg(not(feature = "enable_cache_record"))]
             storage: HashMap::new(),
+            #[cfg(feature = "enable_cache_record")]
+            storage: HashMap::new_in(revm_utils::TrackingAllocator),
             status: AccountStatus::LoadedAsNotExisting,
         }
     }
@@ -129,7 +140,10 @@ impl From<AccountInfo> for Account {
     fn from(info: AccountInfo) -> Self {
         Self {
             info,
+            #[cfg(not(feature = "enable_cache_record"))]
             storage: HashMap::new(),
+            #[cfg(feature = "enable_cache_record")]
+            storage: HashMap::new_in(revm_utils::TrackingAllocator),
             status: AccountStatus::Loaded,
         }
     }

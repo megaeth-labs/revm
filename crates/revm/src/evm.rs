@@ -158,6 +158,9 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
     /// This function will validate the transaction.
     #[inline]
     pub fn transact(&mut self) -> EVMResult<DB::Error> {
+        #[cfg(feature = "enable_transact_measure")]
+        revm_utils::metrics::transact_record();
+
         self.handler.validation().env(&self.context.evm.env)?;
         let initial_gas_spend = self
             .handler
@@ -166,6 +169,8 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
         self.handler
             .validation()
             .tx_against_state(&mut self.context)?;
+        #[cfg(feature = "enable_transact_measure")]
+        revm_utils::metrics::preverify_transaction_inner_record();
 
         let output = self.transact_preverified_inner(initial_gas_spend);
         self.handler.post_execution().end(&mut self.context, output)
@@ -311,6 +316,8 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
 
     /// Transact pre-verified transaction.
     fn transact_preverified_inner(&mut self, initial_gas_spend: u64) -> EVMResult<DB::Error> {
+        #[cfg(feature = "enable_transact_measure")]
+        revm_utils::metrics::transact_sub_record();
         let ctx = &mut self.context;
         let pre_exec = self.handler.pre_execution();
 
@@ -325,6 +332,8 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
         pre_exec.deduct_caller(ctx)?;
 
         let gas_limit = ctx.evm.env.tx.gas_limit - initial_gas_spend;
+        #[cfg(feature = "enable_transact_measure")]
+        revm_utils::metrics::before_execute_record();
 
         let exec = self.handler.execution();
         // call inner handling of call/create
@@ -344,6 +353,8 @@ impl<EXT, DB: Database> Evm<'_, EXT, DB> {
             FrameOrResult::Frame(first_frame) => self.start_the_loop(first_frame),
             FrameOrResult::Result(result) => result,
         };
+        #[cfg(feature = "enable_transact_measure")]
+        let _record = revm_utils::metrics::ExecuteEndRecord::new();
 
         let ctx = &mut self.context;
 

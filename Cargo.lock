@@ -740,6 +740,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37e366bff8cd32dd8754b0991fb66b279dc48f598c3a18914852a6673deef583"
+dependencies = [
+ "quote",
+ "syn 2.0.48",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2325,9 +2335,11 @@ dependencies = [
  "ethers-core",
  "ethers-providers",
  "futures",
+ "hashbrown",
  "indicatif",
  "revm-interpreter",
  "revm-precompile",
+ "revm-utils",
  "serde",
  "serde_json",
  "tokio",
@@ -2338,6 +2350,7 @@ name = "revm-interpreter"
 version = "3.0.0"
 dependencies = [
  "revm-primitives",
+ "revm-utils",
  "serde",
 ]
 
@@ -2373,6 +2386,7 @@ dependencies = [
  "hashbrown",
  "hex",
  "once_cell",
+ "revm-utils",
  "serde",
 ]
 
@@ -2388,6 +2402,18 @@ dependencies = [
  "microbench",
  "regex",
  "revm",
+]
+
+[[package]]
+name = "revm-utils"
+version = "0.1.0"
+source = "git+https://github.com/megaeth-labs/reth-perf-utils.git#b9f0dac8d6195c2ab009907af8961798814b975e"
+dependencies = [
+ "allocator-api2",
+ "ctor",
+ "serde",
+ "serde_arrays",
+ "serde_json",
 ]
 
 [[package]]
@@ -2726,6 +2752,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "870026e60fa08c69f064aa766c10f10b1d62db9ccd4d0abb206472bee0ce3b32"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde_arrays"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38636132857f68ec3d5f3eb121166d2af33cb55174c4d5ff645db6165cbef0fd"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

@@ -641,10 +641,18 @@ impl BundleState {
                     Entry::Vacant(entry) => {
                         // create empty account that we will revert on.
                         // Only place where this account is not existing is if revert is DeleteIt.
+                        #[cfg(not(feature = "enable_cache_record"))]
                         let mut account = BundleAccount::new(
                             None,
                             None,
                             HashMap::new(),
+                            AccountStatus::LoadedNotExisting,
+                        );
+                        #[cfg(feature = "enable_cache_record")]
+                        let mut account = BundleAccount::new(
+                            None,
+                            None,
+                            HashMap::new_in(revm_utils::TrackingAllocator),
                             AccountStatus::LoadedNotExisting,
                         );
                         if !account.revert(revert_account) {

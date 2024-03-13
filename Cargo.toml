@@ -14,6 +14,9 @@ default-members = ["crates/revm"]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[workspace.dependencies]
+revm-utils = { git = "https://github.com/megaeth-labs/reth-perf-utils.git" }
+
 [profile.release]
 lto = true
 codegen-units = 1
