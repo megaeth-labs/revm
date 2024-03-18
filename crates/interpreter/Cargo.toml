@@ -21,6 +21,7 @@ serde = { version = "1.0", default-features = false, features = [
     "derive",
     "rc",
 ], optional = true }
+revm-utils = {path = "../utils", optional = true}
 
 [features]
 default = ["std"]
@@ -55,3 +56,5 @@ optional_eip3607 = ["revm-primitives/optional_eip3607"]
 optional_gas_refund = ["revm-primitives/optional_gas_refund"]
 optional_no_base_fee = ["revm-primitives/optional_no_base_fee"]
 optional_beneficiary_reward = ["revm-primitives/optional_beneficiary_reward"]
+enable_opcode_metrics = ["revm-utils"]
+enable_cache_record = ["revm-primitives/enable_cache_record"]

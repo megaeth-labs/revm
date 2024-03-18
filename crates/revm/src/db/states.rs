@@ -4,6 +4,8 @@ pub mod bundle_state;
 pub mod cache;
 pub mod cache_account;
 pub mod changes;
+#[cfg(feature = "enable_cache_record")]
+pub mod mem_usage;
 pub mod plain_account;
 pub mod reverts;
 pub mod state;

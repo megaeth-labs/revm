@@ -2,9 +2,13 @@ use super::{
     plain_account::PlainStorage, transition_account::TransitionAccount, CacheAccount, PlainAccount,
 };
 use alloc::vec::Vec;
+#[cfg(feature = "enable_cache_record")]
+use hashbrown::hash_map::DefaultHashBuilder;
 use revm_interpreter::primitives::{
     Account, AccountInfo, Address, Bytecode, HashMap, State as EVMState, B256,
 };
+#[cfg(feature = "enable_cache_record")]
+use revm_utils::TrackingAllocator;
 
 /// Cache state contains both modified and original values.
 ///
@@ -15,10 +19,16 @@ use revm_interpreter::primitives::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheState {
     /// Block state account with account state
+    #[cfg(not(feature = "enable_cache_record"))]
     pub accounts: HashMap<Address, CacheAccount>,
+    #[cfg(feature = "enable_cache_record")]
+    pub accounts: HashMap<Address, CacheAccount, DefaultHashBuilder, TrackingAllocator>,
     /// created contracts
     /// TODO add bytecode counter for number of bytecodes added/removed.
+    #[cfg(not(feature = "enable_cache_record"))]
     pub contracts: HashMap<B256, Bytecode>,
+    #[cfg(feature = "enable_cache_record")]
+    pub contracts: HashMap<B256, Bytecode, DefaultHashBuilder, TrackingAllocator>,
     /// Has EIP-161 state clear enabled (Spurious Dragon hardfork).
     pub has_state_clear: bool,
 }
@@ -33,8 +43,14 @@ impl CacheState {
     /// New default state.
     pub fn new(has_state_clear: bool) -> Self {
         Self {
+            #[cfg(not(feature = "enable_cache_record"))]
             accounts: HashMap::default(),
+            #[cfg(feature = "enable_cache_record")]
+            accounts: HashMap::new_in(TrackingAllocator),
+            #[cfg(not(feature = "enable_cache_record"))]
             contracts: HashMap::default(),
+            #[cfg(feature = "enable_cache_record")]
+            contracts: HashMap::new_in(TrackingAllocator),
             has_state_clear,
         }
     }

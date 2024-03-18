@@ -42,7 +42,10 @@ pub fn mcopy<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, _host: &mut H) 
     // into usize or fail
     let len = as_usize_or_fail!(interpreter, len);
     // deduce gas
-    gas_or_fail!(interpreter, gas::verylowcopy_cost(len as u64));
+    let cost = gas::verylowcopy_cost(len as u64);
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::MCOPY, cost.unwrap_or(0));
     if len == 0 {
         return;
     }

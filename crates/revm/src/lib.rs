@@ -54,3 +54,6 @@ pub use revm_interpreter as interpreter;
 pub use revm_interpreter::primitives;
 #[doc(inline)]
 pub use revm_precompile as precompile;
+
+#[cfg(feature = "enable_opcode_metrics")]
+pub use revm_interpreter::opcode::{self as revm_opcode, OpCode};

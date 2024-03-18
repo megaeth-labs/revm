@@ -19,17 +19,17 @@ pub fn balance<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H)
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
     };
-    gas!(
-        interpreter,
-        if SPEC::enabled(ISTANBUL) {
-            // EIP-1884: Repricing for trie-size-dependent opcodes
-            gas::account_access_gas::<SPEC>(is_cold)
-        } else if SPEC::enabled(TANGERINE) {
-            400
-        } else {
-            20
-        }
-    );
+    let cost = if SPEC::enabled(ISTANBUL) {
+        // EIP-1884: Repricing for trie-size-dependent opcodes
+        gas::account_access_gas::<SPEC>(is_cold)
+    } else if SPEC::enabled(TANGERINE) {
+        400
+    } else {
+        20
+    };
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::BALANCE, cost);
     push!(interpreter, balance);
 }
 
@@ -50,21 +50,20 @@ pub fn extcodesize<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mu
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
     };
-    if SPEC::enabled(BERLIN) {
-        gas!(
-            interpreter,
-            if is_cold {
-                COLD_ACCOUNT_ACCESS_COST
-            } else {
-                WARM_STORAGE_READ_COST
-            }
-        );
+    let cost = if SPEC::enabled(BERLIN) {
+        if is_cold {
+            COLD_ACCOUNT_ACCESS_COST
+        } else {
+            WARM_STORAGE_READ_COST
+        }
     } else if SPEC::enabled(TANGERINE) {
-        gas!(interpreter, 700);
+        700
     } else {
-        gas!(interpreter, 20);
-    }
-
+        20
+    };
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::EXTCODESIZE, cost);
     push!(interpreter, U256::from(code.len()));
 }
 
@@ -76,20 +75,20 @@ pub fn extcodehash<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mu
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
     };
-    if SPEC::enabled(BERLIN) {
-        gas!(
-            interpreter,
-            if is_cold {
-                COLD_ACCOUNT_ACCESS_COST
-            } else {
-                WARM_STORAGE_READ_COST
-            }
-        );
+    let cost = if SPEC::enabled(BERLIN) {
+        if is_cold {
+            COLD_ACCOUNT_ACCESS_COST
+        } else {
+            WARM_STORAGE_READ_COST
+        }
     } else if SPEC::enabled(ISTANBUL) {
-        gas!(interpreter, 700);
+        700
     } else {
-        gas!(interpreter, 400);
-    }
+        400
+    };
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::EXTCODEHASH, cost);
     push_b256!(interpreter, code_hash);
 }
 
@@ -103,10 +102,10 @@ pub fn extcodecopy<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mu
     };
 
     let len = as_usize_or_fail!(interpreter, len_u256);
-    gas_or_fail!(
-        interpreter,
-        gas::extcodecopy_cost::<SPEC>(len as u64, is_cold)
-    );
+    let cost = gas::extcodecopy_cost::<SPEC>(len as u64, is_cold);
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::EXTCODECOPY, cost.unwrap_or(0));
     if len == 0 {
         return;
     }
@@ -146,7 +145,10 @@ pub fn sload<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
     };
-    gas!(interpreter, gas::sload_cost::<SPEC>(is_cold));
+    let cost = gas::sload_cost::<SPEC>(is_cold);
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::SLOAD, cost);
     push!(interpreter, value);
 }
 
@@ -160,10 +162,13 @@ pub fn sstore<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) 
         interpreter.instruction_result = InstructionResult::FatalExternalError;
         return;
     };
-    gas_or_fail!(interpreter, {
+    let cost = {
         let remaining_gas = interpreter.gas.remaining();
         gas::sstore_cost::<SPEC>(original, old, new, remaining_gas, is_cold)
-    });
+    };
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::SSTORE, cost.unwrap_or(0));
     refund!(interpreter, gas::sstore_refund::<SPEC>(original, old, new));
 }
 
@@ -195,7 +200,22 @@ pub fn log<const N: usize, H: Host>(interpreter: &mut Interpreter, host: &mut H)
 
     pop!(interpreter, offset, len);
     let len = as_usize_or_fail!(interpreter, len);
-    gas_or_fail!(interpreter, gas::log_cost(N as u8, len as u64));
+    let cost = gas::log_cost(N as u8, len as u64);
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    {
+        use crate::opcode::*;
+        let opcode = match N {
+            0 => LOG0,
+            1 => LOG1,
+            2 => LOG2,
+            3 => LOG3,
+            4 => LOG4,
+            _ => unreachable!(),
+        };
+        revm_utils::metrics::record_gas(opcode, cost.unwrap_or(0));
+    }
+
     let data = if len == 0 {
         Bytes::new()
     } else {
@@ -236,7 +256,10 @@ pub fn selfdestruct<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &m
     if !SPEC::enabled(LONDON) && !res.previously_destroyed {
         refund!(interpreter, gas::SELFDESTRUCT)
     }
-    gas!(interpreter, gas::selfdestruct_cost::<SPEC>(res));
+    let cost = gas::selfdestruct_cost::<SPEC>(res);
+    gas!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::SELFDESTRUCT, cost);
 
     interpreter.instruction_result = InstructionResult::SelfDestruct;
 }
@@ -248,9 +271,12 @@ pub fn create<const IS_CREATE2: bool, H: Host, SPEC: Spec>(
     check_staticcall!(interpreter);
 
     // EIP-1014: Skinny CREATE2
-    if IS_CREATE2 {
+    let _opcode: u8 = if IS_CREATE2 {
         check!(interpreter, PETERSBURG);
-    }
+        crate::opcode::CREATE2
+    } else {
+        crate::opcode::CREATE
+    };
 
     pop!(interpreter, value, code_offset, len);
     let len = as_usize_or_fail!(interpreter, len);
@@ -270,7 +296,10 @@ pub fn create<const IS_CREATE2: bool, H: Host, SPEC: Spec>(
                 interpreter.instruction_result = InstructionResult::CreateInitCodeSizeLimit;
                 return;
             }
-            gas!(interpreter, gas::initcode_cost(len as u64));
+            let cost = gas::initcode_cost(len as u64);
+            gas!(interpreter, cost);
+            #[cfg(feature = "enable_opcode_metrics")]
+            revm_utils::metrics::record_gas(_opcode, cost);
         }
 
         let code_offset = as_usize_or_fail!(interpreter, code_offset);
@@ -281,10 +310,15 @@ pub fn create<const IS_CREATE2: bool, H: Host, SPEC: Spec>(
     // EIP-1014: Skinny CREATE2
     let scheme = if IS_CREATE2 {
         pop!(interpreter, salt);
-        gas_or_fail!(interpreter, gas::create2_cost(len));
+        let cost = gas::create2_cost(len);
+        gas_or_fail!(interpreter, cost);
+        #[cfg(feature = "enable_opcode_metrics")]
+        revm_utils::metrics::record_gas(_opcode, cost.unwrap_or(0));
         CreateScheme::Create2 { salt }
     } else {
         gas!(interpreter, gas::CREATE);
+        #[cfg(feature = "enable_opcode_metrics")]
+        revm_utils::metrics::record_gas(_opcode, gas::CREATE);
         CreateScheme::Create
     };
 
@@ -296,6 +330,8 @@ pub fn create<const IS_CREATE2: bool, H: Host, SPEC: Spec>(
         gas_limit -= gas_limit / 64
     }
     gas!(interpreter, gas_limit);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(_opcode, gas_limit);
 
     // Call host to interact with target contract
     interpreter.next_action = InterpreterAction::Create {
@@ -334,11 +370,14 @@ pub fn call<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
         local_gas_limit,
         true,
         true,
+        crate::opcode::CALL,
     ) else {
         return;
     };
 
     gas!(interpreter, gas_limit);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::CALL, gas_limit);
 
     // add call stipend if there is value to be transferred.
     if value != U256::ZERO {
@@ -389,11 +428,14 @@ pub fn call_code<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut 
         local_gas_limit,
         true,
         false,
+        crate::opcode::CALLCODE,
     ) else {
         return;
     };
 
     gas!(interpreter, gas_limit);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::CALLCODE, gas_limit);
 
     // add call stipend if there is value to be transferred.
     if value != U256::ZERO {
@@ -436,13 +478,22 @@ pub fn delegate_call<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &
         return;
     };
 
-    let Some(gas_limit) =
-        calc_call_gas::<H, SPEC>(interpreter, host, to, false, local_gas_limit, false, false)
-    else {
+    let Some(gas_limit) = calc_call_gas::<H, SPEC>(
+        interpreter,
+        host,
+        to,
+        false,
+        local_gas_limit,
+        false,
+        false,
+        crate::opcode::DELEGATECALL,
+    ) else {
         return;
     };
 
     gas!(interpreter, gas_limit);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::DELEGATECALL, gas_limit);
 
     // Call host to interact with target contract
     interpreter.next_action = InterpreterAction::Call {
@@ -483,12 +534,21 @@ pub fn static_call<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, host: &mu
         return;
     };
 
-    let Some(gas_limit) =
-        calc_call_gas::<H, SPEC>(interpreter, host, to, false, local_gas_limit, false, true)
-    else {
+    let Some(gas_limit) = calc_call_gas::<H, SPEC>(
+        interpreter,
+        host,
+        to,
+        false,
+        local_gas_limit,
+        false,
+        true,
+        crate::opcode::STATICCALL,
+    ) else {
         return;
     };
     gas!(interpreter, gas_limit);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::STATICCALL, gas_limit);
 
     // Call host to interact with target contract
     interpreter.next_action = InterpreterAction::Call {

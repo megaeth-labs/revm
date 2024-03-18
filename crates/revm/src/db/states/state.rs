@@ -62,6 +62,11 @@ pub struct State<DB> {
 impl State<EmptyDB> {
     /// Return the builder that build the State.
     pub fn builder() -> StateBuilder<EmptyDB> {
+        #[cfg(feature = "enable_cache_record")]
+        {
+            revm_utils::allocator::reset();
+            println!("Reset HashMap size of State!");
+        }
         StateBuilder::default()
     }
 }
@@ -179,21 +184,45 @@ impl<DB: Database> State<DB> {
                     if let Some(account) =
                         self.bundle_state.account(&address).cloned().map(Into::into)
                     {
+                        #[cfg(feature = "enable_cache_record")]
+                        let _record =
+                            revm_utils::HitRecord::new(revm_utils::Function::LoadCacheAccount);
                         return Ok(entry.insert(account));
                     }
                 }
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::MissRecord::new(revm_utils::Function::LoadCacheAccount);
                 // if not found in bundle, load it from database
                 let info = self.database.basic(address)?;
                 let account = match info {
                     None => CacheAccount::new_loaded_not_existing(),
                     Some(acc) if acc.is_empty() => {
-                        CacheAccount::new_loaded_empty_eip161(HashMap::new())
+                        #[cfg(not(feature = "enable_cache_record"))]
+                        let ret = CacheAccount::new_loaded_empty_eip161(HashMap::new());
+                        #[cfg(feature = "enable_cache_record")]
+                        let ret = CacheAccount::new_loaded_empty_eip161(HashMap::new_in(
+                            revm_utils::TrackingAllocator,
+                        ));
+                        ret
                     }
-                    Some(acc) => CacheAccount::new_loaded(acc, HashMap::new()),
+                    Some(acc) => {
+                        #[cfg(not(feature = "enable_cache_record"))]
+                        let ret = CacheAccount::new_loaded(acc, HashMap::new());
+                        #[cfg(feature = "enable_cache_record")]
+                        let ret = CacheAccount::new_loaded(
+                            acc,
+                            HashMap::new_in(revm_utils::TrackingAllocator),
+                        );
+                        ret
+                    }
                 };
                 Ok(entry.insert(account))
             }
-            hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            hash_map::Entry::Occupied(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::HitRecord::new(revm_utils::Function::LoadCacheAccount);
+                Ok(entry.into_mut())
+            }
         }
     }
 
@@ -221,14 +250,22 @@ impl<DB: Database> Database for State<DB> {
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
         let res = match self.cache.contracts.entry(code_hash) {
-            hash_map::Entry::Occupied(entry) => Ok(entry.get().clone()),
+            hash_map::Entry::Occupied(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::HitRecord::new(revm_utils::Function::CodeByHash);
+                Ok(entry.get().clone())
+            }
             hash_map::Entry::Vacant(entry) => {
                 if self.use_preloaded_bundle {
                     if let Some(code) = self.bundle_state.contracts.get(&code_hash) {
+                        #[cfg(feature = "enable_cache_record")]
+                        let _record = revm_utils::HitRecord::new(revm_utils::Function::CodeByHash);
                         entry.insert(code.clone());
                         return Ok(code.clone());
                     }
                 }
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::MissRecord::new(revm_utils::Function::CodeByHash);
                 // if not found in bundle ask database
                 let code = self.database.code_by_hash(code_hash)?;
                 entry.insert(code.clone());
@@ -248,13 +285,22 @@ impl<DB: Database> Database for State<DB> {
                 .account
                 .as_mut()
                 .map(|account| match account.storage.entry(index) {
-                    hash_map::Entry::Occupied(entry) => Ok(*entry.get()),
+                    hash_map::Entry::Occupied(entry) => {
+                        #[cfg(feature = "enable_cache_record")]
+                        let _record = revm_utils::HitRecord::new(revm_utils::Function::Storage);
+                        Ok(*entry.get())
+                    }
                     hash_map::Entry::Vacant(entry) => {
                         // if account was destroyed or account is newly built
                         // we return zero and don't ask database.
                         let value = if is_storage_known {
+                            #[cfg(feature = "enable_cache_record")]
+                            let _record = revm_utils::HitRecord::new(revm_utils::Function::Storage);
                             U256::ZERO
                         } else {
+                            #[cfg(feature = "enable_cache_record")]
+                            let _record =
+                                revm_utils::MissRecord::new(revm_utils::Function::Storage);
                             self.database.storage(address, index)?
                         };
                         entry.insert(value);
@@ -272,8 +318,14 @@ impl<DB: Database> Database for State<DB> {
         // block number is never bigger then u64::MAX.
         let u64num: u64 = number.to();
         match self.block_hashes.entry(u64num) {
-            btree_map::Entry::Occupied(entry) => Ok(*entry.get()),
+            btree_map::Entry::Occupied(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::HitRecord::new(revm_utils::Function::BlockHash);
+                Ok(*entry.get())
+            }
             btree_map::Entry::Vacant(entry) => {
+                #[cfg(feature = "enable_cache_record")]
+                let _record = revm_utils::MissRecord::new(revm_utils::Function::BlockHash);
                 let ret = *entry.insert(self.database.block_hash(number)?);
 
                 // prune all hashes that are older then BLOCK_HASH_HISTORY

@@ -288,6 +288,8 @@ impl Interpreter {
     {
         // Get current opcode.
         let opcode = unsafe { *self.instruction_pointer };
+        #[cfg(feature = "enable_opcode_metrics")]
+        let _opcode = revm_utils::metrics::OpcodeExecuteRecord::new(opcode);
 
         // SAFETY: In analysis we are doing padding of bytecode so that we are sure that last
         // byte instruction is STOP so we are safe to just increment program_counter bcs on last instruction
@@ -295,7 +297,7 @@ impl Interpreter {
         self.instruction_pointer = unsafe { self.instruction_pointer.offset(1) };
 
         // execute instruction.
-        (instruction_table[opcode as usize])(self, host)
+        (instruction_table[opcode as usize])(self, host);
     }
 
     /// Take memory and replace it with empty memory.
@@ -317,6 +319,8 @@ impl Interpreter {
         self.instruction_result = InstructionResult::Continue;
         self.shared_memory = shared_memory;
         // main loop
+        #[cfg(feature = "enable_opcode_metrics")]
+        revm_utils::metrics::start_record_op();
         while self.instruction_result == InstructionResult::Continue {
             self.step(instruction_table, host);
         }

@@ -67,7 +67,10 @@ pub fn mulmod<H: Host>(interpreter: &mut Interpreter, _host: &mut H) {
 
 pub fn exp<H: Host, SPEC: Spec>(interpreter: &mut Interpreter, _host: &mut H) {
     pop_top!(interpreter, op1, op2);
-    gas_or_fail!(interpreter, gas::exp_cost::<SPEC>(*op2));
+    let cost = gas::exp_cost::<SPEC>(*op2);
+    gas_or_fail!(interpreter, cost);
+    #[cfg(feature = "enable_opcode_metrics")]
+    revm_utils::metrics::record_gas(crate::opcode::EXP, cost.unwrap_or(0));
     *op2 = op1.pow(*op2);
 }
 
