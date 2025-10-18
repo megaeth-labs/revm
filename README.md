@@ -139,7 +139,7 @@ Or if you want to contact me directly, here is my email: dragan0rakita@gmail.com
 
 Excited to contribute to revm for MegaETH's real-time magic! 
 
-Excited to contribute to revm for MegaETH's real-time magic! 
+Excited to contribute to revm for MegaETH's real-time magic! ！
 
 
 
