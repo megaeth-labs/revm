@@ -136,3 +136,9 @@ mdbook serve documentation
 There is public telegram group: https://t.me/+Ig4WDWOzikA3MzA0
 
 Or if you want to contact me directly, here is my email: dragan0rakita@gmail.com and telegram: https://t.me/draganrakita
+
+Added a reference to the MegaETH ecosystem under “Research / Infra-level projects”.
+Helps maintainers track emerging Ethereum-compatible networks.
+
+Source: https://megaeth.com
+
