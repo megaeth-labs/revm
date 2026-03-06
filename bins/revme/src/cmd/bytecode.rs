@@ -1,39 +1,59 @@
-use revm::{
-    interpreter::opcode::eof_printer::print_eof_code,
-    primitives::{Bytes, Eof},
-};
-use structopt::StructOpt;
+use clap::Parser;
+use revm::primitives::{hex, Bytes};
 
-/// Statetest command
-#[derive(StructOpt, Debug)]
+/// `bytecode` subcommand - simplified to handle legacy bytecode only.
+#[derive(Parser, Debug)]
 pub struct Cmd {
-    /// EOF bytecode in hex format. It bytes start with 0xFE it will be interpreted as a EOF.
-    /// Otherwise, it will be interpreted as a EOF bytecode.
-    #[structopt(required = true)]
-    bytes: String,
+    /// Bytecode in hex format string.
+    #[arg()]
+    bytes: Option<String>,
+}
+
+#[inline]
+fn trim_decode(input: &str) -> Option<Bytes> {
+    let trimmed = input.trim().trim_start_matches("0x");
+    hex::decode(trimmed).ok().map(Into::into)
 }
 
 impl Cmd {
-    /// Run statetest command.
+    /// Runs bytecode command.
     pub fn run(&self) {
-        let trimmed = self.bytes.trim_start_matches("0x");
-        let Ok(bytes) = hex::decode(trimmed) else {
-            eprintln!("Invalid hex string");
-            return;
-        };
-        let bytes: Bytes = bytes.into();
-        if bytes.is_empty() {
-            eprintln!("Empty hex string");
-            return;
-        }
-        if bytes[0] == 0xEF {
-            let Ok(eof) = Eof::decode(bytes) else {
-                eprintln!("Invalid EOF bytecode");
+        if let Some(input_bytes) = &self.bytes {
+            let Some(bytes) = trim_decode(input_bytes) else {
+                eprintln!("Invalid hex string");
                 return;
             };
-            println!("{:#?}", eof);
+
+            if bytes.starts_with(&[0xEF, 0x00]) {
+                eprintln!(
+                    "EOF bytecode is not supported - EOF has been removed from ethereum plan."
+                );
+                return;
+            }
+
+            println!("Legacy bytecode:");
+            println!("  Length: {} bytes", bytes.len());
+            println!("  Hex: 0x{}", hex::encode(&bytes));
+
+            // Basic analysis
+            let mut opcodes = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                let opcode = bytes[i];
+                opcodes.push(format!("{opcode:02x}"));
+
+                // Skip immediate bytes for PUSH instructions
+                if (0x60..=0x7f).contains(&opcode) {
+                    let push_size = (opcode - 0x5f) as usize;
+                    i += push_size;
+                }
+                i += 1;
+            }
+
+            println!("  Opcodes: {}", opcodes.join(" "));
         } else {
-            print_eof_code(&bytes)
+            println!("No bytecode provided. EOF interactive mode has been removed.");
+            println!("Please provide bytecode as a hex string argument.");
         }
     }
 }

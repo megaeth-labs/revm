@@ -1,159 +1,69 @@
 use crate::{
     gas,
-    primitives::{Spec, U256},
-    Host, Interpreter,
+    interpreter_types::{Immediates, InterpreterTypes, Jumps, RuntimeFlag, StackTr},
+    InstructionResult,
 };
+use primitives::U256;
 
-pub fn pop<H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    gas!(interpreter, gas::BASE);
-    if let Err(result) = interpreter.stack.pop() {
-        interpreter.instruction_result = result;
-    }
+use crate::InstructionContext;
+
+/// Implements the POP instruction.
+///
+/// Removes the top item from the stack.
+pub fn pop<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    gas!(context.interpreter, gas::BASE);
+    // Can ignore return. as relative N jump is safe operation.
+    popn!([_i], context.interpreter);
 }
 
 /// EIP-3855: PUSH0 instruction
 ///
 /// Introduce a new instruction which pushes the constant value 0 onto the stack.
-pub fn push0<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, _host: &mut H) {
-    check!(interpreter, SHANGHAI);
-    gas!(interpreter, gas::BASE);
-    if let Err(result) = interpreter.stack.push(U256::ZERO) {
-        interpreter.instruction_result = result;
-    }
+pub fn push0<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    check!(context.interpreter, SHANGHAI);
+    gas!(context.interpreter, gas::BASE);
+    push!(context.interpreter, U256::ZERO);
 }
 
-pub fn push<const N: usize, H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    gas!(interpreter, gas::VERYLOW);
-    // SAFETY: In analysis we append trailing bytes to the bytecode so that this is safe to do
-    // without bounds checking.
-    let ip = interpreter.instruction_pointer;
-    if let Err(result) = interpreter
-        .stack
-        .push_slice(unsafe { core::slice::from_raw_parts(ip, N) })
-    {
-        interpreter.instruction_result = result;
+/// Implements the PUSH1-PUSH32 instructions.
+///
+/// Pushes N bytes from bytecode onto the stack as a 32-byte value.
+pub fn push<const N: usize, WIRE: InterpreterTypes, H: ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    gas!(context.interpreter, gas::VERYLOW);
+
+    let slice = context.interpreter.bytecode.read_slice(N);
+    if !context.interpreter.stack.push_slice(slice) {
+        context.interpreter.halt(InstructionResult::StackOverflow);
         return;
     }
-    interpreter.instruction_pointer = unsafe { ip.add(N) };
+
+    // Can ignore return. as relative N jump is safe operation
+    context.interpreter.bytecode.relative_jump(N as isize);
 }
 
-pub fn dup<const N: usize, H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    gas!(interpreter, gas::VERYLOW);
-    if let Err(result) = interpreter.stack.dup(N) {
-        interpreter.instruction_result = result;
+/// Implements the DUP1-DUP16 instructions.
+///
+/// Duplicates the Nth stack item to the top of the stack.
+pub fn dup<const N: usize, WIRE: InterpreterTypes, H: ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    gas!(context.interpreter, gas::VERYLOW);
+    if !context.interpreter.stack.dup(N) {
+        context.interpreter.halt(InstructionResult::StackOverflow);
     }
 }
 
-pub fn swap<const N: usize, H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    gas!(interpreter, gas::VERYLOW);
-    if let Err(result) = interpreter.stack.swap(N) {
-        interpreter.instruction_result = result;
-    }
-}
-
-pub fn dupn<H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    require_eof!(interpreter);
-    gas!(interpreter, gas::VERYLOW);
-    let imm = unsafe { *interpreter.instruction_pointer };
-    if let Err(result) = interpreter.stack.dup(imm as usize + 1) {
-        interpreter.instruction_result = result;
-    }
-    interpreter.instruction_pointer = unsafe { interpreter.instruction_pointer.offset(1) };
-}
-
-pub fn swapn<H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    require_eof!(interpreter);
-    gas!(interpreter, gas::VERYLOW);
-    let imm = unsafe { *interpreter.instruction_pointer };
-    if let Err(result) = interpreter.stack.swap(imm as usize + 1) {
-        interpreter.instruction_result = result;
-    }
-    interpreter.instruction_pointer = unsafe { interpreter.instruction_pointer.offset(1) };
-}
-
-pub fn exchange<H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    require_eof!(interpreter);
-    gas!(interpreter, gas::VERYLOW);
-    let imm = unsafe { *interpreter.instruction_pointer };
-    let n = (imm >> 4) + 1;
-    let m = (imm & 0x0F) + 1;
-    if let Err(result) = interpreter.stack.exchange(n as usize, m as usize) {
-        interpreter.instruction_result = result;
-    }
-
-    interpreter.instruction_pointer = unsafe { interpreter.instruction_pointer.offset(1) };
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::{
-        opcode::{make_instruction_table, DUPN, EXCHANGE, SWAPN},
-        primitives::{Bytecode, Bytes, PragueSpec},
-        DummyHost, Gas, InstructionResult,
-    };
-
-    #[test]
-    fn dupn() {
-        let table = make_instruction_table::<_, PragueSpec>();
-        let mut host = DummyHost::default();
-        let mut interp = Interpreter::new_bytecode(Bytecode::LegacyRaw(Bytes::from([
-            DUPN, 0x00, DUPN, 0x01, DUPN, 0x02,
-        ])));
-        interp.is_eof = true;
-        interp.gas = Gas::new(10000);
-
-        interp.stack.push(U256::from(10)).unwrap();
-        interp.stack.push(U256::from(20)).unwrap();
-        interp.step(&table, &mut host);
-        assert_eq!(interp.stack.pop(), Ok(U256::from(20)));
-        interp.step(&table, &mut host);
-        assert_eq!(interp.stack.pop(), Ok(U256::from(10)));
-        interp.step(&table, &mut host);
-        assert_eq!(interp.instruction_result, InstructionResult::StackUnderflow);
-    }
-
-    #[test]
-    fn swapn() {
-        let table = make_instruction_table::<_, PragueSpec>();
-        let mut host = DummyHost::default();
-        let mut interp =
-            Interpreter::new_bytecode(Bytecode::LegacyRaw(Bytes::from([SWAPN, 0x00, SWAPN, 0x01])));
-        interp.is_eof = true;
-        interp.gas = Gas::new(10000);
-
-        interp.stack.push(U256::from(10)).unwrap();
-        interp.stack.push(U256::from(20)).unwrap();
-        interp.stack.push(U256::from(0)).unwrap();
-        interp.step(&table, &mut host);
-        assert_eq!(interp.stack.peek(0), Ok(U256::from(20)));
-        assert_eq!(interp.stack.peek(1), Ok(U256::from(0)));
-        interp.step(&table, &mut host);
-        assert_eq!(interp.stack.peek(0), Ok(U256::from(10)));
-        assert_eq!(interp.stack.peek(2), Ok(U256::from(20)));
-    }
-
-    #[test]
-    fn exchange() {
-        let table = make_instruction_table::<_, PragueSpec>();
-        let mut host = DummyHost::default();
-        let mut interp = Interpreter::new_bytecode(Bytecode::LegacyRaw(Bytes::from([
-            EXCHANGE, 0x00, EXCHANGE, 0x11,
-        ])));
-        interp.is_eof = true;
-        interp.gas = Gas::new(10000);
-
-        interp.stack.push(U256::from(1)).unwrap();
-        interp.stack.push(U256::from(5)).unwrap();
-        interp.stack.push(U256::from(10)).unwrap();
-        interp.stack.push(U256::from(15)).unwrap();
-        interp.stack.push(U256::from(0)).unwrap();
-
-        interp.step(&table, &mut host);
-        assert_eq!(interp.stack.peek(1), Ok(U256::from(10)));
-        assert_eq!(interp.stack.peek(2), Ok(U256::from(15)));
-        interp.step(&table, &mut host);
-        assert_eq!(interp.stack.peek(2), Ok(U256::from(1)));
-        assert_eq!(interp.stack.peek(4), Ok(U256::from(15)));
+/// Implements the SWAP1-SWAP16 instructions.
+///
+/// Swaps the top stack item with the Nth stack item.
+pub fn swap<const N: usize, WIRE: InterpreterTypes, H: ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    gas!(context.interpreter, gas::VERYLOW);
+    assert!(N != 0);
+    if !context.interpreter.stack.exchange(0, N) {
+        context.interpreter.halt(InstructionResult::StackOverflow);
     }
 }

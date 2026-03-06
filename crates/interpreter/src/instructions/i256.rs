@@ -1,16 +1,21 @@
-use crate::primitives::U256;
 use core::cmp::Ordering;
+use primitives::U256;
 
+/// Represents the sign of a 256-bit signed integer value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(i8)]
 pub enum Sign {
-    // same as `cmp::Ordering`
+    // Same as `cmp::Ordering`
+    /// Negative value sign
     Minus = -1,
+    /// Zero value sign  
     Zero = 0,
     #[allow(dead_code)] // "constructed" with `mem::transmute` in `i256_sign` below
+    /// Positive value sign
     Plus = 1,
 }
 
+/// The maximum positive value for a 256-bit signed integer.
 pub const MAX_POSITIVE_VALUE: U256 = U256::from_limbs([
     0xffffffffffffffff,
     0xffffffffffffffff,
@@ -18,6 +23,7 @@ pub const MAX_POSITIVE_VALUE: U256 = U256::from_limbs([
     0x7fffffffffffffff,
 ]);
 
+/// The minimum negative value for a 256-bit signed integer.
 pub const MIN_NEGATIVE_VALUE: U256 = U256::from_limbs([
     0x0000000000000000,
     0x0000000000000000,
@@ -25,18 +31,20 @@ pub const MIN_NEGATIVE_VALUE: U256 = U256::from_limbs([
     0x8000000000000000,
 ]);
 
-const FLIPH_BITMASK_U64: u64 = 0x7FFFFFFFFFFFFFFF;
+const FLIPH_BITMASK_U64: u64 = 0x7FFF_FFFF_FFFF_FFFF;
 
+/// Determines the sign of a 256-bit signed integer.
 #[inline]
 pub fn i256_sign(val: &U256) -> Sign {
     if val.bit(U256::BITS - 1) {
         Sign::Minus
     } else {
         // SAFETY: false == 0 == Zero, true == 1 == Plus
-        unsafe { core::mem::transmute::<bool, Sign>(*val != U256::ZERO) }
+        unsafe { core::mem::transmute::<bool, Sign>(!val.is_zero()) }
     }
 }
 
+/// Determines the sign of a 256-bit signed integer and converts it to its absolute value.
 #[inline]
 pub fn i256_sign_compl(val: &mut U256) -> Sign {
     let sign = i256_sign(val);
@@ -54,28 +62,32 @@ fn u256_remove_sign(val: &mut U256) {
     }
 }
 
+/// Computes the two's complement of a U256 value in place.
 #[inline]
 pub fn two_compl_mut(op: &mut U256) {
     *op = two_compl(*op);
 }
 
+/// Computes the two's complement of a U256 value.
 #[inline]
 pub fn two_compl(op: U256) -> U256 {
     op.wrapping_neg()
 }
 
+/// Compares two 256-bit signed integers.
 #[inline]
 pub fn i256_cmp(first: &U256, second: &U256) -> Ordering {
     let first_sign = i256_sign(first);
     let second_sign = i256_sign(second);
     match first_sign.cmp(&second_sign) {
-        // note: adding `if first_sign != Sign::Zero` to short circuit zero comparisons performs
+        // Note: Adding `if first_sign != Sign::Zero` to short circuit zero comparisons performs
         // slower on average, as of #582
         Ordering::Equal => first.cmp(second),
         o => o,
     }
 }
 
+/// Performs signed division of two 256-bit integers.
 #[inline]
 pub fn i256_div(mut first: U256, mut second: U256) -> U256 {
     let second_sign = i256_sign_compl(&mut second);
@@ -88,14 +100,14 @@ pub fn i256_div(mut first: U256, mut second: U256) -> U256 {
         return two_compl(MIN_NEGATIVE_VALUE);
     }
 
-    // necessary overflow checks are done above, perform the division
+    // Necessary overflow checks are done above, perform the division
     let mut d = first / second;
 
-    // set sign bit to zero
+    // Set sign bit to zero
     u256_remove_sign(&mut d);
 
-    // two's complement only if the signs are different
-    // note: this condition has better codegen than an exhaustive match, as of #582
+    // Two's complement only if the signs are different
+    // Note: This condition has better codegen than an exhaustive match, as of #582
     if (first_sign == Sign::Minus && second_sign != Sign::Minus)
         || (second_sign == Sign::Minus && first_sign != Sign::Minus)
     {
@@ -105,6 +117,7 @@ pub fn i256_div(mut first: U256, mut second: U256) -> U256 {
     }
 }
 
+/// Performs signed modulo of two 256-bit integers.
 #[inline]
 pub fn i256_mod(mut first: U256, mut second: U256) -> U256 {
     let first_sign = i256_sign_compl(&mut first);
@@ -119,7 +132,7 @@ pub fn i256_mod(mut first: U256, mut second: U256) -> U256 {
 
     let mut r = first % second;
 
-    // set sign bit to zero
+    // Set sign bit to zero
     u256_remove_sign(&mut r);
 
     if first_sign == Sign::Minus {
@@ -132,8 +145,8 @@ pub fn i256_mod(mut first: U256, mut second: U256) -> U256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::uint;
     use core::num::Wrapping;
+    use primitives::uint;
 
     #[test]
     fn div_i256() {

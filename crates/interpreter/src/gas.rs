@@ -16,6 +16,8 @@ pub struct Gas {
     remaining: u64,
     /// Refunded gas. This is used only at the end of execution.
     refunded: i64,
+    /// Memoisation of values for memory expansion cost.
+    memory: MemoryGas,
 }
 
 impl Gas {
@@ -26,6 +28,7 @@ impl Gas {
             limit,
             remaining: limit,
             refunded: 0,
+            memory: MemoryGas::new(),
         }
     }
 
@@ -36,6 +39,7 @@ impl Gas {
             limit,
             remaining: 0,
             refunded: 0,
+            memory: MemoryGas::new(),
         }
     }
 
@@ -45,13 +49,16 @@ impl Gas {
         self.limit
     }
 
-    /// Returns the **last** memory expansion cost.
+    /// Returns the memory gas.
     #[inline]
-    #[deprecated = "memory expansion cost is not tracked anymore; \
-                    calculate it using `SharedMemory::current_expansion_cost` instead"]
-    #[doc(hidden)]
-    pub const fn memory(&self) -> u64 {
-        0
+    pub fn memory(&self) -> &MemoryGas {
+        &self.memory
+    }
+
+    /// Returns the memory gas.
+    #[inline]
+    pub fn memory_mut(&mut self) -> &mut MemoryGas {
+        &mut self.memory
     }
 
     /// Returns the total amount of gas that was refunded.
@@ -66,17 +73,27 @@ impl Gas {
         self.limit - self.remaining
     }
 
-    #[doc(hidden)]
+    /// Returns the final amount of gas used by subtracting the refund from spent gas.
     #[inline]
-    #[deprecated(note = "use `spent` instead")]
-    pub const fn spend(&self) -> u64 {
-        self.spent()
+    pub const fn used(&self) -> u64 {
+        self.spent().saturating_sub(self.refunded() as u64)
+    }
+
+    /// Returns the total amount of gas spent, minus the refunded gas.
+    #[inline]
+    pub const fn spent_sub_refunded(&self) -> u64 {
+        self.spent().saturating_sub(self.refunded as u64)
     }
 
     /// Returns the amount of gas remaining.
     #[inline]
     pub const fn remaining(&self) -> u64 {
         self.remaining
+    }
+
+    /// Return remaining gas after subtracting 63/64 parts.
+    pub const fn remaining_63_of_64_parts(&self) -> u64 {
+        self.remaining - self.remaining / 64
     }
 
     /// Erases a gas cost from the totals.
@@ -117,17 +134,87 @@ impl Gas {
         self.refunded = refund;
     }
 
+    /// Set a spent value. This overrides the current spent value.
+    #[inline]
+    pub fn set_spent(&mut self, spent: u64) {
+        self.remaining = self.limit.saturating_sub(spent);
+    }
+
     /// Records an explicit cost.
     ///
     /// Returns `false` if the gas limit is exceeded.
     #[inline]
     #[must_use = "prefer using `gas!` instead to return an out-of-gas error on failure"]
     pub fn record_cost(&mut self, cost: u64) -> bool {
-        let (remaining, overflow) = self.remaining.overflowing_sub(cost);
-        let success = !overflow;
-        if success {
-            self.remaining = remaining;
+        if let Some(new_remaining) = self.remaining.checked_sub(cost) {
+            self.remaining = new_remaining;
+            return true;
         }
-        success
+        false
+    }
+
+    /// Record memory expansion
+    #[inline]
+    #[must_use = "internally uses record_cost that flags out of gas error"]
+    pub fn record_memory_expansion(&mut self, new_len: usize) -> MemoryExtensionResult {
+        let Some(additional_cost) = self.memory.record_new_len(new_len) else {
+            return MemoryExtensionResult::Same;
+        };
+
+        if !self.record_cost(additional_cost) {
+            return MemoryExtensionResult::OutOfGas;
+        }
+
+        MemoryExtensionResult::Extended
+    }
+}
+
+/// Result of attempting to extend memory during execution.
+#[derive(Debug)]
+pub enum MemoryExtensionResult {
+    /// Memory was extended.
+    Extended,
+    /// Memory size stayed the same.
+    Same,
+    /// Not enough gas to extend memory.
+    OutOfGas,
+}
+
+/// Utility struct that speeds up calculation of memory expansion
+/// It contains the current memory length and its memory expansion cost.
+///
+/// It allows us to split gas accounting from memory structure.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MemoryGas {
+    /// Current memory length
+    pub words_num: usize,
+    /// Current memory expansion cost
+    pub expansion_cost: u64,
+}
+
+impl MemoryGas {
+    /// Creates a new `MemoryGas` instance with zero memory allocation.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            words_num: 0,
+            expansion_cost: 0,
+        }
+    }
+
+    /// Records a new memory length and calculates additional cost if memory is expanded.
+    /// Returns the additional gas cost required, or None if no expansion is needed.
+    #[inline]
+    pub fn record_new_len(&mut self, new_num: usize) -> Option<u64> {
+        if new_num <= self.words_num {
+            return None;
+        }
+        self.words_num = new_num;
+        let mut cost = crate::gas::calc::memory_gas(new_num);
+        core::mem::swap(&mut self.expansion_cost, &mut cost);
+        // Safe to subtract because we know that new_len > length
+        // Notice the swap above.
+        Some(self.expansion_cost - cost)
     }
 }

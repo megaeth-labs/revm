@@ -1,56 +1,79 @@
 use crate::{
     gas,
-    primitives::{Spec, U256},
-    Host, Interpreter,
+    interpreter_types::{InterpreterTypes, MemoryTr, RuntimeFlag, StackTr},
 };
 use core::cmp::max;
+use primitives::U256;
 
-pub fn mload<H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    gas!(interpreter, gas::VERYLOW);
-    pop_top!(interpreter, top);
-    let offset = as_usize_or_fail!(interpreter, top);
-    resize_memory!(interpreter, offset, 32);
-    *top = interpreter.shared_memory.get_u256(offset);
+use crate::InstructionContext;
+
+/// Implements the MLOAD instruction.
+///
+/// Loads a 32-byte word from memory.
+pub fn mload<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    gas!(context.interpreter, gas::VERYLOW);
+    popn_top!([], top, context.interpreter);
+    let offset = as_usize_or_fail!(context.interpreter, top);
+    resize_memory!(context.interpreter, offset, 32);
+    *top =
+        U256::try_from_be_slice(context.interpreter.memory.slice_len(offset, 32).as_ref()).unwrap()
 }
 
-pub fn mstore<H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    gas!(interpreter, gas::VERYLOW);
-    pop!(interpreter, offset, value);
-    let offset = as_usize_or_fail!(interpreter, offset);
-    resize_memory!(interpreter, offset, 32);
-    interpreter.shared_memory.set_u256(offset, value);
+/// Implements the MSTORE instruction.
+///
+/// Stores a 32-byte word to memory.
+pub fn mstore<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    gas!(context.interpreter, gas::VERYLOW);
+    popn!([offset, value], context.interpreter);
+    let offset = as_usize_or_fail!(context.interpreter, offset);
+    resize_memory!(context.interpreter, offset, 32);
+    context
+        .interpreter
+        .memory
+        .set(offset, &value.to_be_bytes::<32>());
 }
 
-pub fn mstore8<H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    gas!(interpreter, gas::VERYLOW);
-    pop!(interpreter, offset, value);
-    let offset = as_usize_or_fail!(interpreter, offset);
-    resize_memory!(interpreter, offset, 1);
-    interpreter.shared_memory.set_byte(offset, value.byte(0))
+/// Implements the MSTORE8 instruction.
+///
+/// Stores a single byte to memory.
+pub fn mstore8<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    gas!(context.interpreter, gas::VERYLOW);
+    popn!([offset, value], context.interpreter);
+    let offset = as_usize_or_fail!(context.interpreter, offset);
+    resize_memory!(context.interpreter, offset, 1);
+    context.interpreter.memory.set(offset, &[value.byte(0)]);
 }
 
-pub fn msize<H: Host + ?Sized>(interpreter: &mut Interpreter, _host: &mut H) {
-    gas!(interpreter, gas::BASE);
-    push!(interpreter, U256::from(interpreter.shared_memory.len()));
+/// Implements the MSIZE instruction.
+///
+/// Gets the size of active memory in bytes.
+pub fn msize<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    gas!(context.interpreter, gas::BASE);
+    push!(
+        context.interpreter,
+        U256::from(context.interpreter.memory.size())
+    );
 }
 
-// EIP-5656: MCOPY - Memory copying instruction
-pub fn mcopy<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, _host: &mut H) {
-    check!(interpreter, CANCUN);
-    pop!(interpreter, dst, src, len);
+/// Implements the MCOPY instruction.
+///
+/// EIP-5656: Memory copying instruction that copies memory from one location to another.
+pub fn mcopy<WIRE: InterpreterTypes, H: ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    check!(context.interpreter, CANCUN);
+    popn!([dst, src, len], context.interpreter);
 
-    // into usize or fail
-    let len = as_usize_or_fail!(interpreter, len);
-    // deduce gas
-    gas_or_fail!(interpreter, gas::verylowcopy_cost(len as u64));
+    // Into usize or fail
+    let len = as_usize_or_fail!(context.interpreter, len);
+    // Deduce gas
+    gas_or_fail!(context.interpreter, gas::copy_cost_verylow(len));
     if len == 0 {
         return;
     }
 
-    let dst = as_usize_or_fail!(interpreter, dst);
-    let src = as_usize_or_fail!(interpreter, src);
-    // resize memory
-    resize_memory!(interpreter, max(dst, src), len);
-    // copy memory in place
-    interpreter.shared_memory.copy(dst, src, len);
+    let dst = as_usize_or_fail!(context.interpreter, dst);
+    let src = as_usize_or_fail!(context.interpreter, src);
+    // Resize memory
+    resize_memory!(context.interpreter, max(dst, src), len);
+    // Copy memory in place
+    context.interpreter.memory.copy(dst, src, len);
 }

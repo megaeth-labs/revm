@@ -1,23 +1,24 @@
-use super::{
-    merkle_trie::{log_rlp_hash, state_merkle_trie_root},
-    models::{SpecName, Test, TestSuite},
-    utils::recover_address,
-};
+use crate::cmd::statetest::merkle_trie::{compute_test_roots, TestValidationResult};
+use database::State;
 use indicatif::{ProgressBar, ProgressDrawTarget};
+use inspector::{inspectors::TracerEip3155, InspectCommitEvm};
+use primitives::U256;
 use revm::{
-    db::EmptyDB,
-    inspector_handle_register,
-    inspectors::TracerEip3155,
-    primitives::{
-        calc_excess_blob_gas, keccak256, Bytecode, Bytes, EVMResultGeneric, Env, ExecutionResult,
-        SpecId, TransactTo, B256, U256,
+    context::{block::BlockEnv, cfg::CfgEnv, tx::TxEnv},
+    context_interface::{
+        result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction},
+        Cfg,
     },
-    Evm, State,
+    database_interface::EmptyDB,
+    primitives::{hardfork::SpecId, Bytes, B256},
+    Context, ExecuteCommitEvm, MainBuilder, MainContext,
 };
 use serde_json::json;
+use statetest_types::{SpecName, Test, TestSuite, TestUnit};
 use std::{
     convert::Infallible,
-    io::{stderr, stdout},
+    fmt::Debug,
+    io::stderr,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -28,13 +29,16 @@ use std::{
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
 
+/// Error that occurs during test execution
 #[derive(Debug, Error)]
-#[error("Test {name} failed: {kind}")]
+#[error("Path: {path}\nName: {name}\nError: {kind}")]
 pub struct TestError {
     pub name: String,
+    pub path: String,
     pub kind: TestErrorKind,
 }
 
+/// Specific kind of error that occurred during test execution
 #[derive(Debug, Error)]
 pub enum TestErrorKind {
     #[error("logs root mismatch: got {got}, expected {expected}")]
@@ -57,8 +61,15 @@ pub enum TestErrorKind {
     SerdeDeserialize(#[from] serde_json::Error),
     #[error("thread panicked")]
     Panic,
+    #[error("path does not exist")]
+    InvalidPath,
+    #[error("no JSON test files found in path")]
+    NoJsonFiles,
 }
 
+/// Find all JSON test files in the given path
+/// If path is a file, returns it in a vector
+/// If path is a directory, recursively finds all .json files
 pub fn find_all_json_tests(path: &Path) -> Vec<PathBuf> {
     if path.is_file() {
         vec![path.to_path_buf()]
@@ -72,38 +83,15 @@ pub fn find_all_json_tests(path: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// Check if a test should be skipped based on its filename
+/// Some tests are known to be problematic or take too long
 fn skip_test(path: &Path) -> bool {
-    let path_str = path.to_str().expect("Path is not valid UTF-8");
     let name = path.file_name().unwrap().to_str().unwrap();
 
     matches!(
         name,
-        // funky test with `bigint 0x00` value in json :) not possible to happen on mainnet and require
-        // custom json parser. https://github.com/ethereum/tests/issues/971
-        |"ValueOverflow.json"| "ValueOverflowParis.json"
-
-        // precompiles having storage is not possible
-        | "RevertPrecompiledTouch_storage.json"
-        | "RevertPrecompiledTouch.json"
-
-        // txbyte is of type 02 and we don't parse tx bytes for this test to fail.
-        | "typeTwoBerlin.json"
-
-        // Need to handle Test errors
-        | "transactionIntinsicBug.json"
-
         // Test check if gas price overflows, we handle this correctly but does not match tests specific exception.
-        | "HighGasPrice.json"
-        | "CREATE_HighNonce.json"
-        | "CREATE_HighNonceMinus1.json"
         | "CreateTransactionHighNonce.json"
-
-        // Skip test where basefee/accesslist/difficulty is present but it shouldn't be supported in
-        // London/Berlin/TheMerge. https://github.com/ethereum/tests/blob/5b7e1ab3ffaf026d99d20b17bb30f533a2c80c8b/GeneralStateTests/stExample/eip1559.json#L130
-        // It is expected to not execute these tests.
-        | "basefeeExample.json"
-        | "eip1559.json"
-        | "mergeTest.json"
 
         // Test with some storage check.
         | "RevertInCreateInInit_Paris.json"
@@ -117,126 +105,184 @@ fn skip_test(path: &Path) -> bool {
         | "InitCollision.json"
         | "InitCollisionParis.json"
 
+        // Malformed value.
+        | "ValueOverflow.json"
+        | "ValueOverflowParis.json"
+
         // These tests are passing, but they take a lot of time to execute so we are going to skip them.
-        | "loopExp.json"
         | "Call50000_sha256.json"
         | "static_Call50000_sha256.json"
         | "loopMul.json"
         | "CALLBlake2f_MaxRounds.json"
-    ) || path_str.contains("stEOF")
+    )
 }
 
-fn check_evm_execution<EXT>(
+struct TestExecutionContext<'a> {
+    name: &'a str,
+    unit: &'a TestUnit,
+    test: &'a Test,
+    cfg: &'a CfgEnv,
+    block: &'a BlockEnv,
+    tx: &'a TxEnv,
+    cache_state: &'a database::CacheState,
+    elapsed: &'a Arc<Mutex<Duration>>,
+    trace: bool,
+    print_json_outcome: bool,
+}
+
+struct DebugContext<'a> {
+    name: &'a str,
+    path: &'a str,
+    index: usize,
+    test: &'a Test,
+    cfg: &'a CfgEnv,
+    block: &'a BlockEnv,
+    tx: &'a TxEnv,
+    cache_state: &'a database::CacheState,
+    error: &'a TestErrorKind,
+}
+
+fn build_json_output(
+    test: &Test,
+    test_name: &str,
+    exec_result: &Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>,
+    validation: &TestValidationResult,
+    spec: SpecId,
+    error: Option<String>,
+) -> serde_json::Value {
+    json!({
+        "stateRoot": validation.state_root,
+        "logsRoot": validation.logs_root,
+        "output": exec_result.as_ref().ok().and_then(|r| r.output().cloned()).unwrap_or_default(),
+        "gasUsed": exec_result.as_ref().ok().map(|r| r.gas_used()).unwrap_or_default(),
+        "pass": error.is_none(),
+        "errorMsg": error.unwrap_or_default(),
+        "evmResult": format_evm_result(exec_result),
+        "postLogsHash": validation.logs_root,
+        "fork": spec,
+        "test": test_name,
+        "d": test.indexes.data,
+        "g": test.indexes.gas,
+        "v": test.indexes.value,
+    })
+}
+
+fn format_evm_result(
+    exec_result: &Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>,
+) -> String {
+    match exec_result {
+        Ok(r) => match r {
+            ExecutionResult::Success { reason, .. } => format!("Success: {reason:?}"),
+            ExecutionResult::Revert { .. } => "Revert".to_string(),
+            ExecutionResult::Halt { reason, .. } => format!("Halt: {reason:?}"),
+        },
+        Err(e) => e.to_string(),
+    }
+}
+
+fn validate_exception(
+    test: &Test,
+    exec_result: &Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>,
+) -> Result<bool, TestErrorKind> {
+    match (&test.expect_exception, exec_result) {
+        (None, Ok(_)) => Ok(false), // No exception expected, execution succeeded
+        (Some(_), Err(_)) => Ok(true), // Exception expected and occurred
+        _ => Err(TestErrorKind::UnexpectedException {
+            expected_exception: test.expect_exception.clone(),
+            got_exception: exec_result.as_ref().err().map(|e| e.to_string()),
+        }),
+    }
+}
+
+fn validate_output(
+    expected_output: Option<&Bytes>,
+    actual_result: &ExecutionResult<HaltReason>,
+) -> Result<(), TestErrorKind> {
+    if let Some((expected, actual)) = expected_output.zip(actual_result.output()) {
+        if expected != actual {
+            return Err(TestErrorKind::UnexpectedOutput {
+                expected_output: Some(expected.clone()),
+                got_output: actual_result.output().cloned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_evm_execution(
     test: &Test,
     expected_output: Option<&Bytes>,
     test_name: &str,
-    exec_result: &EVMResultGeneric<ExecutionResult, Infallible>,
-    evm: &Evm<'_, EXT, &mut State<EmptyDB>>,
+    exec_result: &Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>,
+    db: &mut State<EmptyDB>,
+    spec: SpecId,
     print_json_outcome: bool,
-) -> Result<(), TestError> {
-    let logs_root = log_rlp_hash(exec_result.as_ref().map(|r| r.logs()).unwrap_or_default());
-    let state_root = state_merkle_trie_root(evm.context.evm.db.cache.trie_account());
+) -> Result<(), TestErrorKind> {
+    let validation = compute_test_roots(exec_result, db);
 
-    let print_json_output = |error: Option<String>| {
+    let print_json = |error: Option<&TestErrorKind>| {
         if print_json_outcome {
-            let json = json!({
-                "stateRoot": state_root,
-                "logsRoot": logs_root,
-                "output": exec_result.as_ref().ok().and_then(|r| r.output().cloned()).unwrap_or_default(),
-                "gasUsed": exec_result.as_ref().ok().map(|r| r.gas_used()).unwrap_or_default(),
-                "pass": error.is_none(),
-                "errorMsg": error.unwrap_or_default(),
-                "evmResult": match exec_result {
-                    Ok(r) => match r {
-                        ExecutionResult::Success { reason, .. } => format!("Success: {reason:?}"),
-                        ExecutionResult::Revert { .. } => "Revert".to_string(),
-                        ExecutionResult::Halt { reason, .. } => format!("Halt: {reason:?}"),
-                    },
-                    Err(e) => e.to_string(),
-                },
-                "postLogsHash": logs_root,
-                "fork": evm.handler.cfg().spec_id,
-                "test": test_name,
-                "d": test.indexes.data,
-                "g": test.indexes.gas,
-                "v": test.indexes.value,
-            });
+            let json = build_json_output(
+                test,
+                test_name,
+                exec_result,
+                &validation,
+                spec,
+                error.map(|e| e.to_string()),
+            );
             eprintln!("{json}");
         }
     };
 
-    // If we expect exception revm should return error from execution.
-    // So we do not check logs and state root.
-    //
-    // Note that some tests that have exception and run tests from before state clear
-    // would touch the caller account and make it appear in state root calculation.
-    // This is not something that we would expect as invalid tx should not touch state.
-    // but as this is a cleanup of invalid tx it is not properly defined and in the end
-    // it does not matter.
-    // Test where this happens: `tests/GeneralStateTests/stTransactionTest/NoSrcAccountCreate.json`
-    // and you can check that we have only two "hash" values for before and after state clear.
-    match (&test.expect_exception, exec_result) {
-        // do nothing
-        (None, Ok(result)) => {
-            // check output
-            if let Some((expected_output, output)) = expected_output.zip(result.output()) {
-                if expected_output != output {
-                    let kind = TestErrorKind::UnexpectedOutput {
-                        expected_output: Some(expected_output.clone()),
-                        got_output: result.output().cloned(),
-                    };
-                    print_json_output(Some(kind.to_string()));
-                    return Err(TestError {
-                        name: test_name.to_string(),
-                        kind,
-                    });
-                }
-            }
-        }
-        // return okay, exception is expected.
-        (Some(_), Err(_)) => return Ok(()),
-        _ => {
-            let kind = TestErrorKind::UnexpectedException {
-                expected_exception: test.expect_exception.clone(),
-                got_exception: exec_result.clone().err().map(|e| e.to_string()),
-            };
-            print_json_output(Some(kind.to_string()));
-            return Err(TestError {
-                name: test_name.to_string(),
-                kind,
-            });
-        }
+    // Check if exception handling is correct
+    let exception_expected = validate_exception(test, exec_result).inspect_err(|e| {
+        print_json(Some(e));
+    })?;
+
+    // If exception was expected and occurred, we're done
+    if exception_expected {
+        print_json(None);
+        return Ok(());
     }
 
-    if logs_root != test.logs {
-        let kind = TestErrorKind::LogsRootMismatch {
-            got: logs_root,
+    // Validate output if execution succeeded
+    if let Ok(result) = exec_result {
+        validate_output(expected_output, result).inspect_err(|e| {
+            print_json(Some(e));
+        })?;
+    }
+
+    // Validate logs root
+    if validation.logs_root != test.logs {
+        let error = TestErrorKind::LogsRootMismatch {
+            got: validation.logs_root,
             expected: test.logs,
         };
-        print_json_output(Some(kind.to_string()));
-        return Err(TestError {
-            name: test_name.to_string(),
-            kind,
-        });
+        print_json(Some(&error));
+        return Err(error);
     }
 
-    if state_root != test.hash {
-        let kind = TestErrorKind::StateRootMismatch {
-            got: state_root,
+    // Validate state root
+    if validation.state_root != test.hash {
+        let error = TestErrorKind::StateRootMismatch {
+            got: validation.state_root,
             expected: test.hash,
         };
-        print_json_output(Some(kind.to_string()));
-        return Err(TestError {
-            name: test_name.to_string(),
-            kind,
-        });
+        print_json(Some(&error));
+        return Err(error);
     }
 
-    print_json_output(None);
-
+    print_json(None);
     Ok(())
 }
 
+/// Execute a single test suite file containing multiple tests
+///
+/// # Arguments
+/// * `path` - Path to the JSON test file
+/// * `elapsed` - Shared counter for total execution time
+/// * `trace` - Whether to enable EVM tracing
+/// * `print_json_outcome` - Whether to print JSON formatted results
 pub fn execute_test_suite(
     path: &Path,
     elapsed: &Arc<Mutex<Duration>>,
@@ -248,295 +294,315 @@ pub fn execute_test_suite(
     }
 
     let s = std::fs::read_to_string(path).unwrap();
+    let path = path.to_string_lossy().into_owned();
     let suite: TestSuite = serde_json::from_str(&s).map_err(|e| TestError {
-        name: path.to_string_lossy().into_owned(),
+        name: "Unknown".to_string(),
+        path: path.clone(),
         kind: e.into(),
     })?;
 
     for (name, unit) in suite.0 {
-        // Create database and insert cache
-        let mut cache_state = revm::CacheState::new(false);
-        for (address, info) in unit.pre {
-            let acc_info = revm::primitives::AccountInfo {
-                balance: info.balance,
-                code_hash: keccak256(&info.code),
-                code: Some(Bytecode::new_raw(info.code)),
-                nonce: info.nonce,
-            };
-            cache_state.insert_account_with_storage(address, acc_info, info.storage);
-        }
+        // Prepare initial state
+        let cache_state = unit.state();
 
-        let mut env = Box::<Env>::default();
-        // for mainnet
-        env.cfg.chain_id = 1;
-        // env.cfg.spec_id is set down the road
+        // Setup base configuration
+        let mut cfg = CfgEnv::default();
+        cfg.chain_id = unit
+            .env
+            .current_chain_id
+            .unwrap_or(U256::ONE)
+            .try_into()
+            .unwrap_or(1);
 
-        // block env
-        env.block.number = unit.env.current_number;
-        env.block.coinbase = unit.env.current_coinbase;
-        env.block.timestamp = unit.env.current_timestamp;
-        env.block.gas_limit = unit.env.current_gas_limit;
-        env.block.basefee = unit.env.current_base_fee.unwrap_or_default();
-        env.block.difficulty = unit.env.current_difficulty;
-        // after the Merge prevrandao replaces mix_hash field in block and replaced difficulty opcode in EVM.
-        env.block.prevrandao = unit.env.current_random;
-        // EIP-4844
-        if let Some(current_excess_blob_gas) = unit.env.current_excess_blob_gas {
-            env.block
-                .set_blob_excess_gas_and_price(current_excess_blob_gas.to());
-        } else if let (Some(parent_blob_gas_used), Some(parent_excess_blob_gas)) = (
-            unit.env.parent_blob_gas_used,
-            unit.env.parent_excess_blob_gas,
-        ) {
-            env.block
-                .set_blob_excess_gas_and_price(calc_excess_blob_gas(
-                    parent_blob_gas_used.to(),
-                    parent_excess_blob_gas.to(),
-                ));
-        }
-
-        // tx env
-        env.tx.caller = if let Some(address) = unit.transaction.sender {
-            address
-        } else {
-            recover_address(unit.transaction.secret_key.as_slice()).ok_or_else(|| TestError {
-                name: name.clone(),
-                kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
-            })?
-        };
-        env.tx.gas_price = unit
-            .transaction
-            .gas_price
-            .or(unit.transaction.max_fee_per_gas)
-            .unwrap_or_default();
-        env.tx.gas_priority_fee = unit.transaction.max_priority_fee_per_gas;
-        // EIP-4844
-        env.tx.blob_hashes = unit.transaction.blob_versioned_hashes;
-        env.tx.max_fee_per_blob_gas = unit.transaction.max_fee_per_blob_gas;
-
-        // post and execution
-        for (spec_name, tests) in unit.post {
-            if matches!(
-                spec_name,
-                SpecName::ByzantiumToConstantinopleAt5
-                    | SpecName::Constantinople
-                    | SpecName::Unknown
-            ) {
+        // Post and execution
+        for (spec_name, tests) in &unit.post {
+            // Skip Constantinople spec
+            if *spec_name == SpecName::Constantinople {
                 continue;
             }
 
-            let spec_id = spec_name.to_spec_id();
+            cfg.spec = spec_name.to_spec_id();
 
-            for (index, test) in tests.into_iter().enumerate() {
-                env.tx.gas_limit = unit.transaction.gas_limit[test.indexes.gas].saturating_to();
+            // Configure max blobs per spec
+            if cfg.spec.is_enabled_in(SpecId::OSAKA) {
+                cfg.set_max_blobs_per_tx(6);
+            } else if cfg.spec.is_enabled_in(SpecId::PRAGUE) {
+                cfg.set_max_blobs_per_tx(9);
+            } else {
+                cfg.set_max_blobs_per_tx(6);
+            }
 
-                env.tx.data = unit
-                    .transaction
-                    .data
-                    .get(test.indexes.data)
-                    .unwrap()
-                    .clone();
-                env.tx.value = unit.transaction.value[test.indexes.value];
+            // Setup block environment for this spec
+            let block = unit.block_env(&cfg);
 
-                env.tx.access_list = unit
-                    .transaction
-                    .access_lists
-                    .get(test.indexes.data)
-                    .and_then(Option::as_deref)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|item| {
-                        (
-                            item.address,
-                            item.storage_keys
-                                .iter()
-                                .map(|key| U256::from_be_bytes(key.0))
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .collect();
-
-                let to = match unit.transaction.to {
-                    Some(add) => TransactTo::Call(add),
-                    None => TransactTo::Create,
-                };
-                env.tx.transact_to = to;
-
-                let mut cache = cache_state.clone();
-                cache.set_state_clear_flag(SpecId::enabled(
-                    spec_id,
-                    revm::primitives::SpecId::SPURIOUS_DRAGON,
-                ));
-                let mut state = revm::db::State::builder()
-                    .with_cached_prestate(cache)
-                    .with_bundle_update()
-                    .build();
-                let mut evm = Evm::builder()
-                    .with_db(&mut state)
-                    .modify_env(|e| e.clone_from(&env))
-                    .with_spec_id(spec_id)
-                    .build();
-
-                // do the deed
-                let (e, exec_result) = if trace {
-                    let mut evm = evm
-                        .modify()
-                        .reset_handler_with_external_context(
-                            TracerEip3155::new(Box::new(stderr())).without_summary(),
-                        )
-                        .append_handler_register(inspector_handle_register)
-                        .build();
-
-                    let timer = Instant::now();
-                    let res = evm.transact_commit();
-                    *elapsed.lock().unwrap() += timer.elapsed();
-
-                    let Err(e) = check_evm_execution(
-                        &test,
-                        unit.out.as_ref(),
-                        &name,
-                        &res,
-                        &evm,
-                        print_json_outcome,
-                    ) else {
-                        continue;
-                    };
-                    // reset external context
-                    (e, res)
-                } else {
-                    let timer = Instant::now();
-                    let res = evm.transact_commit();
-                    *elapsed.lock().unwrap() += timer.elapsed();
-
-                    // dump state and traces if test failed
-                    let output = check_evm_execution(
-                        &test,
-                        unit.out.as_ref(),
-                        &name,
-                        &res,
-                        &evm,
-                        print_json_outcome,
-                    );
-                    let Err(e) = output else {
-                        continue;
-                    };
-                    (e, res)
+            for (index, test) in tests.iter().enumerate() {
+                // Setup transaction environment
+                let tx = match test.tx_env(&unit) {
+                    Ok(tx) => tx,
+                    Err(_) if test.expect_exception.is_some() => continue,
+                    Err(_) => {
+                        return Err(TestError {
+                            name: name.clone(),
+                            path: path.clone(),
+                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
+                        });
+                    }
                 };
 
-                // print only once or
-                // if we are already in trace mode, just return error
-                static FAILED: AtomicBool = AtomicBool::new(false);
-                if trace || FAILED.swap(true, Ordering::SeqCst) {
-                    return Err(e);
+                // Execute the test
+                let result = execute_single_test(TestExecutionContext {
+                    name: &name,
+                    unit: &unit,
+                    test,
+                    cfg: &cfg,
+                    block: &block,
+                    tx: &tx,
+                    cache_state: &cache_state,
+                    elapsed,
+                    trace,
+                    print_json_outcome,
+                });
+
+                if let Err(e) = result {
+                    // Handle error with debug trace if needed
+                    static FAILED: AtomicBool = AtomicBool::new(false);
+                    if print_json_outcome || FAILED.swap(true, Ordering::SeqCst) {
+                        return Err(TestError {
+                            name: name.clone(),
+                            path: path.clone(),
+                            kind: e,
+                        });
+                    }
+
+                    // Re-run with trace for debugging
+                    debug_failed_test(DebugContext {
+                        name: &name,
+                        path: &path,
+                        index,
+                        test,
+                        cfg: &cfg,
+                        block: &block,
+                        tx: &tx,
+                        cache_state: &cache_state,
+                        error: &e,
+                    });
+
+                    return Err(TestError {
+                        path: path.clone(),
+                        name: name.clone(),
+                        kind: e,
+                    });
                 }
-
-                // re build to run with tracing
-                let mut cache = cache_state.clone();
-                cache.set_state_clear_flag(SpecId::enabled(
-                    spec_id,
-                    revm::primitives::SpecId::SPURIOUS_DRAGON,
-                ));
-                let state = revm::db::State::builder()
-                    .with_cached_prestate(cache)
-                    .with_bundle_update()
-                    .build();
-
-                let path = path.display();
-                println!("\nTraces:");
-                let mut evm = Evm::builder()
-                    .with_spec_id(spec_id)
-                    .with_db(state)
-                    .with_env(env.clone())
-                    .with_external_context(TracerEip3155::new(Box::new(stdout())).without_summary())
-                    .append_handler_register(inspector_handle_register)
-                    .build();
-                let _ = evm.transact_commit();
-
-                println!("\nExecution result: {exec_result:#?}");
-                println!("\nExpected exception: {:?}", test.expect_exception);
-                println!("\nState before: {cache_state:#?}");
-                println!("\nState after: {:#?}", evm.context.evm.db.cache);
-                println!("\nSpecification: {spec_id:?}");
-                println!("\nEnvironment: {env:#?}");
-                println!("\nTest name: {name:?} (index: {index}, path: {path}) failed:\n{e}");
-
-                return Err(e);
             }
         }
     }
     Ok(())
 }
 
+fn execute_single_test(ctx: TestExecutionContext) -> Result<(), TestErrorKind> {
+    // Prepare state
+    let mut cache = ctx.cache_state.clone();
+    cache.set_state_clear_flag(ctx.cfg.spec.is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let mut state = database::State::builder()
+        .with_cached_prestate(cache)
+        .with_bundle_update()
+        .build();
+
+    let evm_context = Context::mainnet()
+        .with_block(ctx.block)
+        .with_tx(ctx.tx)
+        .with_cfg(ctx.cfg)
+        .with_db(&mut state);
+
+    // Execute
+    let timer = Instant::now();
+    let (db, exec_result) = if ctx.trace {
+        let mut evm = evm_context
+            .build_mainnet_with_inspector(TracerEip3155::buffered(stderr()).without_summary());
+        let res = evm.inspect_tx_commit(ctx.tx);
+        let db = evm.ctx.journaled_state.database;
+        (db, res)
+    } else {
+        let mut evm = evm_context.build_mainnet();
+        let res = evm.transact_commit(ctx.tx);
+        let db = evm.ctx.journaled_state.database;
+        (db, res)
+    };
+    *ctx.elapsed.lock().unwrap() += timer.elapsed();
+
+    // Check results
+    check_evm_execution(
+        ctx.test,
+        ctx.unit.out.as_ref(),
+        ctx.name,
+        &exec_result,
+        db,
+        ctx.cfg.spec(),
+        ctx.print_json_outcome,
+    )
+}
+
+fn debug_failed_test(ctx: DebugContext) {
+    println!("\nTraces:");
+
+    // Re-run with tracing
+    let mut cache = ctx.cache_state.clone();
+    cache.set_state_clear_flag(ctx.cfg.spec.is_enabled_in(SpecId::SPURIOUS_DRAGON));
+    let mut state = database::State::builder()
+        .with_cached_prestate(cache)
+        .with_bundle_update()
+        .build();
+
+    let mut evm = Context::mainnet()
+        .with_db(&mut state)
+        .with_block(ctx.block)
+        .with_tx(ctx.tx)
+        .with_cfg(ctx.cfg)
+        .build_mainnet_with_inspector(TracerEip3155::buffered(stderr()).without_summary());
+
+    let exec_result = evm.inspect_tx_commit(ctx.tx);
+
+    println!("\nExecution result: {exec_result:#?}");
+    println!("\nExpected exception: {:?}", ctx.test.expect_exception);
+    println!("\nState before: {:#?}", ctx.cache_state);
+    println!(
+        "\nState after: {:#?}",
+        evm.ctx.journaled_state.database.cache
+    );
+    println!("\nSpecification: {:?}", ctx.cfg.spec);
+    println!("\nTx: {:#?}", ctx.tx);
+    println!("Block: {:#?}", ctx.block);
+    println!("Cfg: {:#?}", ctx.cfg);
+    println!(
+        "\nTest name: {:?} (index: {}, path: {:?}) failed:\n{}",
+        ctx.name, ctx.index, ctx.path, ctx.error
+    );
+}
+
+#[derive(Clone, Copy)]
+struct TestRunnerConfig {
+    single_thread: bool,
+    trace: bool,
+    print_outcome: bool,
+    keep_going: bool,
+}
+
+impl TestRunnerConfig {
+    fn new(single_thread: bool, trace: bool, print_outcome: bool, keep_going: bool) -> Self {
+        // Trace implies print_outcome
+        let print_outcome = print_outcome || trace;
+        // print_outcome or trace implies single_thread
+        let single_thread = single_thread || print_outcome;
+
+        Self {
+            single_thread,
+            trace,
+            print_outcome,
+            keep_going,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TestRunnerState {
+    n_errors: Arc<AtomicUsize>,
+    console_bar: Arc<ProgressBar>,
+    queue: Arc<Mutex<(usize, Vec<PathBuf>)>>,
+    elapsed: Arc<Mutex<Duration>>,
+}
+
+impl TestRunnerState {
+    fn new(test_files: Vec<PathBuf>) -> Self {
+        let n_files = test_files.len();
+        Self {
+            n_errors: Arc::new(AtomicUsize::new(0)),
+            console_bar: Arc::new(ProgressBar::with_draw_target(
+                Some(n_files as u64),
+                ProgressDrawTarget::stdout(),
+            )),
+            queue: Arc::new(Mutex::new((0usize, test_files))),
+            elapsed: Arc::new(Mutex::new(Duration::ZERO)),
+        }
+    }
+
+    fn next_test(&self) -> Option<PathBuf> {
+        let (current_idx, queue) = &mut *self.queue.lock().unwrap();
+        let idx = *current_idx;
+        let test_path = queue.get(idx).cloned()?;
+        *current_idx = idx + 1;
+        Some(test_path)
+    }
+}
+
+fn run_test_worker(state: TestRunnerState, config: TestRunnerConfig) -> Result<(), TestError> {
+    loop {
+        if !config.keep_going && state.n_errors.load(Ordering::SeqCst) > 0 {
+            return Ok(());
+        }
+
+        let Some(test_path) = state.next_test() else {
+            return Ok(());
+        };
+
+        let result = execute_test_suite(
+            &test_path,
+            &state.elapsed,
+            config.trace,
+            config.print_outcome,
+        );
+
+        state.console_bar.inc(1);
+
+        if let Err(err) = result {
+            state.n_errors.fetch_add(1, Ordering::SeqCst);
+            if !config.keep_going {
+                return Err(err);
+            }
+        }
+    }
+}
+
+fn determine_thread_count(single_thread: bool, n_files: usize) -> usize {
+    match (single_thread, std::thread::available_parallelism()) {
+        (true, _) | (false, Err(_)) => 1,
+        (false, Ok(n)) => n.get().min(n_files),
+    }
+}
+
+/// Run all test files in parallel or single-threaded mode
+///
+/// # Arguments
+/// * `test_files` - List of test files to execute
+/// * `single_thread` - Force single-threaded execution
+/// * `trace` - Enable EVM execution tracing
+/// * `print_outcome` - Print test outcomes in JSON format
+/// * `keep_going` - Continue running tests even if some fail
 pub fn run(
     test_files: Vec<PathBuf>,
-    mut single_thread: bool,
+    single_thread: bool,
     trace: bool,
-    mut print_outcome: bool,
+    print_outcome: bool,
     keep_going: bool,
 ) -> Result<(), TestError> {
-    // trace implies print_outcome
-    if trace {
-        print_outcome = true;
-    }
-    // print_outcome or trace implies single_thread
-    if print_outcome {
-        single_thread = true;
-    }
+    let config = TestRunnerConfig::new(single_thread, trace, print_outcome, keep_going);
     let n_files = test_files.len();
+    let state = TestRunnerState::new(test_files);
+    let num_threads = determine_thread_count(config.single_thread, n_files);
 
-    let n_errors = Arc::new(AtomicUsize::new(0));
-    let console_bar = Arc::new(ProgressBar::with_draw_target(
-        Some(n_files as u64),
-        ProgressDrawTarget::stdout(),
-    ));
-    let queue = Arc::new(Mutex::new((0usize, test_files)));
-    let elapsed = Arc::new(Mutex::new(std::time::Duration::ZERO));
-
-    let num_threads = match (single_thread, std::thread::available_parallelism()) {
-        (true, _) | (false, Err(_)) => 1,
-        (false, Ok(n)) => n.get(),
-    };
-    let num_threads = num_threads.min(n_files);
+    // Spawn worker threads
     let mut handles = Vec::with_capacity(num_threads);
     for i in 0..num_threads {
-        let queue = queue.clone();
-        let n_errors = n_errors.clone();
-        let console_bar = console_bar.clone();
-        let elapsed = elapsed.clone();
+        let state = state.clone();
 
-        let thread = std::thread::Builder::new().name(format!("runner-{i}"));
+        let thread = std::thread::Builder::new()
+            .name(format!("runner-{i}"))
+            .spawn(move || run_test_worker(state, config))
+            .unwrap();
 
-        let f = move || loop {
-            if !keep_going && n_errors.load(Ordering::SeqCst) > 0 {
-                return Ok(());
-            }
-
-            let (_index, test_path) = {
-                let (current_idx, queue) = &mut *queue.lock().unwrap();
-                let prev_idx = *current_idx;
-                let Some(test_path) = queue.get(prev_idx).cloned() else {
-                    return Ok(());
-                };
-                *current_idx = prev_idx + 1;
-                (prev_idx, test_path)
-            };
-
-            let result = execute_test_suite(&test_path, &elapsed, trace, print_outcome);
-
-            // Increment after the test is done.
-            console_bar.inc(1);
-
-            if let Err(err) = result {
-                n_errors.fetch_add(1, Ordering::SeqCst);
-                if !keep_going {
-                    return Err(err);
-                }
-            }
-        };
-        handles.push(thread.spawn(f).unwrap());
+        handles.push(thread);
     }
 
-    // join all threads before returning an error
+    // Collect results from all threads
     let mut thread_errors = Vec::new();
     for (i, handle) in handles.into_iter().enumerate() {
         match handle.join() {
@@ -544,19 +610,23 @@ pub fn run(
             Ok(Err(e)) => thread_errors.push(e),
             Err(_) => thread_errors.push(TestError {
                 name: format!("thread {i} panicked"),
+                path: String::new(),
                 kind: TestErrorKind::Panic,
             }),
         }
     }
-    console_bar.finish();
 
+    state.console_bar.finish();
+
+    // Print summary
     println!(
         "Finished execution. Total CPU time: {:.6}s",
-        elapsed.lock().unwrap().as_secs_f64()
+        state.elapsed.lock().unwrap().as_secs_f64()
     );
 
-    let n_errors = n_errors.load(Ordering::SeqCst);
+    let n_errors = state.n_errors.load(Ordering::SeqCst);
     let n_thread_errors = thread_errors.len();
+
     if n_errors == 0 && n_thread_errors == 0 {
         println!("All tests passed!");
         Ok(())

@@ -1,222 +1,359 @@
 use crate::{
-    gas::{self, warm_cold_cost},
-    interpreter::Interpreter,
-    primitives::{Bytes, Log, LogData, Spec, SpecId::*, B256, U256},
-    Host, InstructionResult, SStoreResult,
+    gas::{self, warm_cold_cost, CALL_STIPEND},
+    instructions::utility::{IntoAddress, IntoU256},
+    interpreter_types::{InputsTr, InterpreterTypes, MemoryTr, RuntimeFlag, StackTr},
+    Host, InstructionResult,
 };
 use core::cmp::min;
-use std::vec::Vec;
+use primitives::{hardfork::SpecId::*, Bytes, Log, LogData, B256, BLOCK_HASH_HISTORY, U256};
 
-pub fn balance<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    pop_address!(interpreter, address);
-    let Some((balance, is_cold)) = host.balance(address) else {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
+use crate::InstructionContext;
+
+/// Implements the BALANCE instruction.
+///
+/// Gets the balance of the given account.
+pub fn balance<WIRE: InterpreterTypes, H: Host + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    popn_top!([], top, context.interpreter);
+    let address = top.into_address();
+    let Some(balance) = context.host.balance(address) else {
+        context
+            .interpreter
+            .halt(InstructionResult::FatalExternalError);
         return;
     };
+    let spec_id = context.interpreter.runtime_flag.spec_id();
     gas!(
-        interpreter,
-        if SPEC::enabled(BERLIN) {
-            warm_cold_cost(is_cold)
-        } else if SPEC::enabled(ISTANBUL) {
+        context.interpreter,
+        if spec_id.is_enabled_in(BERLIN) {
+            warm_cold_cost(balance.is_cold)
+        } else if spec_id.is_enabled_in(ISTANBUL) {
             // EIP-1884: Repricing for trie-size-dependent opcodes
             700
-        } else if SPEC::enabled(TANGERINE) {
+        } else if spec_id.is_enabled_in(TANGERINE) {
             400
         } else {
             20
         }
     );
-    push!(interpreter, balance);
+    *top = balance.data;
 }
 
 /// EIP-1884: Repricing for trie-size-dependent opcodes
-pub fn selfbalance<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    check!(interpreter, ISTANBUL);
-    gas!(interpreter, gas::LOW);
-    let Some((balance, _)) = host.balance(interpreter.contract.target_address) else {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
+pub fn selfbalance<WIRE: InterpreterTypes, H: Host + ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    check!(context.interpreter, ISTANBUL);
+    gas!(context.interpreter, gas::LOW);
+
+    let Some(balance) = context
+        .host
+        .balance(context.interpreter.input.target_address())
+    else {
+        context
+            .interpreter
+            .halt(InstructionResult::FatalExternalError);
         return;
     };
-    push!(interpreter, balance);
+    push!(context.interpreter, balance.data);
 }
 
-pub fn extcodesize<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    pop_address!(interpreter, address);
-    let Some((code, is_cold)) = host.code(address) else {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
+/// Implements the EXTCODESIZE instruction.
+///
+/// Gets the size of an account's code.
+pub fn extcodesize<WIRE: InterpreterTypes, H: Host + ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    popn_top!([], top, context.interpreter);
+    let address = top.into_address();
+    let Some(code) = context.host.load_account_code(address) else {
+        context
+            .interpreter
+            .halt(InstructionResult::FatalExternalError);
         return;
     };
-    if SPEC::enabled(BERLIN) {
-        gas!(interpreter, warm_cold_cost(is_cold));
-    } else if SPEC::enabled(TANGERINE) {
-        gas!(interpreter, 700);
+    let spec_id = context.interpreter.runtime_flag.spec_id();
+    if spec_id.is_enabled_in(BERLIN) {
+        gas!(context.interpreter, warm_cold_cost(code.is_cold));
+    } else if spec_id.is_enabled_in(TANGERINE) {
+        gas!(context.interpreter, 700);
     } else {
-        gas!(interpreter, 20);
+        gas!(context.interpreter, 20);
     }
 
-    push!(interpreter, U256::from(code.len()));
+    *top = U256::from(code.len());
 }
 
 /// EIP-1052: EXTCODEHASH opcode
-pub fn extcodehash<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    check!(interpreter, CONSTANTINOPLE);
-    pop_address!(interpreter, address);
-    let Some((code_hash, is_cold)) = host.code_hash(address) else {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
+pub fn extcodehash<WIRE: InterpreterTypes, H: Host + ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    check!(context.interpreter, CONSTANTINOPLE);
+    popn_top!([], top, context.interpreter);
+    let address = top.into_address();
+    let Some(code_hash) = context.host.load_account_code_hash(address) else {
+        context
+            .interpreter
+            .halt(InstructionResult::FatalExternalError);
         return;
     };
-    if SPEC::enabled(BERLIN) {
-        gas!(interpreter, warm_cold_cost(is_cold));
-    } else if SPEC::enabled(ISTANBUL) {
-        gas!(interpreter, 700);
+    let spec_id = context.interpreter.runtime_flag.spec_id();
+    if spec_id.is_enabled_in(BERLIN) {
+        gas!(context.interpreter, warm_cold_cost(code_hash.is_cold));
+    } else if spec_id.is_enabled_in(ISTANBUL) {
+        gas!(context.interpreter, 700);
     } else {
-        gas!(interpreter, 400);
+        gas!(context.interpreter, 400);
     }
-    push_b256!(interpreter, code_hash);
+    *top = code_hash.into_u256();
 }
 
-pub fn extcodecopy<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    pop_address!(interpreter, address);
-    pop!(interpreter, memory_offset, code_offset, len_u256);
-
-    let Some((code, is_cold)) = host.code(address) else {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
+/// Implements the EXTCODECOPY instruction.
+///
+/// Copies a portion of an account's code to memory.
+pub fn extcodecopy<WIRE: InterpreterTypes, H: Host + ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    popn!(
+        [address, memory_offset, code_offset, len_u256],
+        context.interpreter
+    );
+    let address = address.into_address();
+    let Some(code) = context.host.load_account_code(address) else {
+        context
+            .interpreter
+            .halt(InstructionResult::FatalExternalError);
         return;
     };
 
-    let len = as_usize_or_fail!(interpreter, len_u256);
+    let len = as_usize_or_fail!(context.interpreter, len_u256);
     gas_or_fail!(
-        interpreter,
-        gas::extcodecopy_cost(SPEC::SPEC_ID, len as u64, is_cold)
+        context.interpreter,
+        gas::extcodecopy_cost(
+            context.interpreter.runtime_flag.spec_id(),
+            len,
+            code.is_cold
+        )
     );
     if len == 0 {
         return;
     }
-    let memory_offset = as_usize_or_fail!(interpreter, memory_offset);
+    let memory_offset = as_usize_or_fail!(context.interpreter, memory_offset);
     let code_offset = min(as_usize_saturated!(code_offset), code.len());
-    resize_memory!(interpreter, memory_offset, len);
+    resize_memory!(context.interpreter, memory_offset, len);
 
-    // Note: this can't panic because we resized memory to fit.
-    interpreter
-        .shared_memory
-        .set_data(memory_offset, code_offset, len, &code.original_bytes());
+    // Note: This can't panic because we resized memory to fit.
+    context
+        .interpreter
+        .memory
+        .set_data(memory_offset, code_offset, len, &code);
 }
 
-pub fn blockhash<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    gas!(interpreter, gas::BLOCKHASH);
-    pop_top!(interpreter, number);
+/// Implements the BLOCKHASH instruction.
+///
+/// Gets the hash of one of the 256 most recent complete blocks.
+pub fn blockhash<WIRE: InterpreterTypes, H: Host + ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    gas!(context.interpreter, gas::BLOCKHASH);
+    popn_top!([], number, context.interpreter);
 
-    let Some(hash) = host.block_hash(*number) else {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
+    let requested_number = *number;
+    let block_number = context.host.block_number();
+
+    let Some(diff) = block_number.checked_sub(requested_number) else {
+        *number = U256::ZERO;
         return;
     };
-    *number = U256::from_be_bytes(hash.0);
-}
 
-pub fn sload<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    pop_top!(interpreter, index);
-    let Some((value, is_cold)) = host.sload(interpreter.contract.target_address, *index) else {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
+    let diff = as_u64_saturated!(diff);
+
+    // blockhash should push zero if number is same as current block number.
+    if diff == 0 {
+        *number = U256::ZERO;
         return;
-    };
-    gas!(interpreter, gas::sload_cost(SPEC::SPEC_ID, is_cold));
-    *index = value;
+    }
+
+    *number = if diff <= BLOCK_HASH_HISTORY {
+        let Some(hash) = context.host.block_hash(as_u64_saturated!(requested_number)) else {
+            context
+                .interpreter
+                .halt(InstructionResult::FatalExternalError);
+            return;
+        };
+        U256::from_be_bytes(hash.0)
+    } else {
+        U256::ZERO
+    }
 }
 
-pub fn sstore<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    require_non_staticcall!(interpreter);
+/// Implements the SLOAD instruction.
+///
+/// Loads a word from storage.
+pub fn sload<WIRE: InterpreterTypes, H: Host + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    popn_top!([], index, context.interpreter);
 
-    pop!(interpreter, index, value);
-    let Some(SStoreResult {
-        original_value: original,
-        present_value: old,
-        new_value: new,
-        is_cold,
-    }) = host.sstore(interpreter.contract.target_address, index, value)
+    let Some(value) = context
+        .host
+        .sload(context.interpreter.input.target_address(), *index)
     else {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
+        context
+            .interpreter
+            .halt(InstructionResult::FatalExternalError);
         return;
     };
-    gas_or_fail!(interpreter, {
-        let remaining_gas = interpreter.gas.remaining();
-        gas::sstore_cost(SPEC::SPEC_ID, original, old, new, remaining_gas, is_cold)
-    });
-    refund!(
-        interpreter,
-        gas::sstore_refund(SPEC::SPEC_ID, original, old, new)
+
+    gas!(
+        context.interpreter,
+        gas::sload_cost(context.interpreter.runtime_flag.spec_id(), value.is_cold)
     );
+    *index = value.data;
+}
+
+/// Implements the SSTORE instruction.
+///
+/// Stores a word to storage.
+pub fn sstore<WIRE: InterpreterTypes, H: Host + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    require_non_staticcall!(context.interpreter);
+
+    popn!([index, value], context.interpreter);
+
+    let Some(state_load) =
+        context
+            .host
+            .sstore(context.interpreter.input.target_address(), index, value)
+    else {
+        context
+            .interpreter
+            .halt(InstructionResult::FatalExternalError);
+        return;
+    };
+
+    // EIP-1706 Disable SSTORE with gasleft lower than call stipend
+    if context
+        .interpreter
+        .runtime_flag
+        .spec_id()
+        .is_enabled_in(ISTANBUL)
+        && context.interpreter.gas.remaining() <= CALL_STIPEND
+    {
+        context
+            .interpreter
+            .halt(InstructionResult::ReentrancySentryOOG);
+        return;
+    }
+    gas!(
+        context.interpreter,
+        gas::sstore_cost(
+            context.interpreter.runtime_flag.spec_id(),
+            &state_load.data,
+            state_load.is_cold
+        )
+    );
+
+    context.interpreter.gas.record_refund(gas::sstore_refund(
+        context.interpreter.runtime_flag.spec_id(),
+        &state_load.data,
+    ));
 }
 
 /// EIP-1153: Transient storage opcodes
 /// Store value to transient storage
-pub fn tstore<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    check!(interpreter, CANCUN);
-    require_non_staticcall!(interpreter);
-    gas!(interpreter, gas::WARM_STORAGE_READ_COST);
+pub fn tstore<WIRE: InterpreterTypes, H: Host + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    check!(context.interpreter, CANCUN);
+    require_non_staticcall!(context.interpreter);
+    gas!(context.interpreter, gas::WARM_STORAGE_READ_COST);
 
-    pop!(interpreter, index, value);
+    popn!([index, value], context.interpreter);
 
-    host.tstore(interpreter.contract.target_address, index, value);
+    context
+        .host
+        .tstore(context.interpreter.input.target_address(), index, value);
 }
 
 /// EIP-1153: Transient storage opcodes
 /// Load value from transient storage
-pub fn tload<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    check!(interpreter, CANCUN);
-    gas!(interpreter, gas::WARM_STORAGE_READ_COST);
+pub fn tload<WIRE: InterpreterTypes, H: Host + ?Sized>(context: InstructionContext<'_, H, WIRE>) {
+    check!(context.interpreter, CANCUN);
+    gas!(context.interpreter, gas::WARM_STORAGE_READ_COST);
 
-    pop_top!(interpreter, index);
+    popn_top!([], index, context.interpreter);
 
-    *index = host.tload(interpreter.contract.target_address, *index);
+    *index = context
+        .host
+        .tload(context.interpreter.input.target_address(), *index);
 }
 
-pub fn log<const N: usize, H: Host + ?Sized>(interpreter: &mut Interpreter, host: &mut H) {
-    require_non_staticcall!(interpreter);
+/// Implements the LOG0-LOG4 instructions.
+///
+/// Appends log record with N topics.
+pub fn log<const N: usize, H: Host + ?Sized>(
+    context: InstructionContext<'_, H, impl InterpreterTypes>,
+) {
+    require_non_staticcall!(context.interpreter);
 
-    pop!(interpreter, offset, len);
-    let len = as_usize_or_fail!(interpreter, len);
-    gas_or_fail!(interpreter, gas::log_cost(N as u8, len as u64));
+    popn!([offset, len], context.interpreter);
+    let len = as_usize_or_fail!(context.interpreter, len);
+    gas_or_fail!(context.interpreter, gas::log_cost(N as u8, len as u64));
     let data = if len == 0 {
         Bytes::new()
     } else {
-        let offset = as_usize_or_fail!(interpreter, offset);
-        resize_memory!(interpreter, offset, len);
-        Bytes::copy_from_slice(interpreter.shared_memory.slice(offset, len))
+        let offset = as_usize_or_fail!(context.interpreter, offset);
+        resize_memory!(context.interpreter, offset, len);
+        Bytes::copy_from_slice(context.interpreter.memory.slice_len(offset, len).as_ref())
     };
-
-    if interpreter.stack.len() < N {
-        interpreter.instruction_result = InstructionResult::StackUnderflow;
+    if context.interpreter.stack.len() < N {
+        context.interpreter.halt(InstructionResult::StackUnderflow);
         return;
     }
-
-    let mut topics = Vec::with_capacity(N);
-    for _ in 0..N {
-        // SAFETY: stack bounds already checked few lines above
-        topics.push(B256::from(unsafe { interpreter.stack.pop_unsafe() }));
-    }
-
-    let log = Log {
-        address: interpreter.contract.target_address,
-        data: LogData::new(topics, data).expect("LogData should have <=4 topics"),
+    let Some(topics) = context.interpreter.stack.popn::<N>() else {
+        context.interpreter.halt(InstructionResult::StackUnderflow);
+        return;
     };
 
-    host.log(log);
+    let log = Log {
+        address: context.interpreter.input.target_address(),
+        data: LogData::new(topics.into_iter().map(B256::from).collect(), data)
+            .expect("LogData should have <=4 topics"),
+    };
+
+    context.host.log(log);
 }
 
-pub fn selfdestruct<H: Host + ?Sized, SPEC: Spec>(interpreter: &mut Interpreter, host: &mut H) {
-    require_non_staticcall!(interpreter);
-    pop_address!(interpreter, target);
+/// Implements the SELFDESTRUCT instruction.
+///
+/// Halt execution and register account for later deletion.
+pub fn selfdestruct<WIRE: InterpreterTypes, H: Host + ?Sized>(
+    context: InstructionContext<'_, H, WIRE>,
+) {
+    require_non_staticcall!(context.interpreter);
+    popn!([target], context.interpreter);
+    let target = target.into_address();
 
-    let Some(res) = host.selfdestruct(interpreter.contract.target_address, target) else {
-        interpreter.instruction_result = InstructionResult::FatalExternalError;
+    let Some(res) = context
+        .host
+        .selfdestruct(context.interpreter.input.target_address(), target)
+    else {
+        context
+            .interpreter
+            .halt(InstructionResult::FatalExternalError);
         return;
     };
 
     // EIP-3529: Reduction in refunds
-    if !SPEC::enabled(LONDON) && !res.previously_destroyed {
-        refund!(interpreter, gas::SELFDESTRUCT)
+    if !context
+        .interpreter
+        .runtime_flag
+        .spec_id()
+        .is_enabled_in(LONDON)
+        && !res.previously_destroyed
+    {
+        context.interpreter.gas.record_refund(gas::SELFDESTRUCT)
     }
-    gas!(interpreter, gas::selfdestruct_cost(SPEC::SPEC_ID, res));
 
-    interpreter.instruction_result = InstructionResult::SelfDestruct;
+    gas!(
+        context.interpreter,
+        gas::selfdestruct_cost(context.interpreter.runtime_flag.spec_id(), res)
+    );
+
+    context.interpreter.halt(InstructionResult::SelfDestruct);
 }

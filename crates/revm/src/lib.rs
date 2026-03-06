@@ -2,55 +2,37 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[macro_use]
-#[cfg(not(feature = "std"))]
-extern crate alloc as std;
-
-// Define modules.
-
-mod builder;
-mod context;
-
-#[cfg(any(test, feature = "test-utils"))]
-pub mod test_utils;
-
-pub mod db;
-mod evm;
-mod frame;
-pub mod handler;
-mod inspector;
-mod journaled_state;
-#[cfg(feature = "optimism")]
-pub mod optimism;
+// reexport dependencies
+#[doc(inline)]
+pub use bytecode;
+#[doc(inline)]
+pub use context;
+#[doc(inline)]
+pub use context_interface;
+#[doc(inline)]
+pub use database;
+#[doc(inline)]
+pub use database_interface;
+#[doc(inline)]
+pub use handler;
+#[doc(inline)]
+pub use inspector;
+#[doc(inline)]
+pub use interpreter;
+#[doc(inline)]
+pub use precompile;
+#[doc(inline)]
+pub use primitives;
+#[doc(inline)]
+pub use state;
 
 // Export items.
 
-pub use builder::EvmBuilder;
-pub use context::{
-    Context, ContextPrecompile, ContextPrecompiles, ContextStatefulPrecompile,
-    ContextStatefulPrecompileArc, ContextStatefulPrecompileBox, ContextStatefulPrecompileMut,
-    ContextWithHandlerCfg, EvmContext, InnerEvmContext,
+pub use context::journal::{Journal, JournalEntry};
+pub use context::Context;
+pub use database_interface::{Database, DatabaseCommit, DatabaseRef};
+pub use handler::{
+    ExecuteCommitEvm, ExecuteEvm, MainBuilder, MainContext, MainnetEvm, SystemCallCommitEvm,
+    SystemCallEvm,
 };
-pub use db::{
-    CacheState, DBBox, State, StateBuilder, StateDBBox, TransitionAccount, TransitionState,
-};
-pub use db::{Database, DatabaseCommit, DatabaseRef, InMemoryDB};
-pub use evm::{Evm, CALL_STACK_LIMIT};
-pub use frame::{CallFrame, CreateFrame, Frame, FrameData, FrameOrResult, FrameResult};
-pub use handler::Handler;
-pub use inspector::{
-    inspector_handle_register, inspector_instruction, inspectors, GetInspector, Inspector,
-};
-pub use journaled_state::{JournalCheckpoint, JournalEntry, JournaledState};
-// export Optimism types, helpers, and constants
-#[cfg(feature = "optimism")]
-pub use optimism::{L1BlockInfo, BASE_FEE_RECIPIENT, L1_BLOCK_CONTRACT, L1_FEE_RECIPIENT};
-
-// Reexport libraries
-
-#[doc(inline)]
-pub use revm_interpreter as interpreter;
-#[doc(inline)]
-pub use revm_interpreter::primitives;
-#[doc(inline)]
-pub use revm_precompile as precompile;
+pub use inspector::{InspectCommitEvm, InspectEvm, Inspector};

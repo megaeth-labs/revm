@@ -7,40 +7,28 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc as std;
 
-mod bytecode;
-mod constants;
-pub mod db;
-pub mod env;
+pub mod constants;
+pub mod eip170;
+pub mod eip3860;
+pub mod eip4844;
+pub mod eip7702;
+pub mod eip7823;
+pub mod eip7825;
+pub mod eip7907;
+pub mod eip7918;
+pub mod hardfork;
 
-#[cfg(feature = "c-kzg")]
-pub mod kzg;
-pub mod precompile;
-pub mod result;
-pub mod specification;
-pub mod state;
-pub mod utilities;
-pub use alloy_primitives::{
-    self, address, b256, bytes, fixed_bytes, hex, hex_literal, ruint, uint, Address, Bytes,
-    FixedBytes, Log, LogData, B256, I256, U256,
-};
-pub use bitvec;
-pub use bytecode::*;
 pub use constants::*;
-pub use env::*;
 
-cfg_if::cfg_if! {
-    if #[cfg(all(not(feature = "hashbrown"), feature = "std"))] {
-        pub use std::collections::{hash_map, hash_set, HashMap, HashSet};
-        use hashbrown as _;
-    } else {
-        pub use hashbrown::{hash_map, hash_set, HashMap, HashSet};
-    }
-}
+// Reexport alloy primitives.
 
-#[cfg(feature = "c-kzg")]
-pub use kzg::{EnvKzgSettings, KzgSettings};
-pub use precompile::*;
-pub use result::*;
-pub use specification::*;
-pub use state::*;
-pub use utilities::*;
+pub use alloy_primitives::map::{self, hash_map, hash_set, HashMap, HashSet};
+pub use alloy_primitives::{
+    self, address, b256, bytes, fixed_bytes, hex, hex_literal, keccak256, ruint, uint, Address,
+    Bytes, FixedBytes, Log, LogData, TxKind, B256, I128, I256, U128, U256,
+};
+
+/// type alias for storage keys
+pub type StorageKey = U256;
+/// type alias for storage values
+pub type StorageValue = U256;
