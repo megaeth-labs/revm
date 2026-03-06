@@ -3792,10 +3792,9 @@ dependencies = [
 
 [[package]]
 name = "revm-bytecode"
-version = "6.1.0"
+version = "6.2.1"
 dependencies = [
  "bitvec",
- "once_cell",
  "paste",
  "phf",
  "revm-primitives",
@@ -3946,16 +3945,17 @@ dependencies = [
 
 [[package]]
 name = "revm-primitives"
-version = "20.1.0"
+version = "20.2.1"
 dependencies = [
  "alloy-primitives",
  "num_enum",
+ "once_cell",
  "serde",
 ]
 
 [[package]]
 name = "revm-state"
-version = "7.0.2"
+version = "7.0.4"
 dependencies = [
  "bitflags",
  "revm-bytecode",
