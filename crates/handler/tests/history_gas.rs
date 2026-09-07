@@ -861,14 +861,16 @@ fn test_a_child_refill_of_its_callers_charge_nets_out_on_success() {
         (LARGE_HISTORY, 0, -(LARGE_HISTORY as i64), 0)
     );
 
-    // The caller returns with the child's reservoir and its own 50,000 spill, and the child's
-    // net has cancelled the caller's charge.
+    // The caller absorbs the child's reservoir last in, first out: 50,000 pay its own spill back
+    // to regular gas and the other 100,000 stay reservoir. The child's net has cancelled the
+    // caller's charge.
     let caller = refilled.returned[1];
     assert_eq!(caller.result, InstructionResult::Stop);
-    assert_eq!(counters(&caller.gas), (LARGE_HISTORY, 0, 0, 50_000));
+    assert_eq!(counters(&caller.gas), (RESERVOIR, 0, 0, 0));
 
-    // The caller's 50,000 spill stays spent as regular gas and comes back as reservoir.
-    assert_eq!(counters(&refilled.settled), (LARGE_HISTORY, 0, 0, 50_000));
+    // The transaction ends as if nothing had been charged.
+    assert_eq!(counters(&refilled.settled), (RESERVOIR, 0, 0, 0));
+    assert_eq!(refilled.settled.remaining(), baseline.settled.remaining());
     assert_eq!(refilled.total(), baseline.total());
 }
 
