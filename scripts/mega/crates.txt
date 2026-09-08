@@ -1,0 +1,21 @@
+# The twelve published crates of this fork.
+#
+# One record per line: <crate name> <crates.io baseline version> <directory>.
+# Blank lines and lines starting with '#' are ignored.
+#
+# This is the single source of truth for the crate table. It is read by
+# scripts/mega/patch-args.sh and by the semver workflow. Consumers must patch
+# all twelve together, otherwise the build resolves two copies of revm.
+
+revm                    40.0.3  crates/revm
+revm-primitives         24.0.1  crates/primitives
+revm-interpreter        37.0.3  crates/interpreter
+revm-context            18.0.3  crates/context
+revm-context-interface  19.0.3  crates/context/interface
+revm-handler            20.0.3  crates/handler
+revm-database           15.0.2  crates/database
+revm-database-interface 12.1.1  crates/database/interface
+revm-state              12.0.1  crates/state
+revm-bytecode           11.0.1  crates/bytecode
+revm-precompile         36.0.3  crates/precompile
+revm-inspector          21.0.3  crates/inspector

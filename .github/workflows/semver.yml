@@ -1,0 +1,73 @@
+name: Semver
+
+concurrency:
+  cancel-in-progress: true
+  group: ${{github.workflow}}-${{github.ref}}
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# The default token only needs to read this repository.
+permissions:
+  contents: read
+
+jobs:
+  # The public API of this fork must stay a superset of the crates.io baseline.
+  # Every crate is compared against the version it was forked from; a
+  # major-level finding means a consumer that builds against crates.io would
+  # break, and fails the job.
+  semver:
+    name: semver-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@cargo-semver-checks
+      - name: Install GMP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgmp-dev
+      - name: Check every crate against its baseline
+        run: |
+          set -euo pipefail
+          table=scripts/mega/crates.txt
+          expected=$(grep -cvE '^[[:space:]]*(#|$)' "$table")
+          failed=""
+          checked=0
+          # `|| [ -n "$crate" ]` keeps a final record that lacks its newline.
+          while read -r crate version dir || [ -n "$crate" ]; do
+            case "$crate" in ''|\#*) continue ;; esac
+            echo "::group::$crate $version"
+            if cargo semver-checks check-release \
+                 -p "$crate" \
+                 --baseline-version "$version" \
+                 --release-type minor < /dev/null; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::$crate has a major-level change against $version"
+              failed="$failed $crate"
+            fi
+            checked=$((checked + 1))
+          done < "$table"
+          if [ "$checked" -ne "$expected" ]; then
+            echo "::error::checked $checked crates but the table lists $expected"
+            exit 1
+          fi
+          if [ -n "$failed" ]; then
+            echo "major-level changes found in:$failed" >&2
+            exit 1
+          fi
+          echo "all $checked crates are a superset of their baseline"

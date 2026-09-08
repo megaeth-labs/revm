@@ -1,0 +1,167 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  # Keeps the upstream mirror branch and the upstream tags current, and reports
+  # what changed in the crates this fork touches.
+  mirror:
+    name: mirror upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/bluealloy/revm.git
+          git fetch --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
+      - name: Build the digest
+        id: digest
+        run: |
+          set -euo pipefail
+          # On the first run the mirror branch does not exist yet, so the
+          # digest starts at the upstream tag this fork is based on.
+          if git ls-remote --exit-code --heads origin upstream-main >/dev/null 2>&1; then
+            git fetch --no-tags origin +refs/heads/upstream-main:refs/remotes/origin/upstream-main
+            base=refs/remotes/origin/upstream-main
+          else
+            base=refs/tags/$(tr -d '[:space:]' < scripts/mega/base.txt)
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+          commits=$(git log --oneline "$base..refs/remotes/upstream/main" -- \
+            crates/interpreter crates/handler crates/context crates/precompile crates/primitives)
+
+          # Each lookup is a checked command of its own: an empty tag list is
+          # valid, a failed lookup is not.
+          list_tags() {
+            git ls-remote --tags "$1" 'v[0-9]*' > "$2.raw"
+            awk '{ print $2 }' "$2.raw" | sed 's|^refs/tags/||' | awk '!/\^\{\}$/' | sort -u > "$2"
+          }
+          list_tags origin origin-tags.txt
+          list_tags upstream upstream-tags.txt
+          comm -13 origin-tags.txt upstream-tags.txt > new-tags.txt
+          new_tags=$(cat new-tags.txt)
+
+          {
+            echo "## Upstream digest"
+            echo
+            echo "Base \`$base\` at \`$(git rev-parse --short "$base")\`, upstream main at \`$(git rev-parse --short refs/remotes/upstream/main)\`."
+            echo
+            echo "### Commits touching interpreter, handler, context, precompile, primitives"
+            echo
+            if [ -n "$commits" ]; then
+              printf '```\n%s\n```\n' "$commits"
+            else
+              echo "None."
+            fi
+            echo
+            echo "### Upstream tags not yet mirrored"
+            echo
+            if [ -n "$new_tags" ]; then
+              printf '```\n%s\n```\n' "$new_tags"
+            else
+              echo "None."
+            fi
+          } > digest.md
+
+          cat digest.md >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$commits" ] || [ -n "$new_tags" ]; then
+            echo "has_content=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_content=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Reporting comes before the mirror moves: if the issue update fails, the
+      # next run digests the same range again instead of losing it.
+      - name: Report the digest
+        if: steps.digest.outputs.has_content == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          number=$(gh issue list --state open --search 'in:title "Upstream digest"' --json number,title \
+            --jq '[.[] | select(.title == "Upstream digest")] | first | .number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file digest.md
+          else
+            gh issue create --title "Upstream digest" --body-file digest.md
+          fi
+      # new-tags.txt was written by the digest step above. Tags are fetched one
+      # by one so an upstream tag that moved after it was mirrored cannot break
+      # the run; such a tag is not in the list and is never re-pushed.
+      - name: Push new upstream tags
+        run: |
+          set -euo pipefail
+          refs=""
+          while read -r tag || [ -n "$tag" ]; do
+            [ -n "$tag" ] || continue
+            git fetch --no-tags upstream "refs/tags/$tag:refs/tags/$tag"
+            refs="$refs refs/tags/$tag"
+          done < new-tags.txt
+          if [ -n "$refs" ]; then
+            echo "pushing:$refs"
+            git push origin $refs
+          fi
+      # No force: a mirror branch that cannot fast-forward means upstream
+      # rewrote history and a human has to look at it.
+      - name: Fast-forward the mirror branch
+        run: git push origin refs/remotes/upstream/main:refs/heads/upstream-main
+
+  # The full execution-spec-test suite, including the legacy tests, the
+  # debug-assertion `ethtests` profile and the 32-bit target that the pull
+  # request workflow leaves out.
+  eest-full:
+    name: eest ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: release x86_64-unknown-linux-gnu
+            cross: false
+            args: clean cargo release
+          - name: ethtests x86_64-unknown-linux-gnu
+            cross: false
+            args: clean cargo ethtests
+          - name: release i686-unknown-linux-gnu
+            cross: true
+            args: clean cross release i686-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+      - name: Install cross
+        if: ${{ matrix.cross }}
+        run: cargo install cross --locked
+      - name: Run tests
+        run: ./scripts/run-tests.sh ${{ matrix.args }}
+
+  advisories:
+    name: advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
+        with:
+          command: check advisories
