@@ -208,11 +208,14 @@ pub fn sstore<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     );
 
     let state_load = if spec_id.is_enabled_in(BERLIN) {
-        let additional_cold_cost = context.host.gas_params().cold_storage_additional_cost();
-        let skip_cold = context.interpreter.gas.remaining() < additional_cold_cost;
+        // Note: the slot is always cold-loaded (warmed), even when there is not
+        // enough gas to pay the cold cost. Skipping the load would avoid a DB
+        // read on a certain out-of-gas, but EIP-7928 (block access lists) records
+        // the slot access regardless of the subsequent OOG, so the warming must
+        // happen. The OOG outcome is unchanged: the cold charge below still fails.
         context
             .host
-            .sstore_skip_cold_load(target, index, value, skip_cold)?
+            .sstore_skip_cold_load(target, index, value, false)?
     } else {
         context
             .host
