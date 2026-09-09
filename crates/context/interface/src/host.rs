@@ -1,7 +1,7 @@
 //! Host interface for external blockchain state access.
 
 use crate::{
-    cfg::GasParams,
+    cfg::{GasId, GasParams, StateGasCharge, StateGasSite},
     context::{SStoreResult, SelfDestructResult, StateLoad},
     journaled_state::{AccountInfoLoad, AccountLoad},
 };
@@ -68,6 +68,31 @@ pub trait Host {
 
     /// Returns whether state gas (EIP-8037) is enabled.
     fn is_amsterdam_eip8037_enabled(&self) -> bool;
+
+    /// Unit price of one EIP-8037 state gas charge.
+    ///
+    /// Every state gas charge and every state gas refund goes through here, so a charge and the
+    /// refund that undoes it are priced identically. `site` names the account — and, for
+    /// slot-scoped charges, the storage slot — the charge is attributed to, which is what lets an
+    /// implementation price the same `id` differently per location.
+    ///
+    /// `None` reports a failed lookup, and the implementation is responsible for recording the
+    /// underlying cause the way [`Host::sload`] does; the caller turns it into a fatal external
+    /// error.
+    ///
+    /// The default reads the flat gas schedule, which never fails.
+    #[inline]
+    fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
+        let _ = site;
+        Some(self.gas_params().get(id))
+    }
+
+    /// Total gas for `charge`, priced through [`Host::state_gas_price`].
+    #[inline]
+    fn state_gas_charge(&mut self, charge: StateGasCharge) -> Option<u64> {
+        self.state_gas_price(charge.id, charge.site)
+            .map(|unit_price| charge.total(unit_price))
+    }
 
     /* Database */
 

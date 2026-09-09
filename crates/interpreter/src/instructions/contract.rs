@@ -14,7 +14,10 @@ use crate::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, Host,
     InstructionExecResult as Result, InstructionResult, InterpreterAction,
 };
-use context_interface::CreateScheme;
+use context_interface::{
+    cfg::{GasId, StateGasCharge, StateGasSite},
+    CreateScheme,
+};
 use primitives::{constants::CALL_STACK_LIMIT, hardfork::SpecId, Bytes, U256};
 use std::boxed::Box;
 
@@ -129,11 +132,17 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
             .load_account_info_skip_cold_load(created_address, false, false)?
             .is_empty;
         if !destination_alive {
-            state_gas!(
-                context.interpreter,
-                context.host.gas_params().create_state_gas()
+            let charge = StateGasCharge::one(
+                GasId::create_state_gas(),
+                StateGasSite::account(created_address),
             );
+            let price = context
+                .host
+                .state_gas_charge(charge)
+                .ok_or(InstructionResult::FatalExternalError)?;
+            state_gas!(context.interpreter, price);
             create_inputs.set_charged_create_state_gas(true);
+            create_inputs.set_charged_state_gas_address(created_address);
         }
     }
 

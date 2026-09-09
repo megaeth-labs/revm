@@ -17,6 +17,12 @@ pub struct CreateOutcome {
     /// `create_state_gas` on the parent's tracker (the destination did not
     /// exist at access time). When the create fails the parent refunds it.
     pub charged_create_state_gas: bool,
+    /// EIP-8037: the account `charged_create_state_gas` was priced for.
+    ///
+    /// The parent re-prices this address when it refunds the charge, so the refund matches what
+    /// was taken even when the price varies per account. Meaningless while
+    /// `charged_create_state_gas` is `false`.
+    pub charged_state_gas_address: Address,
 }
 
 impl CreateOutcome {
@@ -35,6 +41,7 @@ impl CreateOutcome {
             result,
             address,
             charged_create_state_gas: false,
+            charged_state_gas_address: Address::ZERO,
         }
     }
 

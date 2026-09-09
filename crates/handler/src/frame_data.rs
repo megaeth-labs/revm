@@ -1,4 +1,7 @@
-use context_interface::{cfg::GasParams, result::Output};
+use context_interface::{
+    cfg::{GasId, GasParams, StateGasCharge, StateGasSite},
+    result::Output,
+};
 use core::ops::Range;
 use interpreter::{CallOutcome, CreateOutcome, Gas, InstructionResult, InterpreterResult};
 use primitives::Address;
@@ -134,14 +137,36 @@ impl FrameResult {
     /// rather than the result alone).
     #[inline]
     pub fn refundable_state_gas(&self, gas_params: &GasParams) -> Option<u64> {
+        self.refundable_state_gas_charge()
+            .map(|charge| charge.total(gas_params.get(charge.id)))
+    }
+
+    /// The upfront state charge to refund, as the charge that was made, or `None` when there is
+    /// nothing to refund.
+    ///
+    /// Same decision as [`Self::refundable_state_gas`], left unpriced so the caller can put it
+    /// through [`Host::state_gas_price`](context_interface::host::Host::state_gas_price) and get
+    /// back exactly what the charge cost.
+    #[inline]
+    pub fn refundable_state_gas_charge(&self) -> Option<StateGasCharge> {
         match self {
             FrameResult::Call(outcome) => (!outcome.instruction_result().is_ok()
                 && outcome.charged_new_account_state_gas)
-                .then(|| gas_params.new_account_state_gas()),
+                .then(|| {
+                    StateGasCharge::one(
+                        GasId::new_account_state_gas(),
+                        StateGasSite::account(outcome.charged_state_gas_address),
+                    )
+                }),
             FrameResult::Create(outcome) => ((outcome.address.is_none()
                 || !outcome.instruction_result().is_ok())
                 && outcome.charged_create_state_gas)
-                .then(|| gas_params.create_state_gas()),
+                .then(|| {
+                    StateGasCharge::one(
+                        GasId::create_state_gas(),
+                        StateGasSite::account(outcome.charged_state_gas_address),
+                    )
+                }),
         }
     }
 }

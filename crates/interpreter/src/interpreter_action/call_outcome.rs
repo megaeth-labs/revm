@@ -1,6 +1,6 @@
 use crate::{Gas, InstructionResult, InterpreterResult};
 use core::ops::Range;
-use primitives::{Bytes, Log};
+use primitives::{Address, Bytes, Log};
 use std::vec::Vec;
 
 /// Represents the outcome of a call operation in a virtual machine.
@@ -30,6 +30,12 @@ pub struct CallOutcome {
     /// the parent's tracker for this call, so the parent can refund it when
     /// the call reverts/halts.
     pub charged_new_account_state_gas: bool,
+    /// EIP-8037: the account `charged_new_account_state_gas` was priced for.
+    ///
+    /// The parent re-prices this address when it refunds the charge, so the refund matches what
+    /// was taken even when the price varies per account. Meaningless while
+    /// `charged_new_account_state_gas` is `false`.
+    pub charged_state_gas_address: Address,
 }
 
 impl CallOutcome {
@@ -48,6 +54,7 @@ impl CallOutcome {
             was_precompile_called: false,
             precompile_call_logs: Vec::new(),
             charged_new_account_state_gas: false,
+            charged_state_gas_address: Address::ZERO,
         }
     }
 

@@ -15,10 +15,11 @@ use context_interface::{
     context::{take_error, ContextError},
     journaled_state::JournalCheckpoint,
     result::{HaltReasonTr, InvalidHeader, InvalidTransaction, ResultGas},
-    Cfg, ContextTr, Database, JournalTr, Transaction,
+    Cfg, ContextTr, Database, Host, JournalTr, Transaction,
 };
 use interpreter::{interpreter_action::FrameInit, GasTracker, InitialAndFloorGas, SharedMemory};
 use primitives::{TxKind, U256};
+use std::string::ToString;
 
 /// Trait for errors that can occur during EVM execution.
 ///
@@ -525,7 +526,15 @@ pub trait Handler {
         // Refund the EIP-2780 refundable first-frame charge when no account
         // leaf was created, exactly like `EthFrame::return_result` refunds
         // the upfront CALL/CREATE state charges of inner frames.
-        if let Some(charge) = frame_result.refundable_state_gas(evm.ctx().cfg().gas_params()) {
+        if let Some(charge) = frame_result.refundable_state_gas_charge() {
+            // Priced through the same hook the charge went through. A failed lookup surfaces as
+            // an external error: the hook recorded the cause.
+            let Some(charge) = evm.ctx().state_gas_charge(charge) else {
+                take_error::<Self::Error, _>(evm.ctx().error())?;
+                return Err(Self::Error::from_string(
+                    "state gas price lookup failed".to_string(),
+                ));
+            };
             parent_gas.refill_reservoir(charge);
             // Unlike an inner frame's caller, the transaction ends here: an
             // exceptional halt consumes all regular gas, including the

@@ -23,6 +23,9 @@ pub struct CreateInputs {
     /// exist at access time). Propagated onto [`crate::CreateOutcome`] so the
     /// parent refunds the charge when the create fails.
     charged_create_state_gas: bool,
+    /// EIP-8037: the account `charged_create_state_gas` was priced for, so the refund re-prices
+    /// the same address. Meaningless while `charged_create_state_gas` is `false`.
+    charged_state_gas_address: Address,
     /// Cached created address. This is computed lazily and cached to avoid
     /// redundant keccak computations when inspectors call `created_address`.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -52,6 +55,7 @@ impl CreateInputs {
             gas_limit,
             reservoir,
             charged_create_state_gas: false,
+            charged_state_gas_address: Address::ZERO,
             cached_address: OnceCell::new(),
             cached_init_code_hash: OnceCell::new(),
         }
@@ -149,6 +153,17 @@ impl CreateInputs {
     /// on the parent's tracker (EIP-8037).
     pub const fn set_charged_create_state_gas(&mut self, charged: bool) {
         self.charged_create_state_gas = charged;
+    }
+
+    /// The account the conditional `create_state_gas` was priced for (EIP-8037).
+    pub const fn charged_state_gas_address(&self) -> Address {
+        self.charged_state_gas_address
+    }
+
+    /// Records the account the conditional `create_state_gas` was priced for, so the refund can
+    /// re-price it identically.
+    pub const fn set_charged_state_gas_address(&mut self, address: Address) {
+        self.charged_state_gas_address = address;
     }
 
     /// Sets the state gas reservoir (EIP-8037).

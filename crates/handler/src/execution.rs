@@ -1,5 +1,6 @@
 use context::{ContextTr, Database, JournalTr};
 use context_interface::{
+    cfg::{GasId, StateGasCharge, StateGasSite},
     journaled_state::{account::JournaledAccountTr, JournalCheckpoint, JournalLoadError},
     Cfg, Transaction,
 };
@@ -7,7 +8,7 @@ use interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
     GasTracker,
 };
-use primitives::TxKind;
+use primitives::{Address, TxKind};
 use state::Bytecode;
 use std::boxed::Box;
 
@@ -49,8 +50,6 @@ pub fn create_init_frame<CTX: ContextTr>(
 ) -> Result<Option<FrameInput>, <<CTX::Journal as JournalTr>::Database as Database>::Error> {
     let is_eip2780 = ctx.cfg().is_amsterdam_eip2780_enabled();
     let params = ctx.cfg().gas_params();
-    let new_account_state_gas = params.new_account_state_gas();
-    let create_state_gas = params.create_state_gas();
     let warm_access_cost = params.warm_storage_read_cost();
     let cold_account_additional_cost = params.cold_account_additional_cost();
     let (tx, journal) = ctx.tx_journal_mut();
@@ -70,11 +69,22 @@ pub fn create_init_frame<CTX: ContextTr>(
 
             let mut charged_new_account_state_gas = false;
             if is_eip2780 && !tx.value().is_zero() && recipient_is_empty {
+                // The pricing hook takes `&mut CTX`, so the journal borrow is released for the
+                // lookup and retaken after it. A failed lookup bails like an out-of-gas: the
+                // hook has recorded the cause, and the caller surfaces it.
+                let charge = StateGasCharge::one(
+                    GasId::new_account_state_gas(),
+                    StateGasSite::account(target_address),
+                );
+                let Some(new_account_state_gas) = ctx.state_gas_charge(charge) else {
+                    return Ok(None);
+                };
                 if !gas.record_state_cost(new_account_state_gas) {
                     return Ok(None);
                 }
                 charged_new_account_state_gas = true;
             }
+            let (tx, journal) = ctx.tx_journal_mut();
 
             if let Some(delegated_address) = delegated_address {
                 if is_eip2780 {
@@ -126,6 +136,7 @@ pub fn create_init_frame<CTX: ContextTr>(
         }
         TxKind::Create => {
             let mut charged_create_state_gas = false;
+            let mut charged_state_gas_address = Address::ZERO;
             if is_eip2780 {
                 // The tx nonce was validated against the caller's nonce, which
                 // a create transaction bumps only at frame creation — after
@@ -133,12 +144,21 @@ pub fn create_init_frame<CTX: ContextTr>(
                 let created_address = tx.caller().create(tx.nonce());
                 let target_is_empty = journal.load_account(created_address)?.info.is_empty();
                 if target_is_empty {
+                    let charge = StateGasCharge::one(
+                        GasId::create_state_gas(),
+                        StateGasSite::account(created_address),
+                    );
+                    let Some(create_state_gas) = ctx.state_gas_charge(charge) else {
+                        return Ok(None);
+                    };
                     if !gas.record_state_cost(create_state_gas) {
                         return Ok(None);
                     }
                     charged_create_state_gas = true;
+                    charged_state_gas_address = created_address;
                 }
             }
+            let tx = ctx.tx();
             let mut inputs = CreateInputs::new(
                 tx.caller(),
                 CreateScheme::Create,
@@ -148,6 +168,7 @@ pub fn create_init_frame<CTX: ContextTr>(
                 gas.reservoir(),
             );
             inputs.set_charged_create_state_gas(charged_create_state_gas);
+            inputs.set_charged_state_gas_address(charged_state_gas_address);
             Ok(Some(FrameInput::Create(Box::new(inputs))))
         }
     }

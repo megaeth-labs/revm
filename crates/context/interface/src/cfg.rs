@@ -2,8 +2,10 @@
 
 pub mod gas;
 pub mod gas_params;
+pub mod state_gas;
 
 pub use gas_params::{GasId, GasParams};
+pub use state_gas::{StateGasCharge, StateGasSite};
 
 use auto_impl::auto_impl;
 use core::{fmt::Debug, hash::Hash};
