@@ -385,15 +385,12 @@ pub struct InitialAndFloorGas {
     /// Under EIP-8037, this is the part constrained by `TX_MAX_GAS_LIMIT`;
     /// state gas uses its own reservoir and is not subject to that cap.
     pub initial_regular_gas: u64,
-    /// State gas component of the initial intrinsic gas.
-    /// Under EIP-8037, this includes:
-    /// - EIP-7702 auth list state gas (per-auth account creation + metadata costs)
-    /// - For CREATE transactions: `create_state_gas` (account creation + contract metadata)
-    /// - For CALL transactions: 0 (state gas is unpredictable at validation time)
+    /// State gas charged at the intrinsic phase, before the first frame is
+    /// entered.
+    ///
+    /// The state-dependent charges of the EIP-2780 runtime gas phase are not
+    /// included here: they are recorded directly on the transaction-level gas.
     pub initial_state_gas: u64,
-    /// EIP-7702 refund for existing authorities.
-    /// This is the refund given when an authorization is applied to an already existing account.
-    pub state_refund: u64,
     /// If transaction is a Call and Prague is enabled
     /// floor_gas is at least amount of gas that is going to be spent.
     pub floor_gas: u64,
@@ -408,7 +405,6 @@ impl InitialAndFloorGas {
         Self {
             initial_regular_gas,
             initial_state_gas: 0,
-            state_refund: 0,
             floor_gas,
         }
     }
@@ -423,7 +419,6 @@ impl InitialAndFloorGas {
         Self {
             initial_regular_gas,
             initial_state_gas,
-            state_refund: 0,
             floor_gas,
         }
     }
@@ -439,11 +434,10 @@ impl InitialAndFloorGas {
         self.initial_regular_gas
     }
 
-    /// State gas component of the initial intrinsic gas.
-    /// This is the state gas component of the initial intrinsic gas minus the EIP-7702 refund.
+    /// State gas charged before the first frame is entered.
     #[inline]
     pub const fn initial_state_gas_final(&self) -> u64 {
-        self.initial_state_gas - self.state_refund
+        self.initial_state_gas
     }
 
     /// EIP-7623 floor gas.
@@ -509,10 +503,13 @@ impl InitialAndFloorGas {
     ///   reservoir = execution_gas - regular_gas_budget
     ///
     /// Initial state gas is then deducted from the reservoir (spilling into the
-    /// regular budget when the reservoir is insufficient), and the EIP-7702
-    /// refund for existing authorities is added back to the reservoir.
+    /// regular budget when the reservoir is insufficient).
     ///
     /// On mainnet (state gas disabled), reservoir = 0 and gas_limit is unchanged.
+    ///
+    /// All subtractions saturate at zero: callers normally guarantee
+    /// `tx_gas_limit >= initial_total_gas` via validation, but if that invariant
+    /// is violated the result clamps to `(0, 0)` instead of underflowing.
     ///
     /// Returns `(gas_limit, reservoir)`.
     pub fn initial_gas_and_reservoir(
@@ -520,7 +517,7 @@ impl InitialAndFloorGas {
         tx_gas_limit: u64,
         tx_gas_limit_cap: u64,
     ) -> (u64, u64) {
-        let execution_gas = tx_gas_limit - self.initial_regular_gas();
+        let execution_gas = tx_gas_limit.saturating_sub(self.initial_regular_gas());
 
         // System calls pass InitialAndFloorGas with all zeros and should not be
         // subject to the TX_MAX_GAS_LIMIT cap.
@@ -532,21 +529,17 @@ impl InitialAndFloorGas {
 
         let mut regular_gas_limit = core::cmp::min(tx_gas_limit, tx_gas_limit_cap)
             .saturating_sub(self.initial_regular_gas());
-        let mut reservoir = execution_gas - regular_gas_limit;
+        let mut reservoir = execution_gas.saturating_sub(regular_gas_limit);
 
         // Deduct initial state gas from the reservoir. When the reservoir is
         // insufficient, the deficit is charged from the regular gas budget.
         if reservoir >= self.initial_state_gas {
             reservoir -= self.initial_state_gas;
         } else {
-            regular_gas_limit -= self.initial_state_gas - reservoir;
+            regular_gas_limit =
+                regular_gas_limit.saturating_sub(self.initial_state_gas - reservoir);
             reservoir = 0;
         }
-
-        // EIP-7702 state gas refund for existing authorities goes directly to
-        // the reservoir. In the Python spec, set_delegation adds this refund to
-        // state_gas_reservoir so it stays as state gas (not regular gas).
-        reservoir += self.state_refund;
 
         (regular_gas_limit, reservoir)
     }

@@ -1,4 +1,25 @@
 
+# Unreleased
+
+### EIP-2780 runtime gas phase (ethereum/EIPs#11844)
+
+Gated on `CfgEnv::enable_amsterdam_eip2780`; older forks and 2780-disabled configs are unchanged.
+
+* Intrinsic gas no longer includes the create-transaction `create_state_gas` (charged at runtime, only when the deployment target does not exist) nor the pessimistic EIP-7702 per-auth charge — each authorization now costs `REGULAR_PER_AUTH_BASE_COST` (7,816, new `eip8038::EIP7702_PER_AUTH_BASE_REGULAR`) intrinsically, with the state-dependent remainder charged per authority at runtime and no refunds.
+* New struct field (breaks literal construction): `InitialAndFloorGas.runtime_oog` — set when the transaction passes the intrinsic check but cannot afford the runtime charges; the handler includes it as an out-of-gas halt consuming all gas, reverting applied delegations.
+* Additive: `InitialAndFloorGas::checked_initial_gas_and_reservoir`, `GasParams::tx_eip7702_state_gas_bytecode`, `pre_execution::apply_eip2780_runtime_gas`, `pre_execution::apply_auth_list_eip2780`.
+* `pre_execution::apply_eip7702_auth_list` runs the runtime gas phase (and returns no refund) when EIP-2780 is enabled.
+* The delegated-recipient delegation-target access is now warm/cold aware (`WARM_ACCESS` if pre-warmed) and charged in the runtime phase instead of a flat `COLD_ACCOUNT_ACCESS` at frame entry.
+
+# v113 tag (all crates v41.0.0)
+
+All crates are now versioned in lockstep, starting at **41.0.0** — hence the version jump (e.g. `revm-bytecode` 11.0.1 → 41.0.0).
+
+* `TransientStorage` ([#3736](https://github.com/bluealloy/revm/pull/3736)): type alias `HashMap<(Address, StorageKey), StorageValue>` replaced by a newtype over `AddressMap<StorageKeyMap<StorageValue>>`. Use `get_value(address, key)` / `insert_value(address, key, value)` / `remove_value(address, key)` instead of tuple-key map access. Derefs to the inner map, but iteration now yields per-account slot maps.
+* `OnStateHook::on_state` takes `EvmState` by value instead of `&EvmState` ([#3732](https://github.com/bluealloy/revm/pull/3732)).
+* `TransitionAccount` gained a storage generic `S = StorageWithOriginalValues` ([#3732](https://github.com/bluealloy/revm/pull/3732)). `update`, `TransitionState::add_transitions` and `State::apply_transition` now take `TransitionAccount<Option<Cow<'_, EvmStorage>>>` items. New `map_storage` and `TransitionState::add_transition` helpers.
+* Additive: `sstore_with_gas_accounting` hook for custom SSTORE gas accounting ([#3734](https://github.com/bluealloy/revm/pull/3734), [#3750](https://github.com/bluealloy/revm/pull/3750)), `StateBuilder::with_bundle_update_if` ([#3729](https://github.com/bluealloy/revm/pull/3729)), `Account::is_changed` ([#3727](https://github.com/bluealloy/revm/pull/3727)).
+
 # v108 tag (revm v39.0.0)
 
 ### EIP-8037 Amsterdam — bal-devnet-7 ([#3667](https://github.com/bluealloy/revm/pull/3667))

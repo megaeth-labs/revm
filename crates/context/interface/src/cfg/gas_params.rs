@@ -343,19 +343,6 @@ impl GasParams {
             // to the reservoir via `GasParams::sstore_state_gas_refill`.
             table[GasId::sstore_set_refund().as_usize()] = 2800;
 
-            // EIP-7702 under EIP-8037/8038: only the regular-gas slots live here.
-            // The state-gas portions are sourced from `new_account_state_gas`
-            // (per-account) and `tx_eip7702_state_gas_bytecode` (per-bytecode);
-            // helpers in `GasParams` combine the pre-scaled values. The per-auth
-            // ACCOUNT_WRITE is charged pessimistically in the regular per-auth cost
-            // and refunded (`tx_eip7702_auth_refund`) for existing or rejected
-            // authorizations whose target account is not newly created.
-            //   regular per-auth cost: 15816 (incl. ACCOUNT_WRITE)
-            //   regular refund:        8000  (ACCOUNT_WRITE, per existing/rejected auth)
-            table[GasId::tx_eip7702_regular_gas().as_usize()] =
-                eip8038::EIP7702_PER_EMPTY_ACCOUNT_REGULAR;
-            table[GasId::tx_eip7702_regular_refund().as_usize()] = eip8038::ACCOUNT_WRITE;
-
             // EIP-2780: the floor base drops from 21,000 to TX_BASE (12,000).
             table[GasId::tx_floor_cost_base_gas().as_usize()] = eip2780::TX_BASE_COST;
 
@@ -437,11 +424,16 @@ impl GasParams {
             table[GasId::tx_access_list_storage_key_cost().as_usize()] =
                 eip8038::ACCESS_LIST_STORAGE_KEY_COST + 32 * 64;
 
-            // EIP-7702: regular-gas portion of the per-auth cost shifts with
-            // ACCOUNT_WRITE / COLD_ACCOUNT_ACCESS / WARM_ACCESS (see
-            // [`eip8038::EIP7702_PER_EMPTY_ACCOUNT_REGULAR`]).
+            // EIP-7702 under EIP-2780: the intrinsic per-auth charge is the
+            // state-independent REGULAR_PER_AUTH_BASE_COST (7,816) only. The
+            // state-dependent remainder — ACCOUNT_WRITE plus the new-account
+            // (`new_account_state_gas`) and delegation-bytes
+            // (`tx_eip7702_state_gas_bytecode`) state gas — is charged at the
+            // runtime gas phase, per authority that incurs it, so the
+            // pre-Amsterdam per-auth refund never applies.
             table[GasId::tx_eip7702_regular_gas().as_usize()] =
-                eip8038::EIP7702_PER_EMPTY_ACCOUNT_REGULAR;
+                eip8038::EIP7702_PER_AUTH_BASE_REGULAR;
+            table[GasId::tx_eip7702_regular_refund().as_usize()] = 0;
 
             // EIP-2780: Intrinsic gas decomposition. The new path uses
             // `eip2780::TX_BASE_COST` directly for the sender base and these
@@ -834,64 +826,31 @@ impl GasParams {
 
     /// Used in [GasParams::initial_tx_gas] to calculate the eip7702 per-auth cost.
     ///
-    /// Under EIP-8037 this combines a regular portion with a state-gas portion.
-    /// Pre-EIP-8037 the state-gas portion is zero so this returns the legacy
-    /// `PER_EMPTY_ACCOUNT_COST`.
+    /// Pre-Amsterdam this is the pessimistic bundled `PER_EMPTY_ACCOUNT_COST`
+    /// (25,000). Under EIP-2780 (Amsterdam) it is the state-independent
+    /// `REGULAR_PER_AUTH_BASE_COST` (7,816) only; the state-dependent remainder
+    /// (`ACCOUNT_WRITE` plus the new-account / delegation-bytes state gas) is
+    /// charged at the runtime gas phase, per authority that incurs it.
     #[inline]
     pub fn tx_eip7702_per_empty_account_cost(&self) -> u64 {
-        let regular = self.get(GasId::tx_eip7702_regular_gas());
-        let state = self.tx_eip7702_state_gas();
-        regular.saturating_add(state)
+        self.get(GasId::tx_eip7702_regular_gas())
     }
 
-    /// EIP-7702 authorization refund per existing account.
-    ///
-    /// Pre-Amsterdam this is a fixed regular-gas refund (`PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST`).
-    /// Under EIP-8037 the refund is fully state gas, equal to the per-account
-    /// state-gas portion.
-    #[inline]
-    pub fn tx_eip7702_auth_refund(&self) -> u64 {
-        let regular = self.get(GasId::tx_eip7702_regular_refund());
-        let state = self.new_account_state_gas();
-        regular.saturating_add(state)
-    }
-
-    /// EIP-8037: State gas per EIP-7702 authorization (pessimistic).
-    ///
-    /// Sums the new-account and bytecode state-gas portions. Used for
-    /// `initial_state_gas` tracking. Zero before AMSTERDAM.
-    #[inline]
-    pub fn tx_eip7702_state_gas(&self) -> u64 {
-        // Per-auth pessimistic charge: one new account + one new delegation bytecode.
-        self.tx_eip7702_state_refund(1, 1)
-    }
-
-    /// EIP-7702 state gas for `num_accounts` new accounts and `num_bytecodes`
-    /// new delegation bytecodes.
-    ///
-    /// Shared primitive for both the pessimistic per-auth charge (via
-    /// [`tx_eip7702_state_gas`](Self::tx_eip7702_state_gas), with counts of 1)
-    /// and the transaction state-gas refund for already-existing authorities
-    /// (with the counts of existing accounts and already-deployed delegation
-    /// targets). Returns zero before AMSTERDAM.
-    #[inline]
-    pub fn tx_eip7702_state_refund(&self, num_accounts: u64, num_bytecodes: u64) -> u64 {
-        let per_account = self
-            .get(GasId::new_account_state_gas())
-            .saturating_mul(num_accounts);
-        let per_bytecode = self
-            .get(GasId::tx_eip7702_state_gas_bytecode())
-            .saturating_mul(num_bytecodes);
-        per_account.saturating_add(per_bytecode)
-    }
-
-    /// EIP-7702 per-auth refund: regular-gas portion only.
+    /// EIP-7702 per-auth refund for an already-existing authority.
     ///
     /// Pre-Amsterdam this is `PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST` (12500).
-    /// Under EIP-8037 it is zero — the refund is entirely state gas.
+    /// Under EIP-2780 it is zero — the state-dependent per-auth charges are
+    /// applied at the runtime gas phase instead of refunded.
     #[inline]
     pub fn tx_eip7702_auth_refund_regular(&self) -> u64 {
         self.get(GasId::tx_eip7702_regular_refund())
+    }
+
+    /// EIP-8037: state gas for one 23-byte EIP-7702 delegation indicator
+    /// (`STATE_BYTES_PER_AUTH_BASE × CPSB`). Zero before AMSTERDAM.
+    #[inline]
+    pub fn tx_eip7702_state_gas_bytecode(&self) -> u64 {
+        self.get(GasId::tx_eip7702_state_gas_bytecode())
     }
 
     /// Used in [GasParams::initial_tx_gas] to calculate the token non zero byte multiplier.
@@ -1090,15 +1049,12 @@ impl GasParams {
         let tokens_in_calldata =
             get_tokens_in_calldata(input, self.tx_token_non_zero_byte_multiplier());
 
-        // EIP-7702: Compute auth list costs.
-        // Under EIP-8037, tx_eip7702_per_empty_account_cost bundles regular + state gas.
-        // We split them: regular goes in initial_regular_gas, state goes in initial_state_gas.
-        let auth_total_cost = authorization_list_num * self.tx_eip7702_per_empty_account_cost();
-        let auth_state_gas = authorization_list_num * self.tx_eip7702_state_gas();
+        // EIP-7702: Compute auth list costs. See
+        // [`tx_eip7702_per_empty_account_cost`](Self::tx_eip7702_per_empty_account_cost)
+        // for the per-auth intrinsic charge per fork.
+        let auth_regular_cost = authorization_list_num * self.tx_eip7702_per_empty_account_cost();
 
-        let auth_regular_cost = auth_total_cost - auth_state_gas;
-
-        let base_and_to_and_value_gas = match eip2780 {
+        let base_and_to_and_value_gas = match &eip2780 {
             None => {
                 let mut base = self.tx_base_stipend();
                 if is_create {
@@ -1107,7 +1063,7 @@ impl GasParams {
                 }
                 base
             }
-            Some(info) => self.eip2780_base_to_value_gas(is_create, &info),
+            Some(info) => self.eip2780_base_to_value_gas(is_create, info),
         };
 
         let mut initial_regular_gas = tokens_in_calldata * self.tx_token_cost()
@@ -1119,28 +1075,32 @@ impl GasParams {
             // EIP-7702: Only the regular portion of auth list cost
             + auth_regular_cost;
 
-        // EIP-8037: Track auth list state gas separately for reservoir handling.
-        let mut initial_state_gas = auth_state_gas;
-
         if is_create {
             // EIP-3860: Limit and meter initcode
             initial_regular_gas += self.tx_initcode_cost(input.len());
-
-            // EIP-8037: State gas for CREATE transactions.
-            // create_state_gas covers both account creation and contract metadata.
-            initial_state_gas += self.create_state_gas();
         }
 
         // Calculate gas floor. Introduced by EIP-7623, updated by EIP-7976, and
         // extended by EIP-7981 to include access-list data alongside calldata.
+        //
+        // Under EIP-2780 the floor is anchored on the decomposed regular-gas
+        // intrinsic base (`TX_BASE + to-based + value-based`, the same sum used
+        // for `base_and_to_and_value_gas` above) rather than the flat
+        // `tx_floor_cost_base_gas`, so it never undercuts the transaction's own
+        // intrinsic base.
         let access_list_floor_tokens =
             self.tx_floor_tokens_in_access_list(access_list_accounts, access_list_storages);
-        let floor_gas =
+        let mut floor_gas =
             self.tx_floor_cost(input) + access_list_floor_tokens * self.tx_floor_cost_per_token();
+        if eip2780.is_some() {
+            floor_gas = floor_gas - self.tx_floor_cost_base_gas() + base_and_to_and_value_gas;
+        }
 
+        // `initial_state_gas` stays zero at the intrinsic phase: state-dependent
+        // charges are applied at the EIP-2780 runtime gas phase
+        // (`apply_eip2780_runtime_gas`), which adds them to `initial_state_gas`.
         InitialAndFloorGas::default()
             .with_initial_regular_gas(initial_regular_gas)
-            .with_initial_state_gas(initial_state_gas)
             .with_floor_gas(floor_gas)
     }
 
@@ -1552,12 +1512,12 @@ impl GasId {
         Self::new(26)
     }
 
-    /// EIP-7702 per-auth regular intrinsic gas (the non-state portion).
+    /// EIP-7702 per-auth intrinsic gas.
     ///
-    /// Pre-EIP-8037 this holds the full `PER_EMPTY_ACCOUNT_COST`; under EIP-8037
-    /// it holds only the regular slice and the state portion is sourced
-    /// separately. The combined total is exposed via
-    /// [`GasParams::tx_eip7702_per_empty_account_cost`].
+    /// Pre-Amsterdam this holds the pessimistic bundled `PER_EMPTY_ACCOUNT_COST`;
+    /// under EIP-2780 it holds the state-independent `REGULAR_PER_AUTH_BASE_COST`
+    /// only (the state-dependent remainder is charged at the runtime gas phase).
+    /// Exposed via [`GasParams::tx_eip7702_per_empty_account_cost`].
     pub const fn tx_eip7702_regular_gas() -> GasId {
         Self::new(27)
     }
@@ -1622,8 +1582,8 @@ impl GasId {
     /// This is the refund given when an authorization is applied to an already
     /// existing account. Pre-EIP-8037 it is `PER_EMPTY_ACCOUNT_COST -
     /// PER_AUTH_BASE_COST` (25000 - 12500 = 12500); under EIP-8037 the refund is
-    /// entirely state gas so this is zero. The combined total is exposed via
-    /// [`GasParams::tx_eip7702_auth_refund`].
+    /// entirely state gas so this is zero. Read it through
+    /// [`GasParams::tx_eip7702_auth_refund_regular`].
     pub const fn tx_eip7702_regular_refund() -> GasId {
         Self::new(39)
     }
@@ -1832,24 +1792,19 @@ mod tests {
 
     #[test]
     fn test_initial_state_gas_for_create() {
-        // Use AMSTERDAM spec since EIP-8037 state gas is only enabled starting from Amsterdam.
+        // State-dependent charges are applied at the EIP-2780 runtime gas
+        // phase, so the intrinsic state gas is zero even for CREATE
+        // transactions at AMSTERDAM.
         let gas_params = GasParams::new_spec(SpecId::AMSTERDAM);
         // Test CREATE transaction (is_create = true)
         let create_gas = gas_params.initial_tx_gas(b"", true, 0, 0, 0, None);
-        let expected_state_gas = gas_params.create_state_gas();
+        assert_eq!(create_gas.initial_state_gas_final(), 0);
 
-        assert_eq!(create_gas.initial_state_gas_final(), expected_state_gas);
-        assert_eq!(
-            create_gas.initial_state_gas_final(),
-            eip8037::NEW_ACCOUNT_BYTES * eip8037::CPSB_GLAMSTERDAM
-        );
-
-        // initial_total_gas() returns both regular and state gas combined
         let create_cost = gas_params.tx_create_cost();
         let initcode_cost = gas_params.tx_initcode_cost(0);
         assert_eq!(
             create_gas.initial_total_gas(),
-            gas_params.tx_base_stipend() + create_cost + initcode_cost + expected_state_gas
+            gas_params.tx_base_stipend() + create_cost + initcode_cost
         );
 
         // Test CALL transaction (is_create = false)
@@ -1857,6 +1812,57 @@ mod tests {
         assert_eq!(call_gas.initial_state_gas_final(), 0);
         // initial_gas should be unchanged for calls
         assert_eq!(call_gas.initial_total_gas(), gas_params.tx_base_stipend());
+    }
+
+    #[test]
+    fn test_initial_tx_gas_eip2780_runtime_split() {
+        let gas_params = GasParams::new_spec(SpecId::AMSTERDAM);
+        let info = || Eip2780TxInfo {
+            value: U256::ZERO,
+            is_self_transfer: false,
+        };
+
+        // Create transaction: the new-account state gas is no longer intrinsic —
+        // it moves to the runtime phase, charged only when the deployment
+        // target does not already exist.
+        let create_gas = gas_params.initial_tx_gas(b"", true, 0, 0, 0, Some(info()));
+        assert_eq!(create_gas.initial_state_gas, 0);
+        assert_eq!(
+            create_gas.initial_regular_gas,
+            eip2780::TX_BASE_COST + eip8038::CREATE_ACCESS
+        );
+
+        // EIP-7702 authorizations: intrinsic per-auth charge is the
+        // state-independent REGULAR_PER_AUTH_BASE_COST (7,816) only; the
+        // ACCOUNT_WRITE and state-gas portions are runtime charges.
+        assert_eq!(
+            gas_params.tx_eip7702_per_empty_account_cost(),
+            eip8038::EIP7702_PER_AUTH_BASE_REGULAR
+        );
+        let auth_gas = gas_params.initial_tx_gas(b"", false, 0, 0, 2, Some(info()));
+        assert_eq!(auth_gas.initial_state_gas, 0);
+        assert_eq!(
+            auth_gas.initial_regular_gas,
+            eip2780::TX_BASE_COST
+                + eip8038::COLD_ACCOUNT_ACCESS
+                + 2 * eip8038::EIP7702_PER_AUTH_BASE_REGULAR
+        );
+
+        // Pre-Amsterdam the per-auth charge is the bundled pessimistic
+        // PER_EMPTY_ACCOUNT_COST (25,000) and the intrinsic state gas is zero.
+        let legacy_params = GasParams::new_spec(SpecId::PRAGUE);
+        assert_eq!(
+            legacy_params.tx_eip7702_per_empty_account_cost(),
+            eip7702::PER_EMPTY_ACCOUNT_COST
+        );
+        let legacy_auth_gas = legacy_params.initial_tx_gas(b"", false, 0, 0, 1, None);
+        assert_eq!(legacy_auth_gas.initial_state_gas, 0);
+        assert_eq!(
+            legacy_auth_gas.initial_regular_gas,
+            legacy_params.tx_base_stipend() + eip7702::PER_EMPTY_ACCOUNT_COST
+        );
+        let legacy_create_gas = legacy_params.initial_tx_gas(b"", true, 0, 0, 0, None);
+        assert_eq!(legacy_create_gas.initial_state_gas, 0);
     }
 
     #[test]

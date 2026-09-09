@@ -3,7 +3,7 @@
 //! Introduces a reservoir model that separates *state gas* (storage/code/account
 //! creation) from *regular* execution gas. State-gas charges are expressed as
 //! a number of "state bytes" that get multiplied by `cost_per_state_byte` (CPSB).
-//! In `bal-devnet-7` / Glamsterdam, CPSB is fixed at `1530`.
+//! In Glamsterdam, CPSB is fixed at `1530`.
 
 /// Blocks per year at a 12-second block time (used by the CPSB formula).
 pub const BLOCKS_PER_YEAR: u64 = 2_628_000;
@@ -28,9 +28,6 @@ pub const AUTH_BASE_BYTES: u64 = 23;
 
 /// State bytes charged per byte of deployed code.
 pub const CODE_DEPOSIT_PER_BYTE: u64 = 1;
-
-/// Regular gas component of EIP-7702 `PER_EMPTY_ACCOUNT_COST` under EIP-8037.
-pub const EIP7702_PER_EMPTY_ACCOUNT_REGULAR: u64 = 7500;
 
 /// Cost per state byte (CPSB) for Glamsterdam.
 ///
