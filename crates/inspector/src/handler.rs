@@ -7,12 +7,11 @@ use handler::{
 };
 use interpreter::{
     instructions::{GasTable, InstructionTable},
-    interpreter_types::{Jumps, LoopControl},
+    interpreter_types::LoopControl,
     FrameInput, GasTracker, Host, InitialAndFloorGas, InstructionResult, Interpreter,
     InterpreterAction, InterpreterTypes,
 };
 use primitives::hints_util::cold_path;
-use state::bytecode::opcode;
 
 /// Trait that extends [`Handler`] with inspection functionality.
 ///
@@ -267,8 +266,8 @@ where
             break;
         }
 
-        let opcode = interpreter.bytecode.opcode();
         instruction_journal_i = Some(context.journal().journal().len());
+        let logs_i = context.journal().logs().len();
         if let Err(e) = interpreter.step(instructions, gas_table, context) {
             cold_path();
             if interpreter.bytecode.action().is_none() {
@@ -276,8 +275,9 @@ where
             }
         }
 
-        if (opcode::LOG0..=opcode::LOG4).contains(&opcode) {
-            inspect_log(interpreter, context, &mut inspector);
+        if context.journal().logs().len() != logs_i {
+            cold_path();
+            inspect_logs(Some(interpreter), context, &mut inspector, logs_i);
         }
 
         inspector.step_end(interpreter, context);
@@ -302,28 +302,39 @@ where
     next_action
 }
 
+/// Forwards the logs journaled since `logs_i` to the inspector.
+///
+/// `interpreter` is `Some` on the instruction path, where the logs belong to
+/// the instruction that just ran and so go to [`Inspector::log_full`]; the
+/// frame-init paths report a value transfer that has no interpreter of its own
+/// and go to [`Inspector::log`].
+///
+/// Cold: callers check `logs_i` against the journal length first, and most
+/// instructions journal no log at all.
 #[inline(never)]
 #[cold]
-fn inspect_log<CTX, IT>(
-    interpreter: &mut Interpreter<IT>,
+pub(crate) fn inspect_logs<CTX, IT>(
+    interpreter: Option<&mut Interpreter<IT>>,
     context: &mut CTX,
     inspector: &mut impl Inspector<CTX, IT>,
+    logs_i: usize,
 ) where
-    CTX: ContextTr<Journal: JournalExt> + Host,
+    CTX: ContextTr<Journal: JournalExt>,
     IT: InterpreterTypes,
 {
-    // `LOG*` instruction reverted.
-    if interpreter
-        .bytecode
-        .action()
-        .as_ref()
-        .is_some_and(|x| x.is_return())
-    {
-        return;
+    let logs = context.journal_mut().logs()[logs_i..].to_vec();
+    match interpreter {
+        Some(interpreter) => {
+            for log in logs {
+                inspector.log_full(interpreter, context, log);
+            }
+        }
+        None => {
+            for log in logs {
+                inspector.log(context, log);
+            }
+        }
     }
-
-    let log = context.journal_mut().logs().last().unwrap().clone();
-    inspector.log_full(interpreter, context, log);
 }
 
 #[inline(never)]
