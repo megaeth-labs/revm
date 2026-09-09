@@ -165,7 +165,7 @@ pub trait Handler {
         &mut self,
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        let mut init_and_floor_gas = self.validate(evm)?;
+        let init_and_floor_gas = self.validate(evm)?;
         // Create the transaction-level gas tracker from the validated
         // intrinsic gas, mirroring how frames create their gas at frame init.
         // All later phases charge and settle against it.
@@ -174,7 +174,7 @@ pub trait Handler {
         // gas phase checkpoint. `None` — from pre-execution or execution —
         // means the runtime gas phase ran out of gas: the transaction is
         // included as an out-of-gas halt without entering execution.
-        let pre_execution = self.pre_execution(evm, &mut init_and_floor_gas, &mut gas)?;
+        let pre_execution = self.pre_execution(evm, &mut gas)?;
 
         let refund = pre_execution.map(|pe| pe.eip7702_refund).unwrap_or(0) as i64;
 
@@ -195,13 +195,14 @@ pub trait Handler {
 
     /// Validates the execution environment and transaction parameters.
     ///
-    /// Calculates initial and floor gas requirements and verifies they are covered by the gas limit.
-    ///
-    /// Validation against state is done later in pre-execution phase in deduct_caller function.
+    /// Calculates initial and floor gas requirements, verifies they are covered by the gas limit,
+    /// validates the transaction against state, and deducts the caller.
     #[inline]
     fn validate(&self, evm: &mut Self::Evm) -> Result<InitialAndFloorGas, Self::Error> {
         self.validate_env(evm)?;
-        self.validate_initial_tx_gas(evm)
+        let mut init_and_floor_gas = self.validate_initial_tx_gas(evm)?;
+        self.validate_against_state_and_deduct_caller(evm, &mut init_and_floor_gas)?;
+        Ok(init_and_floor_gas)
     }
 
     /// Creates the transaction-level [`GasTracker`] from the validated initial gas.
@@ -223,8 +224,6 @@ pub trait Handler {
     ///
     /// Loads the beneficiary account (EIP-3651: Warm COINBASE) and all accounts/storage from the access list (EIP-2929).
     ///
-    /// Deducts the maximum possible fee from the caller's balance.
-    ///
     /// For EIP-7702 transactions, applies the authorization list and delegates successful authorizations.
     /// Authorizations are applied before execution begins.
     ///
@@ -238,17 +237,14 @@ pub trait Handler {
     fn pre_execution(
         &self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &mut InitialAndFloorGas,
         gas: &mut GasTracker,
     ) -> Result<Option<PreExecutionOutput>, Self::Error> {
-        self.validate_against_state_and_deduct_caller(evm, init_and_floor_gas)?;
         self.load_accounts(evm)?;
 
         // EIP-2780: the checkpoint spans the whole runtime gas phase.
         let checkpoint = evm.ctx().journal_mut().checkpoint();
 
-        let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, init_and_floor_gas, gas)?
-        else {
+        let Some(eip7702_refund) = self.apply_eip7702_auth_list(evm, gas)? else {
             // Out-of-gas while processing the authorizations: revert the
             // applied delegations; the transaction is included as an
             // out-of-gas halt. (An EIP-7702 transaction is always a call, so
@@ -436,10 +432,9 @@ pub trait Handler {
     fn apply_eip7702_auth_list(
         &self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &mut InitialAndFloorGas,
         gas: &mut GasTracker,
     ) -> Result<Option<u64>, Self::Error> {
-        apply_eip7702_auth_list(evm.ctx_mut(), init_and_floor_gas, gas)
+        apply_eip7702_auth_list(evm.ctx_mut(), gas)
     }
 
     /// Deducts the maximum possible fee from caller's balance.
