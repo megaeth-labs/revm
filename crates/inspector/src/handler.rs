@@ -1,13 +1,15 @@
 use crate::{Inspector, InspectorEvmTr, JournalExt};
-use context::{result::ExecutionResult, Cfg, ContextTr, JournalEntry, JournalTr, Transaction};
+use context::journaled_state::JournalCheckpoint;
+use context::{result::ExecutionResult, ContextTr, JournalEntry, JournalTr};
 use handler::{
-    evm::FrameTr, post_execution::build_result_gas, EvmTr, FrameResult, Handler, ItemOrResult,
+    evm::FrameTr, execution::runtime_oog_unwind, post_execution::build_result_gas, EvmTr,
+    FrameResult, Handler, ItemOrResult,
 };
 use interpreter::{
     instructions::{GasTable, InstructionTable},
     interpreter_types::{Jumps, LoopControl},
-    FrameInput, Host, InitialAndFloorGas, InstructionResult, Interpreter, InterpreterAction,
-    InterpreterTypes,
+    FrameInput, GasTracker, Host, InitialAndFloorGas, InstructionResult, Interpreter,
+    InterpreterAction, InterpreterTypes,
 };
 use primitives::hints_util::cold_path;
 use state::bytecode::opcode;
@@ -59,17 +61,26 @@ where
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         let mut init_and_floor_gas = self.validate(evm)?;
-        // pre_execution now applies the EIP-7702 state gas refund split to init_and_floor_gas
-        // and returns the regular refund portion
-        let eip7702_regular_refund = self.pre_execution(evm, &mut init_and_floor_gas)? as i64;
+        // Create the transaction-level gas tracker from the validated
+        // intrinsic gas (mirrors `Handler::run_without_catch_error`).
+        let mut gas = self.tx_gas(evm, &init_and_floor_gas);
+        // Pre-execution returns the EIP-7702 refund and the EIP-2780 runtime
+        // gas phase checkpoint. `None` — from pre-execution or execution —
+        // means the runtime gas phase ran out of gas: the transaction is
+        // included as an out-of-gas halt without entering execution.
+        let pre_execution = self.pre_execution(evm, &mut init_and_floor_gas, &mut gas)?;
 
-        let mut frame_result = self.inspect_execution(evm, &init_and_floor_gas)?;
-        let result_gas = self.post_execution(
-            evm,
-            &mut frame_result,
-            init_and_floor_gas,
-            eip7702_regular_refund,
-        )?;
+        let mut refund = 0;
+        let mut exec_result = None;
+        if let Some(pre_execution) = pre_execution {
+            refund = pre_execution.eip7702_refund as i64;
+            exec_result = self.inspect_execution(evm, pre_execution.checkpoint, &mut gas)?;
+        }
+        let mut frame_result = match exec_result {
+            Some(exec_result) => exec_result,
+            None => self.runtime_oog_result(evm, &init_and_floor_gas, &mut gas)?,
+        };
+        let result_gas = self.post_execution(evm, &mut frame_result, init_and_floor_gas, refund)?;
         self.execution_result(evm, frame_result, result_gas)
     }
 
@@ -79,21 +90,24 @@ where
     fn inspect_execution(
         &mut self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
-        // Compute the regular gas budget and EIP-8037 reservoir for the first frame.
-        let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
-            evm.ctx().tx().gas_limit(),
-            evm.ctx().cfg().tx_gas_limit_cap(),
-        );
-        let first_frame_input = self.first_frame_input(evm, gas_limit, reservoir)?;
+        checkpoint: JournalCheckpoint,
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameResult>, Self::Error> {
+        // Create the first frame action from the transaction-level gas
+        // (mirrors `Handler::execution`).
+        let Some(first_frame_input) = self.first_frame_input(evm, gas)? else {
+            runtime_oog_unwind(evm.ctx(), checkpoint)?;
+            return Ok(None);
+        };
+        // The runtime gas phase is complete: commit its state changes.
+        evm.ctx().journal_mut().checkpoint_commit();
 
         // Run execution loop
         let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
 
         // Handle last frame result
-        self.last_frame_result(evm, &mut frame_result)?;
-        Ok(frame_result)
+        self.last_frame_result(evm, &mut frame_result, gas)?;
+        Ok(Some(frame_result))
     }
 
     /* FRAMES */
@@ -150,10 +164,21 @@ where
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         // dummy values that are not used.
         let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
+        let mut gas = self.tx_gas(evm, &init_and_floor_gas);
+        // System calls skip pre-execution, so the checkpoint that
+        // `inspect_execution` settles is opened here.
+        let checkpoint = evm.ctx().journal_mut().checkpoint();
         // call execution with inspection and then output.
         match self
-            .inspect_execution(evm, &init_and_floor_gas)
+            .inspect_execution(evm, checkpoint, &mut gas)
             .and_then(|exec_result| {
+                let exec_result = match exec_result {
+                    Some(exec_result) => exec_result,
+                    // Unreachable in practice: system calls carry no value and
+                    // target non-delegated system contracts, so no runtime
+                    // charges apply.
+                    None => self.runtime_oog_result(evm, &init_and_floor_gas, &mut gas)?,
+                };
                 // System calls have no intrinsic gas; build ResultGas from frame result.
                 let gas = exec_result.gas();
                 let result_gas = build_result_gas(false, gas, init_and_floor_gas);

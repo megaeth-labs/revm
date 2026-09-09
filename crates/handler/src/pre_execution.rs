@@ -5,14 +5,14 @@
 use crate::{EvmTr, PrecompileProvider};
 use bytecode::Bytecode;
 use context_interface::{
-    journaled_state::{account::JournaledAccountTr, JournalTr},
+    journaled_state::{account::JournaledAccountTr, JournalCheckpoint, JournalTr},
     result::InvalidTransaction,
     transaction::{AccessListItemTr, AuthorizationTr, Transaction, TransactionType},
     Block, Cfg, ContextTr, Database,
 };
 use core::cmp::Ordering;
-use interpreter::InitialAndFloorGas;
-use primitives::{hardfork::SpecId, AddressMap, HashSet, StorageKey, U256};
+use interpreter::{GasTracker, InitialAndFloorGas};
+use primitives::{hardfork::SpecId, Address, AddressMap, HashSet, StorageKey, TxKind, U256};
 use state::AccountInfo;
 
 /// Loads and warms accounts for execution, including precompiles and access list.
@@ -187,101 +187,181 @@ pub fn validate_against_state_and_deduct_caller<
     Ok(())
 }
 
+/// Gas decisions made by the pre-execution phase, carried to the execution
+/// phase.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreExecutionOutput {
+    /// EIP-7702 regular gas refund for authorities that already existed.
+    pub eip7702_refund: u64,
+    /// Journal checkpoint opened by [`crate::Handler::pre_execution`] before
+    /// the authorization list is applied, spanning the EIP-2780 runtime gas
+    /// phase.
+    ///
+    /// It is left open because the runtime gas phase continues at first-frame
+    /// creation (`create_init_frame` charges the recipient and create-target
+    /// costs): [`crate::Handler::execution`] commits it once the first frame
+    /// is created, or reverts it — dropping the applied delegations — when
+    /// the frame-creation charges run out of gas. Pre-Amsterdam there are no
+    /// runtime charges, so the checkpoint is always committed.
+    pub checkpoint: JournalCheckpoint,
+}
+
 /// Apply EIP-7702 auth list and return number gas refund on already created accounts.
 ///
 /// Note that this function will do nothing if the transaction type is not EIP-7702.
 /// If you need to apply auth list for other transaction types, use [`apply_auth_list`] function.
 ///
 /// Internally uses [`apply_auth_list`] function.
+///
+/// Under EIP-2780 the authorization charges are instead metered on the
+/// transaction-level `gas` as the authorizations are applied
+/// ([`apply_auth_list_eip2780`]) and no refund is returned (the pessimistic
+/// intrinsic charge and its refund are replaced by conditional runtime
+/// charges). Charging as the authorizations are applied makes the phase stop
+/// at the first unaffordable charge: later authorities must not be loaded
+/// (observable through the EIP-7928 block access list).
+///
+/// Returns the EIP-7702 gas refund, or `None` when the authorization charges
+/// ran out of gas: the caller owns the runtime gas phase checkpoint and must
+/// revert it, dropping the applied delegations; the transaction stays valid
+/// but must be included as an out-of-gas halt without entering execution.
+///
+/// `init_and_floor_gas` is unused by this implementation — the EIP-2780
+/// charges are recorded on the transaction-level `gas` — and is kept in the
+/// signature so chain variants that meter the authorizations against the
+/// intrinsic/floor gas can reuse this entry point.
 #[inline]
 pub fn apply_eip7702_auth_list<
     CTX: ContextTr,
     ERROR: From<InvalidTransaction> + From<<CTX::Db as Database>::Error>,
 >(
     context: &mut CTX,
-    init_and_floor_gas: &mut InitialAndFloorGas,
-) -> Result<u64, ERROR> {
+    _init_and_floor_gas: &mut InitialAndFloorGas,
+    gas: &mut GasTracker,
+) -> Result<Option<u64>, ERROR> {
+    // EIP-2780: state-dependent charges (authority creation, delegation bytes,
+    // delegation-target access, recipient new-account state gas) are charged at
+    // the runtime phase instead of pessimistically at the intrinsic phase.
+    if context.cfg().is_amsterdam_eip2780_enabled() {
+        if context.tx().tx_type() != TransactionType::Eip7702 {
+            return Ok(Some(0));
+        }
+        let chain_id = context.cfg().chain_id();
+        let is_eip8037 = context.cfg().is_amsterdam_eip8037_enabled();
+        let params = context.cfg().gas_params();
+        let account_write_cost = params.tx_account_write_cost();
+        let new_account_state_gas = if is_eip8037 {
+            params.new_account_state_gas()
+        } else {
+            0
+        };
+        let delegation_bytes_state_gas = if is_eip8037 {
+            params.tx_eip7702_state_gas_bytecode()
+        } else {
+            0
+        };
+        let (tx, journal) = context.tx_journal_mut();
+
+        // Accounts this transaction has already written (their `ACCOUNT_WRITE`
+        // is already paid): the sender's leaf is written at inclusion (priced
+        // into `TX_BASE`), and the recipient's when value is transferred
+        // (priced into `TX_VALUE_COST`).
+        let mut written_accounts: HashSet<Address> = HashSet::default();
+        written_accounts.insert(tx.caller());
+        if let TxKind::Call(target) = tx.kind() {
+            if !tx.value().is_zero() {
+                written_accounts.insert(target);
+            }
+        }
+        let oog = apply_auth_list_eip2780::<_, ERROR>(
+            chain_id,
+            tx.authorization_list(),
+            journal,
+            account_write_cost,
+            new_account_state_gas,
+            delegation_bytes_state_gas,
+            &mut written_accounts,
+            gas,
+        )?;
+        return Ok(if oog { None } else { Some(0) });
+    }
+
     let chain_id = context.cfg().chain_id();
-    let is_eip8037 = context.cfg().is_amsterdam_eip8037_enabled();
     let (tx, journal) = context.tx_journal_mut();
 
     // Return if not EIP-7702 transaction.
     if tx.tx_type() != TransactionType::Eip7702 {
-        return Ok(0);
+        return Ok(Some(0));
     }
-    let (number_of_refunded_accounts, number_of_refunded_bytecodes) =
-        apply_auth_list::<_, ERROR>(chain_id, tx.authorization_list(), journal, is_eip8037)?;
+    let number_of_refunded_accounts =
+        apply_auth_list::<_, ERROR>(chain_id, tx.authorization_list(), journal)?;
 
     let params = context.cfg().gas_params();
-
-    // EIP-8037: Split per-auth refund into state and regular components. The
-    // state portion is credited back to the reservoir by reducing
-    // `initial_state_gas` (which is what `initial_gas_and_reservoir` deducts
-    // from the reservoir). The regular portion is returned and routed through
-    // the standard refund counter, subject to the 1/5 cap.
-    if is_eip8037 {
-        init_and_floor_gas.state_refund += params
-            .tx_eip7702_state_refund(number_of_refunded_accounts, number_of_refunded_bytecodes);
-    }
 
     let regular_gas_refund = params
         .tx_eip7702_auth_refund_regular()
         .saturating_mul(number_of_refunded_accounts);
 
-    Ok(regular_gas_refund)
+    Ok(Some(regular_gas_refund))
 }
 
-/// Apply EIP-7702 style auth list and return number gas refund on already created accounts.
+/// Applies an EIP-7702 auth list under EIP-2780, recording the
+/// state-dependent runtime charges on the transaction-level `gas` instead of
+/// the pessimistic intrinsic-charge/refund bookkeeping of [`apply_auth_list`].
 ///
-/// It is more granular function from [`apply_eip7702_auth_list`] function as it takes only the list, journal and chain id.
+/// Rejected authorizations charge nothing here: the intrinsic
+/// `REGULAR_PER_AUTH_BASE_COST` already covers the work every authorization
+/// performs (calldata, recovery, authority access), so there is nothing to
+/// refund either.
 ///
-/// The `refund_per_auth` parameter specifies the gas refund per existing account authorization.
-/// By default this is `PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST` (25000 - 12500 = 12500),
-/// but can be configured via [`GasParams::tx_eip7702_auth_refund`](context_interface::cfg::gas_params::GasParams::tx_eip7702_auth_refund).
+/// `written_accounts` holds the accounts whose leaf write is already paid for
+/// (the sender, and the recipient of a value-bearing transaction); applying an
+/// authorization to any other authority pays `ACCOUNT_WRITE` on the first
+/// write to that authority within the transaction.
 ///
-/// Return number of refunded account and number of refunded bytecodes (Delegation length is already fixed).
+/// The charges are recorded on `gas` as the authorizations are applied, so
+/// the phase stops at the first unaffordable charge without loading the
+/// remaining authorities (observable through the EIP-7928 block access list).
+///
+/// Returns whether the authorization processing ran out of gas.
 #[inline]
-pub fn apply_auth_list<
+#[allow(clippy::too_many_arguments)]
+pub fn apply_auth_list_eip2780<
     JOURNAL: JournalTr,
     ERROR: From<InvalidTransaction> + From<<JOURNAL::Database as Database>::Error>,
 >(
     chain_id: u64,
     auth_list: impl Iterator<Item = impl AuthorizationTr>,
     journal: &mut JOURNAL,
-    is_eip8037: bool,
-) -> Result<(u64, u64), ERROR> {
-    let mut refunded_accounts = 0;
-    let mut refunded_bytecodes = 0;
-    // EIP-8037: a rejected authorization had its full pessimistic intrinsic cost
-    // charged (regular ACCOUNT_WRITE plus per-account NEW_ACCOUNT and per-bytecode
-    // AUTH_BASE state gas), none of which is needed, so all of it is refunded.
-    // Counting both refund slots credits the regular ACCOUNT_WRITE and both
-    // state-gas portions. Before EIP-8037 rejected authorizations refund nothing.
-    macro_rules! reject {
-        () => {{
-            if is_eip8037 {
-                refunded_accounts += 1;
-                refunded_bytecodes += 1;
-            }
-            continue;
-        }};
-    }
+    account_write_cost: u64,
+    new_account_state_gas: u64,
+    delegation_bytes_state_gas: u64,
+    written_accounts: &mut HashSet<Address>,
+    gas: &mut GasTracker,
+) -> Result<bool, ERROR> {
+    // EIP-8037 per-authority rules: each charge is applied at most once per
+    // authority. The new-account charges self-limit (after the first
+    // application the authority exists), the delegation-bytes charge is
+    // tracked explicitly to cover a set-clear-set sequence within one
+    // transaction.
+    let mut charged_delegation_bytes: HashSet<Address> = HashSet::default();
+
     for authorization in auth_list {
         // 1. Verify the chain id is either 0 or the chain's current ID.
         let auth_chain_id = authorization.chain_id();
         if !auth_chain_id.is_zero() && auth_chain_id != U256::from(chain_id) {
-            reject!();
+            continue;
         }
 
         // 2. Verify the `nonce` is less than `2**64 - 1`.
         if authorization.nonce() == u64::MAX {
-            reject!();
+            continue;
         }
 
         // recover authority and authorized addresses.
         // 3. `authority = ecrecover(keccak(MAGIC || rlp([chain_id, address, nonce])), y_parity, r, s]`
         let Some(authority) = authorization.authority() else {
-            reject!();
+            continue;
         };
 
         // warm authority account and check nonce.
@@ -293,13 +373,13 @@ pub fn apply_auth_list<
         if let Some(bytecode) = &authority_acc_info.code {
             // if it is not empty and it is not eip7702
             if !bytecode.is_empty() && !bytecode.is_eip7702() {
-                reject!();
+                continue;
             }
         }
 
         // 6. Verify the nonce of `authority` is equal to `nonce`. In case `authority` does not exist in the trie, verify that `nonce` is equal to `0`.
         if authorization.nonce() != authority_acc_info.nonce {
-            reject!();
+            continue;
         }
 
         // Refund-relevant facts for this accepted authorization (mirrors
@@ -330,22 +410,33 @@ pub fn apply_auth_list<
             .is_code_hash_empty_or_zero();
         let clearing = authorization.address().is_zero();
 
-        // Existing authority: the worst-case `ACCOUNT_WRITE` regular gas and the
-        // per-account `NEW_ACCOUNT` state gas were not needed.
-        if existed {
-            refunded_accounts += 1;
+        // Non-existent authority: pay for the new account leaf's state bytes.
+        if !existed && !gas.record_state_cost(new_account_state_gas) {
+            return Ok(true);
         }
 
-        // Bytecode (`AUTH_BASE`) state-gas refunds.
-        if clearing {
-            refunded_bytecodes += 1;
-            // Clearing a delegation freshly installed earlier in this transaction
-            // refills the bytecode state gas a second time.
-            if delegated_now && !delegated_before_tx {
-                refunded_bytecodes += 1;
+        // First write to the authority's leaf within the transaction pays
+        // `ACCOUNT_WRITE`, unless that write is already paid for (the sender at
+        // inclusion, the recipient of a value-bearing transaction, or a
+        // preceding valid authorization on the same authority).
+        if !written_accounts.contains(&authority) {
+            if !gas.record_regular_cost(account_write_cost) {
+                return Ok(true);
             }
-        } else if delegated_now || delegated_before_tx {
-            refunded_bytecodes += 1;
+            written_accounts.insert(authority);
+        }
+
+        // Net-new delegation bytes: the 23-byte delegation indicator written
+        // into a previously empty slot.
+        if !clearing
+            && !delegated_now
+            && !delegated_before_tx
+            && !charged_delegation_bytes.contains(&authority)
+        {
+            if !gas.record_state_cost(delegation_bytes_state_gas) {
+                return Ok(true);
+            }
+            charged_delegation_bytes.insert(authority);
         }
 
         // 8. Set the code of `authority` to be `0xef0100 || address`. This is a delegation designation.
@@ -355,7 +446,81 @@ pub fn apply_auth_list<
         authority_acc.delegate(authorization.address());
     }
 
-    Ok((refunded_accounts, refunded_bytecodes))
+    Ok(false)
+}
+
+/// Apply EIP-7702 style auth list and return number gas refund on already created accounts.
+///
+/// It is more granular function from [`apply_eip7702_auth_list`] function as it takes only the list, journal and chain id.
+///
+/// The refund per existing account authorization is
+/// `PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST` (25000 - 12500 = 12500), see
+/// [`GasParams::tx_eip7702_auth_refund_regular`](context_interface::cfg::gas_params::GasParams::tx_eip7702_auth_refund_regular).
+///
+/// Returns the number of refunded (already existing) accounts.
+#[inline]
+pub fn apply_auth_list<
+    JOURNAL: JournalTr,
+    ERROR: From<InvalidTransaction> + From<<JOURNAL::Database as Database>::Error>,
+>(
+    chain_id: u64,
+    auth_list: impl Iterator<Item = impl AuthorizationTr>,
+    journal: &mut JOURNAL,
+) -> Result<u64, ERROR> {
+    let mut refunded_accounts = 0;
+    for authorization in auth_list {
+        // 1. Verify the chain id is either 0 or the chain's current ID.
+        let auth_chain_id = authorization.chain_id();
+        if !auth_chain_id.is_zero() && auth_chain_id != U256::from(chain_id) {
+            continue;
+        }
+
+        // 2. Verify the `nonce` is less than `2**64 - 1`.
+        if authorization.nonce() == u64::MAX {
+            continue;
+        }
+
+        // recover authority and authorized addresses.
+        // 3. `authority = ecrecover(keccak(MAGIC || rlp([chain_id, address, nonce])), y_parity, r, s]`
+        let Some(authority) = authorization.authority() else {
+            continue;
+        };
+
+        // warm authority account and check nonce.
+        // 4. Add `authority` to `accessed_addresses` (as defined in [EIP-2929](./eip-2929.md).)
+        let mut authority_acc = journal.load_account_with_code_mut(authority)?;
+        let authority_acc_info = &authority_acc.account().info;
+
+        // 5. Verify the code of `authority` is either empty or already delegated.
+        if let Some(bytecode) = &authority_acc_info.code {
+            // if it is not empty and it is not eip7702
+            if !bytecode.is_empty() && !bytecode.is_eip7702() {
+                continue;
+            }
+        }
+
+        // 6. Verify the nonce of `authority` is equal to `nonce`. In case `authority` does not exist in the trie, verify that `nonce` is equal to `0`.
+        if authorization.nonce() != authority_acc_info.nonce {
+            continue;
+        }
+
+        // 7. Add `PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST` gas to the global refund counter if `authority` exists in the trie.
+        let existed = !(authority_acc_info.is_empty()
+            && authority_acc
+                .account()
+                .is_loaded_as_not_existing_not_touched());
+        if existed {
+            refunded_accounts += 1;
+        }
+
+        // 8. Set the code of `authority` to be `0xef0100 || address`. This is a delegation designation.
+        //  * As a special case, if `address` is `0x0000000000000000000000000000000000000000` do not write the designation.
+        //    Clear the accounts code and reset the account's code hash to the empty hash `0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470`.
+        // 9. Increase the nonce of `authority` by one.
+        authority_acc.delegate(authorization.address());
+    }
+
+    Ok(refunded_accounts)
 }
 
 #[cfg(test)]
