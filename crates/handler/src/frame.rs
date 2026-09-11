@@ -619,9 +619,9 @@ impl EthFrame<EthInterpreter> {
 /// - the reservoir, a shared state-gas pool the child inherited at call time, is
 ///   always adopted from the child (restored to the inherited value on
 ///   revert/halt).
-/// - net state gas, its spilled portion, and the refund counter persist only on
-///   success; on revert/halt the child's state changes roll back and contribute
-///   nothing.
+/// - net state gas, net history gas, the spilled portion, and the refund counter
+///   persist only on success; on revert/halt the child's state changes roll back
+///   and contribute nothing.
 #[inline]
 pub const fn handle_reservoir_remaining_gas(
     instruction_result: InstructionResult,
@@ -657,6 +657,10 @@ pub const fn handle_reservoir_remaining_gas(
                 .saturating_add(child_gas.state_gas_spent()),
         );
         parent_gas.add_state_gas_spilled(child_gas.state_gas_spilled());
+        // History gas rides the same success-only merge: a failing child rolled it back
+        // along with its state gas, so it contributes nothing. Zero on any chain that
+        // never charges history gas.
+        parent_gas.add_history_gas_spent(child_gas.history_gas_spent());
         parent_gas.record_refund(child_gas.refunded());
     }
 }

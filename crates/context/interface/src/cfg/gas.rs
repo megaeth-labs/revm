@@ -31,6 +31,19 @@ pub struct GasTracker {
     /// first-out order by [`Self::rollback_state_gas`]; on success it is
     /// propagated to the parent frame so a later parent rollback can return it.
     state_gas_spilled: u64,
+    /// Net history gas spent so far.
+    ///
+    /// History gas pays for the bytes a transaction appends to the chain's history — log
+    /// records, deployed code, the transaction body — as opposed to the bytes it adds to the
+    /// world state. It draws on the same reservoir-first budget as state gas and unwinds on
+    /// the same paths, but is counted apart so the two dimensions can be reported and limited
+    /// separately.
+    ///
+    /// Stays zero unless [`record_history_cost`](Self::record_history_cost) is called. Nothing
+    /// in this workspace calls it, so a chain that does not price history bytes behaves exactly
+    /// as it did before this field existed.
+    #[cfg_attr(feature = "serde", serde(default))]
+    history_gas_spent: u64,
     /// Refunded gas. Used to refund the gas to the caller at the end of execution.
     refunded: i64,
 }
@@ -45,6 +58,7 @@ impl GasTracker {
             reservoir,
             state_gas_spent: 0,
             state_gas_spilled: 0,
+            history_gas_spent: 0,
             refunded: 0,
         }
     }
@@ -126,6 +140,26 @@ impl GasTracker {
         self.state_gas_spilled = self.state_gas_spilled.saturating_add(delta);
     }
 
+    /// Returns the history gas spent. See [`history_gas_spent`](Self::history_gas_spent).
+    #[inline]
+    pub const fn history_gas_spent(&self) -> u64 {
+        self.history_gas_spent
+    }
+
+    /// Sets the history gas spent.
+    #[inline]
+    pub const fn set_history_gas_spent(&mut self, val: u64) {
+        self.history_gas_spent = val;
+    }
+
+    /// Adds `delta` to the history gas spent, saturating.
+    ///
+    /// Used to merge a successful child frame's history gas into this (parent) frame.
+    #[inline]
+    pub const fn add_history_gas_spent(&mut self, delta: u64) {
+        self.history_gas_spent = self.history_gas_spent.saturating_add(delta);
+    }
+
     /// Returns the refunded gas.
     #[inline]
     pub const fn refunded(&self) -> i64 {
@@ -178,15 +212,50 @@ impl GasTracker {
         success
     }
 
-    /// Rolls back this frame's state-gas charges on revert or exceptional halt
-    /// (EIP-8037).
+    /// Records a history gas cost, drawn from the same budget as a state-gas charge.
     ///
-    /// The state gas charged within the frame is refilled in last-in-first-out
-    /// order: the spilled portion is credited back to `remaining` (the pool
-    /// charged last) and the rest restores the reservoir to its frame-start
-    /// value. Concretely, `remaining` gains `state_gas_spilled` and the reservoir
-    /// becomes `reservoir + state_gas_spent - state_gas_spilled`, which is exactly
-    /// the reservoir the frame inherited. Both state-gas counters are then reset.
+    /// The charge deducts from the reservoir first and spills into `remaining` once the
+    /// reservoir is exhausted, exactly as [`record_state_cost`](Self::record_state_cost) does,
+    /// and the spilled portion joins `state_gas_spilled` so a rollback credits it back to
+    /// `remaining` in the same last-in-first-out order. What differs is the counter: the amount
+    /// lands in `history_gas_spent`, which is what keeps the history dimension separable from
+    /// the state dimension downstream.
+    ///
+    /// Returns `false` if the total remaining budget is insufficient, leaving the tracker
+    /// untouched.
+    #[inline]
+    #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
+    pub const fn record_history_cost(&mut self, cost: u64) -> bool {
+        if self.reservoir >= cost {
+            self.history_gas_spent = self.history_gas_spent.saturating_add(cost);
+            self.reservoir -= cost;
+            return true;
+        }
+
+        let spill = cost - self.reservoir;
+
+        let success = self.record_regular_cost(spill);
+        if success {
+            self.history_gas_spent = self.history_gas_spent.saturating_add(cost);
+            self.state_gas_spilled = self.state_gas_spilled.saturating_add(spill);
+            self.reservoir = 0;
+        }
+        success
+    }
+
+    /// Rolls back this frame's state-gas and history-gas charges on revert or
+    /// exceptional halt (EIP-8037).
+    ///
+    /// Everything the frame charged against the reservoir-first budget is refilled in
+    /// last-in-first-out order: the spilled portion is credited back to `remaining` (the pool
+    /// charged last) and the rest restores the reservoir to its frame-start value. Concretely,
+    /// `remaining` gains `state_gas_spilled` and the reservoir becomes
+    /// `reservoir + state_gas_spent + history_gas_spent - state_gas_spilled`, which is exactly
+    /// the reservoir the frame inherited. All three counters are then reset.
+    ///
+    /// History gas is part of the same unwind because it comes out of the same two pools and
+    /// pays for bytes the failing frame no longer appends. The term is zero on any chain that
+    /// never calls [`record_history_cost`](Self::record_history_cost).
     ///
     /// On revert the resulting `remaining` (including the refilled spill) is
     /// returned to the parent; on halt the caller additionally zeroes `remaining`
@@ -196,10 +265,12 @@ impl GasTracker {
         self.reservoir = self
             .reservoir
             .saturating_add_signed(self.state_gas_spent)
+            .saturating_add(self.history_gas_spent)
             .saturating_sub(self.state_gas_spilled);
         self.remaining = self.remaining.saturating_add(self.state_gas_spilled);
         self.state_gas_spent = 0;
         self.state_gas_spilled = 0;
+        self.history_gas_spent = 0;
     }
 
     /// Refills the reservoir with state gas that is returned by 0→x→0 storage
@@ -254,6 +325,105 @@ impl GasTracker {
 #[cfg(test)]
 mod tests {
     use super::GasTracker;
+
+    /// A history charge spends the reservoir before it spends regular gas, and books the
+    /// amount on its own counter. Were it booked on `state_gas_spent`, the two dimensions
+    /// would be indistinguishable in every downstream report.
+    #[test]
+    fn test_record_history_cost_draws_the_reservoir_first() {
+        let mut tracker = GasTracker::new(1_000, 400, 300);
+
+        assert!(tracker.record_history_cost(200));
+
+        assert_eq!(tracker.reservoir(), 100);
+        assert_eq!(tracker.remaining(), 400);
+        assert_eq!(tracker.history_gas_spent(), 200);
+        assert_eq!(tracker.state_gas_spent(), 0);
+        assert_eq!(tracker.state_gas_spilled(), 0);
+    }
+
+    /// Once the reservoir is empty the rest of the charge spills onto regular gas, and the
+    /// spill is recorded so a rollback knows which pool to credit back first.
+    #[test]
+    fn test_record_history_cost_spills_onto_regular_gas() {
+        let mut tracker = GasTracker::new(1_000, 400, 300);
+
+        assert!(tracker.record_history_cost(500));
+
+        assert_eq!(tracker.reservoir(), 0);
+        assert_eq!(tracker.remaining(), 200);
+        assert_eq!(tracker.history_gas_spent(), 500);
+        assert_eq!(tracker.state_gas_spilled(), 200);
+    }
+
+    /// A charge larger than both pools together leaves the tracker untouched, so the caller
+    /// can halt without having half-spent the budget.
+    #[test]
+    fn test_record_history_cost_rejects_what_it_cannot_pay() {
+        let mut tracker = GasTracker::new(1_000, 400, 300);
+
+        assert!(!tracker.record_history_cost(701));
+
+        assert_eq!(tracker.reservoir(), 300);
+        assert_eq!(tracker.remaining(), 400);
+        assert_eq!(tracker.history_gas_spent(), 0);
+    }
+
+    /// Rolling back a frame restores the reservoir and regular gas a history charge took,
+    /// exactly as it does for a state charge, and both counters come back to zero.
+    #[test]
+    fn test_rollback_returns_history_gas_to_both_pools() {
+        let mut tracker = GasTracker::new(1_000, 400, 300);
+        assert!(tracker.record_history_cost(500));
+
+        tracker.rollback_state_gas();
+
+        assert_eq!(
+            tracker.reservoir(),
+            300,
+            "the frame-start reservoir is restored"
+        );
+        assert_eq!(
+            tracker.remaining(),
+            400,
+            "the spilled portion goes back to regular gas"
+        );
+        assert_eq!(tracker.history_gas_spent(), 0);
+        assert_eq!(tracker.state_gas_spilled(), 0);
+    }
+
+    /// State and history charges share one budget and one spill counter, so a rollback that
+    /// saw both must still land on the reservoir the frame inherited.
+    #[test]
+    fn test_rollback_returns_mixed_state_and_history_charges() {
+        let mut tracker = GasTracker::new(1_000, 400, 300);
+        assert!(tracker.record_state_cost(200));
+        assert!(tracker.record_history_cost(300));
+
+        assert_eq!(tracker.reservoir(), 0);
+        assert_eq!(tracker.remaining(), 200);
+
+        tracker.rollback_state_gas();
+
+        assert_eq!(tracker.reservoir(), 300);
+        assert_eq!(tracker.remaining(), 400);
+        assert_eq!(tracker.state_gas_spent(), 0);
+        assert_eq!(tracker.history_gas_spent(), 0);
+    }
+
+    /// A 0→x→0 refill offsets state gas only. It may consume spill a history charge
+    /// contributed — the pools are fungible — but it must never move the history counter.
+    #[test]
+    fn test_refill_reservoir_leaves_the_history_counter_alone() {
+        let mut tracker = GasTracker::new(1_000, 400, 300);
+        assert!(tracker.record_history_cost(300));
+        assert!(tracker.record_state_cost(250));
+
+        tracker.refill_reservoir(250);
+
+        assert_eq!(tracker.state_gas_spent(), 0);
+        assert_eq!(tracker.history_gas_spent(), 300);
+    }
 
     #[test]
     fn new_used_gas_saturates_remaining_at_zero() {
