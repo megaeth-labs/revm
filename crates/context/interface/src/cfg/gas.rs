@@ -43,7 +43,11 @@ pub struct GasTracker {
     /// caller in this workspace is the code-deposit charge in `return_create`, which charges
     /// nothing unless the schedule gives `code_deposit_history_gas` a price, so a chain that does
     /// not price history bytes behaves exactly as it did before this field existed.
-    #[cfg_attr(feature = "serde", serde(default))]
+    ///
+    /// Kept out of the serialized form so that the encoding of this struct is unchanged; the
+    /// counter is read in process, off the tracker the handler settles, and nothing reads it
+    /// across a serialization boundary.
+    #[cfg_attr(feature = "serde", serde(skip))]
     history_gas_spent: u64,
     /// Refunded gas. Used to refund the gas to the caller at the end of execution.
     refunded: i64,
