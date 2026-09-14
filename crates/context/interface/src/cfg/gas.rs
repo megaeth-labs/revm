@@ -39,9 +39,10 @@ pub struct GasTracker {
     /// the same paths, but is counted apart so the two dimensions can be reported and limited
     /// separately.
     ///
-    /// Stays zero unless [`record_history_cost`](Self::record_history_cost) is called. Nothing
-    /// in this workspace calls it, so a chain that does not price history bytes behaves exactly
-    /// as it did before this field existed.
+    /// Stays zero unless [`record_history_cost`](Self::record_history_cost) is called. The only
+    /// caller in this workspace is the code-deposit charge in `return_create`, which charges
+    /// nothing unless the schedule gives `code_deposit_history_gas` a price, so a chain that does
+    /// not price history bytes behaves exactly as it did before this field existed.
     #[cfg_attr(feature = "serde", serde(default))]
     history_gas_spent: u64,
     /// Refunded gas. Used to refund the gas to the caller at the end of execution.

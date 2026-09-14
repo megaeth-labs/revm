@@ -755,6 +755,9 @@ pub fn return_create<CTX: ContextTr>(
         // borrow above.
         let code_len = interpreter_result.output.len();
         let charges_state_gas = gas_params.code_deposit_state_gas(code_len) > 0;
+        // Read before the state-gas charge borrows the context: the value is a flat per-byte
+        // price, so it needs nothing but the schedule.
+        let history_gas_for_code = gas_params.code_deposit_history_gas(code_len);
         if charges_state_gas {
             let charge = StateGasCharge::units(
                 GasId::code_deposit_state_gas(),
@@ -774,6 +777,20 @@ pub fn return_create<CTX: ContextTr>(
                 };
                 return;
             }
+        }
+
+        // History gas for the same bytes, on the same condition: code that passed validation
+        // and is about to be written is also code every node has to carry in a block. The
+        // schedule decides whether that costs anything; it is zero everywhere here, so this
+        // charge does not exist unless a chain prices history bytes.
+        if history_gas_for_code > 0
+            && !interpreter_result
+                .gas
+                .record_history_cost(history_gas_for_code)
+        {
+            context.journal_mut().checkpoint_revert(checkpoint);
+            interpreter_result.result = InstructionResult::OutOfGas;
+            return;
         }
     }
 
