@@ -805,6 +805,15 @@ impl GasParams {
         self.get(GasId::create_state_gas())
     }
 
+    /// History gas for code deposit of `len` bytes.
+    ///
+    /// Zero unless the schedule prices history bytes.
+    #[inline]
+    pub fn code_deposit_history_gas(&self, len: usize) -> u64 {
+        self.get(GasId::code_deposit_history_gas())
+            .saturating_mul(len as u64)
+    }
+
     /// Used in [GasParams::initial_tx_gas] to calculate the eip7702 per-auth cost.
     ///
     /// Pre-Amsterdam this is the pessimistic bundled `PER_EMPTY_ACCOUNT_COST`
@@ -1266,6 +1275,7 @@ impl GasId {
             }
             x if x == Self::tx_account_write_cost().as_u8() => "tx_account_write_cost",
             x if x == Self::tx_create_access_cost().as_u8() => "tx_create_access_cost",
+            x if x == Self::code_deposit_history_gas().as_u8() => "code_deposit_history_gas",
             _ => "unknown",
         }
     }
@@ -1340,6 +1350,7 @@ impl GasId {
             }
             "tx_account_write_cost" => Some(Self::tx_account_write_cost()),
             "tx_create_access_cost" => Some(Self::tx_create_access_cost()),
+            "code_deposit_history_gas" => Some(Self::code_deposit_history_gas()),
             _ => None,
         }
     }
@@ -1617,6 +1628,15 @@ impl GasId {
     pub const fn tx_create_access_cost() -> GasId {
         Self::new(49)
     }
+
+    /// History gas per byte of deposited code: what a chain charges for carrying the deployed
+    /// bytes in a block, as distinct from the state gas it charges for storing them.
+    ///
+    /// Zero on every schedule defined here, which is what makes the charge site in
+    /// `return_create` inert. A chain that prices history bytes overrides it.
+    pub const fn code_deposit_history_gas() -> GasId {
+        Self::new(50)
+    }
 }
 
 #[cfg(test)]
@@ -1687,11 +1707,11 @@ mod tests {
             "Not all unique names are resolvable via from_str"
         );
 
-        // We should have exactly 49 known GasIds (based on the indices 1-49 used)
+        // We should have exactly 50 known GasIds (based on the indices 1-50 used)
         assert_eq!(
             unique_names.len(),
-            49,
-            "Expected 49 unique GasIds, found {}",
+            50,
+            "Expected 50 unique GasIds, found {}",
             unique_names.len()
         );
     }
