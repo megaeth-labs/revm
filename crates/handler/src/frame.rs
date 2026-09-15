@@ -660,7 +660,7 @@ pub const fn handle_reservoir_remaining_gas(
         // History gas rides the same success-only merge: a failing child rolled it back
         // along with its state gas, so it contributes nothing. Zero on any chain that
         // never charges history gas.
-        parent_gas.add_history_gas_spent(child_gas.history_gas_spent());
+        parent_gas.add_history_gas_net(child_gas.history_gas_net());
         parent_gas.record_refund(child_gas.refunded());
     }
 }

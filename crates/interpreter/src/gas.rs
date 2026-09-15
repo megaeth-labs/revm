@@ -212,6 +212,18 @@ impl Gas {
         self.tracker.add_history_gas_spent(delta);
     }
 
+    /// Returns the signed net history gas spent. See [`GasTracker::history_gas_net`].
+    #[inline]
+    pub const fn history_gas_net(&self) -> i64 {
+        self.tracker.history_gas_net()
+    }
+
+    /// Refills history gas for bytes taken back. See [`GasTracker::refill_history`].
+    #[inline]
+    pub const fn refill_history(&mut self, amount: u64) {
+        self.tracker.refill_history(amount);
+    }
+
     /// Rolls back this frame's state-gas charges on revert or exceptional halt.
     ///
     /// See [`GasTracker::rollback_state_gas`].
