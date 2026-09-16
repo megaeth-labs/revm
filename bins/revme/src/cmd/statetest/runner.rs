@@ -317,6 +317,13 @@ pub fn execute_test_suite(
                 continue;
             }
 
+            // Unknown/unsupported spec (e.g. a transition fork not yet mapped to a
+            // `SpecId`). Report it and skip rather than panicking in `to_spec_id`.
+            if *spec_name == SpecName::Unknown {
+                eprintln!("Error: unknown spec in post state, skipping: path={path}");
+                continue;
+            }
+
             cfg.set_spec_and_mainnet_gas_params(spec_name.to_spec_id());
 
             // Configure max blobs per spec
@@ -340,7 +347,9 @@ pub fn execute_test_suite(
                         return Err(TestError {
                             name,
                             path,
-                            kind: TestErrorKind::UnknownPrivateKey(unit.transaction.secret_key),
+                            kind: TestErrorKind::UnknownPrivateKey(
+                                unit.transaction.secret_key.unwrap_or_default(),
+                            ),
                         });
                     }
                 };

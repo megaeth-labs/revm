@@ -1,6 +1,6 @@
 //! Gas constants and functions for gas calculation.
 
-use crate::{cfg::GasParams, Transaction};
+use crate::{cfg::gas_params, cfg::GasParams, Transaction};
 use primitives::hardfork::SpecId;
 
 /// Tracker for gas during execution.
@@ -22,6 +22,15 @@ pub struct GasTracker {
     /// more state gas than the frame itself has charged (the parent previously
     /// charged the 0→x portion). The net is reconciled on frame return.
     state_gas_spent: i64,
+    /// State gas drawn from regular gas (`remaining`) because the reservoir was
+    /// empty (EIP-8037's `state_gas_from_gas_left`).
+    ///
+    /// Incremented by [`Self::record_state_cost`] whenever a state-gas charge
+    /// spills out of the reservoir into regular gas. On frame rollback (revert or
+    /// halt) the spilled portion is credited back to `remaining` in last-in-
+    /// first-out order by [`Self::rollback_state_gas`]; on success it is
+    /// propagated to the parent frame so a later parent rollback can return it.
+    state_gas_spilled: u64,
     /// Refunded gas. Used to refund the gas to the caller at the end of execution.
     refunded: i64,
 }
@@ -35,14 +44,16 @@ impl GasTracker {
             remaining,
             reservoir,
             state_gas_spent: 0,
+            state_gas_spilled: 0,
             refunded: 0,
         }
     }
 
     /// Creates a new `GasTracker` with the given used gas and reservoir.
+    /// Remaining gas saturates at zero when used gas exceeds the gas limit.
     #[inline]
     pub const fn new_used_gas(gas_limit: u64, used_gas: u64, reservoir: u64) -> Self {
-        Self::new(gas_limit, gas_limit - used_gas, reservoir)
+        Self::new(gas_limit, gas_limit.saturating_sub(used_gas), reservoir)
     }
 
     /// Returns the gas limit.
@@ -93,6 +104,28 @@ impl GasTracker {
         self.state_gas_spent = val;
     }
 
+    /// Returns the state gas drawn from regular gas (`remaining`) because the
+    /// reservoir was empty (EIP-8037's `state_gas_from_gas_left`).
+    #[inline]
+    pub const fn state_gas_spilled(&self) -> u64 {
+        self.state_gas_spilled
+    }
+
+    /// Sets the spilled state gas.
+    #[inline]
+    pub const fn set_state_gas_spilled(&mut self, val: u64) {
+        self.state_gas_spilled = val;
+    }
+
+    /// Adds `delta` to the spilled state gas, saturating.
+    ///
+    /// Used to merge a successful child frame's spilled state gas into this
+    /// (parent) frame so a later parent rollback can return it.
+    #[inline]
+    pub const fn add_state_gas_spilled(&mut self, delta: u64) {
+        self.state_gas_spilled = self.state_gas_spilled.saturating_add(delta);
+    }
+
     /// Returns the refunded gas.
     #[inline]
     pub const fn refunded(&self) -> i64 {
@@ -139,9 +172,34 @@ impl GasTracker {
         let success = self.record_regular_cost(spill);
         if success {
             self.state_gas_spent = self.state_gas_spent.saturating_add(cost as i64);
+            self.state_gas_spilled = self.state_gas_spilled.saturating_add(spill);
             self.reservoir = 0;
         }
         success
+    }
+
+    /// Rolls back this frame's state-gas charges on revert or exceptional halt
+    /// (EIP-8037).
+    ///
+    /// The state gas charged within the frame is refilled in last-in-first-out
+    /// order: the spilled portion is credited back to `remaining` (the pool
+    /// charged last) and the rest restores the reservoir to its frame-start
+    /// value. Concretely, `remaining` gains `state_gas_spilled` and the reservoir
+    /// becomes `reservoir + state_gas_spent - state_gas_spilled`, which is exactly
+    /// the reservoir the frame inherited. Both state-gas counters are then reset.
+    ///
+    /// On revert the resulting `remaining` (including the refilled spill) is
+    /// returned to the parent; on halt the caller additionally zeroes `remaining`
+    /// so the spilled gas is consumed while the reservoir is left untouched.
+    #[inline]
+    pub const fn rollback_state_gas(&mut self) {
+        self.reservoir = self
+            .reservoir
+            .saturating_add_signed(self.state_gas_spent)
+            .saturating_sub(self.state_gas_spilled);
+        self.remaining = self.remaining.saturating_add(self.state_gas_spilled);
+        self.state_gas_spent = 0;
+        self.state_gas_spilled = 0;
     }
 
     /// Refills the reservoir with state gas that is returned by 0→x→0 storage
@@ -152,12 +210,25 @@ impl GasTracker {
     /// transition is directly restored to the reservoir rather than routed
     /// through the capped refund counter.
     ///
-    /// `state_gas_spent` is decremented by the same amount and may become
-    /// negative if the matching 0→x charge was made by a parent frame. The
-    /// parent's total is reconciled on frame return.
+    /// `state_gas_spent` is decremented by the full `amount` and may become
+    /// negative if the matching 0→x charge was made by a parent frame (so this
+    /// frame's `state_gas_spilled` is zero and the whole refill lands in the
+    /// reservoir); the parent's total is reconciled on frame return.
+    ///
+    /// Because charges deduct from the reservoir first and from regular gas
+    /// (`remaining`) last, the refill credits the pool charged last first:
+    /// `remaining` is credited up to `state_gas_spilled` and any remainder tops
+    /// up the reservoir.
     #[inline]
     pub const fn refill_reservoir(&mut self, amount: u64) {
-        self.reservoir = self.reservoir.saturating_add(amount);
+        let to_remaining = if amount < self.state_gas_spilled {
+            amount
+        } else {
+            self.state_gas_spilled
+        };
+        self.remaining = self.remaining.saturating_add(to_remaining);
+        self.state_gas_spilled -= to_remaining;
+        self.reservoir = self.reservoir.saturating_add(amount - to_remaining);
         self.state_gas_spent = self.state_gas_spent.saturating_sub(amount as i64);
     }
 
@@ -177,6 +248,27 @@ impl GasTracker {
     #[inline]
     pub const fn spend_all(&mut self) {
         self.remaining = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GasTracker;
+
+    #[test]
+    fn new_used_gas_saturates_remaining_at_zero() {
+        assert_eq!(
+            GasTracker::new_used_gas(10, 9, 3),
+            GasTracker::new(10, 1, 3)
+        );
+        assert_eq!(
+            GasTracker::new_used_gas(10, 10, 3),
+            GasTracker::new(10, 0, 3)
+        );
+        assert_eq!(
+            GasTracker::new_used_gas(10, 11, 3),
+            GasTracker::new(10, 0, 3)
+        );
     }
 }
 
@@ -293,15 +385,12 @@ pub struct InitialAndFloorGas {
     /// Under EIP-8037, this is the part constrained by `TX_MAX_GAS_LIMIT`;
     /// state gas uses its own reservoir and is not subject to that cap.
     pub initial_regular_gas: u64,
-    /// State gas component of the initial intrinsic gas.
-    /// Under EIP-8037, this includes:
-    /// - EIP-7702 auth list state gas (per-auth account creation + metadata costs)
-    /// - For CREATE transactions: `create_state_gas` (account creation + contract metadata)
-    /// - For CALL transactions: 0 (state gas is unpredictable at validation time)
+    /// State gas charged at the intrinsic phase, before the first frame is
+    /// entered.
+    ///
+    /// The state-dependent charges of the EIP-2780 runtime gas phase are not
+    /// included here: they are recorded directly on the transaction-level gas.
     pub initial_state_gas: u64,
-    /// EIP-7702 refund for existing authorities.
-    /// This is the refund given when an authorization is applied to an already existing account.
-    pub state_refund: u64,
     /// If transaction is a Call and Prague is enabled
     /// floor_gas is at least amount of gas that is going to be spent.
     pub floor_gas: u64,
@@ -316,7 +405,6 @@ impl InitialAndFloorGas {
         Self {
             initial_regular_gas,
             initial_state_gas: 0,
-            state_refund: 0,
             floor_gas,
         }
     }
@@ -331,7 +419,6 @@ impl InitialAndFloorGas {
         Self {
             initial_regular_gas,
             initial_state_gas,
-            state_refund: 0,
             floor_gas,
         }
     }
@@ -347,11 +434,10 @@ impl InitialAndFloorGas {
         self.initial_regular_gas
     }
 
-    /// State gas component of the initial intrinsic gas.
-    /// This is the state gas component of the initial intrinsic gas minus the EIP-7702 refund.
+    /// State gas charged before the first frame is entered.
     #[inline]
     pub const fn initial_state_gas_final(&self) -> u64 {
-        self.initial_state_gas - self.state_refund
+        self.initial_state_gas
     }
 
     /// EIP-7623 floor gas.
@@ -417,10 +503,13 @@ impl InitialAndFloorGas {
     ///   reservoir = execution_gas - regular_gas_budget
     ///
     /// Initial state gas is then deducted from the reservoir (spilling into the
-    /// regular budget when the reservoir is insufficient), and the EIP-7702
-    /// refund for existing authorities is added back to the reservoir.
+    /// regular budget when the reservoir is insufficient).
     ///
     /// On mainnet (state gas disabled), reservoir = 0 and gas_limit is unchanged.
+    ///
+    /// All subtractions saturate at zero: callers normally guarantee
+    /// `tx_gas_limit >= initial_total_gas` via validation, but if that invariant
+    /// is violated the result clamps to `(0, 0)` instead of underflowing.
     ///
     /// Returns `(gas_limit, reservoir)`.
     pub fn initial_gas_and_reservoir(
@@ -428,7 +517,7 @@ impl InitialAndFloorGas {
         tx_gas_limit: u64,
         tx_gas_limit_cap: u64,
     ) -> (u64, u64) {
-        let execution_gas = tx_gas_limit - self.initial_regular_gas();
+        let execution_gas = tx_gas_limit.saturating_sub(self.initial_regular_gas());
 
         // System calls pass InitialAndFloorGas with all zeros and should not be
         // subject to the TX_MAX_GAS_LIMIT cap.
@@ -440,21 +529,17 @@ impl InitialAndFloorGas {
 
         let mut regular_gas_limit = core::cmp::min(tx_gas_limit, tx_gas_limit_cap)
             .saturating_sub(self.initial_regular_gas());
-        let mut reservoir = execution_gas - regular_gas_limit;
+        let mut reservoir = execution_gas.saturating_sub(regular_gas_limit);
 
         // Deduct initial state gas from the reservoir. When the reservoir is
         // insufficient, the deficit is charged from the regular gas budget.
         if reservoir >= self.initial_state_gas {
             reservoir -= self.initial_state_gas;
         } else {
-            regular_gas_limit -= self.initial_state_gas - reservoir;
+            regular_gas_limit =
+                regular_gas_limit.saturating_sub(self.initial_state_gas - reservoir);
             reservoir = 0;
         }
-
-        // EIP-7702 state gas refund for existing authorities goes directly to
-        // the reservoir. In the Python spec, set_delegation adds this refund to
-        // state_gas_reservoir so it stays as state gas (not regular gas).
-        reservoir += self.state_refund;
 
         (regular_gas_limit, reservoir)
     }
@@ -467,6 +552,7 @@ impl InitialAndFloorGas {
 ///
 /// - Intrinsic gas
 /// - Number of tokens in calldata
+#[allow(clippy::too_many_arguments)]
 pub fn calculate_initial_tx_gas(
     spec_id: SpecId,
     input: &[u8],
@@ -474,6 +560,7 @@ pub fn calculate_initial_tx_gas(
     access_list_accounts: u64,
     access_list_storages: u64,
     authorization_list_num: u64,
+    eip2780: Option<gas_params::Eip2780TxInfo>,
 ) -> InitialAndFloorGas {
     GasParams::new_spec(spec_id).initial_tx_gas(
         input,
@@ -481,6 +568,7 @@ pub fn calculate_initial_tx_gas(
         access_list_accounts,
         access_list_storages,
         authorization_list_num,
+        eip2780,
     )
 }
 
@@ -491,8 +579,12 @@ pub fn calculate_initial_tx_gas(
 ///
 /// - Intrinsic gas
 /// - Number of tokens in calldata
-pub fn calculate_initial_tx_gas_for_tx(tx: impl Transaction, spec: SpecId) -> InitialAndFloorGas {
-    GasParams::new_spec(spec).initial_tx_gas_for_tx(tx)
+pub fn calculate_initial_tx_gas_for_tx(
+    tx: impl Transaction,
+    spec: SpecId,
+    eip2780: Option<gas_params::Eip2780TxInfo>,
+) -> InitialAndFloorGas {
+    GasParams::new_spec(spec).initial_tx_gas_for_tx(tx, eip2780)
 }
 
 /// Retrieve the total number of tokens in calldata.

@@ -98,6 +98,12 @@ impl Gas {
         self.tracker.refunded()
     }
 
+    /// Sets the refunded gas counter (used to drop a failing frame's refunds).
+    #[inline]
+    pub const fn set_refunded(&mut self, val: i64) {
+        self.tracker.set_refunded(val);
+    }
+
     /// Returns the total amount of gas spent.
     #[inline]
     #[deprecated(
@@ -168,6 +174,34 @@ impl Gas {
         self.tracker.set_state_gas_spent(val);
     }
 
+    /// Returns the state gas drawn from regular gas because the reservoir was
+    /// empty (EIP-8037). See [`GasTracker::state_gas_spilled`].
+    #[inline]
+    pub const fn state_gas_spilled(&self) -> u64 {
+        self.tracker.state_gas_spilled()
+    }
+
+    /// Sets the spilled state gas (used when propagating from a child frame).
+    #[inline]
+    pub const fn set_state_gas_spilled(&mut self, val: u64) {
+        self.tracker.set_state_gas_spilled(val);
+    }
+
+    /// Adds `delta` to the spilled state gas (used when merging a successful
+    /// child frame).
+    #[inline]
+    pub const fn add_state_gas_spilled(&mut self, delta: u64) {
+        self.tracker.add_state_gas_spilled(delta);
+    }
+
+    /// Rolls back this frame's state-gas charges on revert or exceptional halt.
+    ///
+    /// See [`GasTracker::rollback_state_gas`].
+    #[inline]
+    pub const fn rollback_state_gas(&mut self) {
+        self.tracker.rollback_state_gas();
+    }
+
     /// Refills the reservoir with state gas returned by 0→x→0 storage restoration.
     ///
     /// See [`GasTracker::refill_reservoir`].
@@ -204,12 +238,11 @@ impl Gas {
 
     /// Set a refund value for final refund.
     ///
-    /// Max refund value is limited to Nth part (depending of fork) of gas spend.
+    /// Max refund value is limited to Nth part of gas spend.
     ///
     /// Related to EIP-3529: Reduction in refunds
     #[inline]
-    pub fn set_final_refund(&mut self, is_london: bool) {
-        let max_refund_quotient = if is_london { 5 } else { 2 };
+    pub fn set_final_refund(&mut self, max_refund_quotient: u64) {
         // EIP-8037: gas_used = total_gas_spent - reservoir (reservoir is unused state gas)
         let gas_used = self.total_gas_spent().saturating_sub(self.reservoir());
         self.tracker

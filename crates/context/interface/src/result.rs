@@ -64,6 +64,7 @@ impl<R, S> ExecResultAndState<R, S> {
 ///
 /// - [`tx_gas_used()`](ResultGas::tx_gas_used) = `max(total_gas_spent − refunded, floor_gas)` (the value that goes into receipts)
 /// - [`block_regular_gas_used()`](ResultGas::block_regular_gas_used) = `max(total_gas_spent − state_gas_spent, floor_gas)`
+///   (EIP-8037 + EIP-7778: pre-refund; the EIP-7623 calldata floor binds against the regular component)
 /// - [`block_state_gas_used()`](ResultGas::block_state_gas_used) = `state_gas_spent`
 /// - [`spent_sub_refunded()`](ResultGas::spent_sub_refunded) = `total_gas_spent − refunded` (before floor gas check)
 /// - [`final_refunded()`](ResultGas::final_refunded) = `refunded` when floor gas is inactive, `0` when floor gas kicks in
@@ -267,13 +268,20 @@ impl ResultGas {
         max(tx_gas_refunded, self.floor_gas())
     }
 
-    /// Returns the regular gas used by the block.
+    /// Returns the regular gas used by the block per EIP-8037 + EIP-7778.
+    ///
+    /// `max(total_gas_spent - state_gas_spent, floor_gas)` (pre-refund). The
+    /// EIP-7623 calldata floor binds against the regular component only (it is
+    /// not discounted by state gas), while the refund only affects
+    /// `tx_gas_used` (the receipt value), not the block-level regular
+    /// component.
     #[inline]
     pub const fn block_regular_gas_used(&self) -> u64 {
-        let execution_gas_spent = self
-            .total_gas_spent()
-            .saturating_sub(self.state_gas_spent_final());
-        max(execution_gas_spent, self.floor_gas())
+        max(
+            self.total_gas_spent()
+                .saturating_sub(self.state_gas_spent_final()),
+            self.floor_gas(),
+        )
     }
 
     /// Returns the state gas used by the block.
@@ -1383,5 +1391,45 @@ mod tests {
             .with_floor_gas(40000);
         assert_eq!(gas.tx_gas_used(), 40000);
         assert_eq!(gas.final_refunded(), 10000);
+    }
+
+    #[test]
+    fn test_block_regular_gas_used_no_floor_no_refund() {
+        // block_regular_gas_used = total_gas_spent - state_gas_spent.
+        // Refund and floor only affect tx_gas_used, never block_regular.
+
+        // No state, no refund, no floor.
+        let gas = ResultGas::default().with_total_gas_spent(100_000);
+        assert_eq!(gas.block_regular_gas_used(), 100_000);
+
+        // With state gas.
+        let gas = ResultGas::default()
+            .with_total_gas_spent(100_000)
+            .with_state_gas_spent(30_000);
+        assert_eq!(gas.block_regular_gas_used(), 70_000);
+        assert_eq!(gas.block_state_gas_used(), 30_000);
+
+        // Refund present: tx_gas_used drops, block_regular does not.
+        let gas = ResultGas::default()
+            .with_total_gas_spent(100_000)
+            .with_refunded(10_000)
+            .with_state_gas_spent(30_000);
+        assert_eq!(gas.tx_gas_used(), 90_000);
+        assert_eq!(gas.block_regular_gas_used(), 70_000);
+
+        // Floor active: tx_gas_used floors up, block_regular does not.
+        let gas = ResultGas::default()
+            .with_total_gas_spent(100_000)
+            .with_refunded(90_000)
+            .with_floor_gas(50_000)
+            .with_state_gas_spent(30_000);
+        assert_eq!(gas.tx_gas_used(), 50_000);
+        assert_eq!(gas.block_regular_gas_used(), 70_000);
+
+        // State gas exceeds total → saturates to 0.
+        let gas = ResultGas::default()
+            .with_total_gas_spent(20_000)
+            .with_state_gas_spent(30_000);
+        assert_eq!(gas.block_regular_gas_used(), 0);
     }
 }

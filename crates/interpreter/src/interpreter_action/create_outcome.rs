@@ -13,6 +13,10 @@ pub struct CreateOutcome {
     pub result: InterpreterResult,
     /// An optional address associated with the create operation
     pub address: Option<Address>,
+    /// EIP-8037: whether the CREATE opcode charged the conditional
+    /// `create_state_gas` on the parent's tracker (the destination did not
+    /// exist at access time). When the create fails the parent refunds it.
+    pub charged_create_state_gas: bool,
 }
 
 impl CreateOutcome {
@@ -27,7 +31,11 @@ impl CreateOutcome {
     ///
     /// A new [`CreateOutcome`] instance.
     pub const fn new(result: InterpreterResult, address: Option<Address>) -> Self {
-        Self { result, address }
+        Self {
+            result,
+            address,
+            charged_create_state_gas: false,
+        }
     }
 
     /// Constructs a new [`CreateOutcome`] for an out-of-gas error.

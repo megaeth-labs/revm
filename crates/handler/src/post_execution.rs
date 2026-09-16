@@ -1,6 +1,7 @@
 use crate::FrameResult;
 use context::journaled_state::account::JournaledAccountTr;
 use context_interface::{
+    cfg::GasParams,
     journaled_state::JournalTr,
     result::{ExecutionResult, HaltReason, HaltReasonTr, ResultGas},
     Block, Cfg, ContextTr, Database, LocalContextTr, Transaction,
@@ -17,16 +18,12 @@ pub fn build_result_gas(
     // `state_gas_spent` is tracked as i64 to allow a child frame's count to go
     // negative on 0→x→0 restoration; at the top level, post-reconciliation it
     // is expected to be >= 0 and is clamped defensively before combining with
-    // intrinsic state gas.
-    //
-    // Per the spec, tx_state_gas = intrinsic_state_gas + execution_state_gas,
-    // then reduced by the EIP-7702 per-authorization state-gas refund (which
-    // was also added back to the reservoir budget at tx start).
+    // the state gas charged before the first frame (the EIP-2780 runtime gas
+    // phase).
     let state_gas = gas
         .state_gas_spent()
         .saturating_add_unsigned(init_and_floor_gas.initial_state_gas)
         .max(0) as u64;
-    let state_gas = state_gas.saturating_sub(init_and_floor_gas.state_refund);
 
     ResultGas::default()
         .with_total_gas_spent(
@@ -60,13 +57,10 @@ pub const fn eip7623_check_gas_floor(gas: &mut Gas, init_and_floor_gas: InitialA
     }
 }
 
-/// Calculates and applies gas refunds based on the specification.
-pub fn refund(spec: SpecId, gas: &mut Gas, eip7702_refund: i64) {
+/// Calculates and applies gas refunds based on the configured gas parameters.
+pub fn refund(gas_params: &GasParams, gas: &mut Gas, eip7702_refund: i64) {
     gas.record_refund(eip7702_refund);
-    // Calculate gas refund for transaction.
-    // If spec is set to london, it will decrease the maximum refund amount to 5th part of
-    // gas spend. (Before london it was 2th part of gas spend)
-    gas.set_final_refund(spec.is_enabled_in(SpecId::LONDON));
+    gas.set_final_refund(gas_params.max_refund_quotient());
 }
 
 /// Reimburses the caller for unused gas.
