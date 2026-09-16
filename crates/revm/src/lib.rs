@@ -2,6 +2,10 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
+/// MegaETH fork marker; the module lives in its own file so upstream edits to this
+/// file never conflict with it.
+pub mod megaeth;
+
 // reexport dependencies
 #[doc(inline)]
 pub use bytecode;

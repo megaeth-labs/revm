@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Fork release tag, for example v40.0.3-mega.2"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+  checks: read
+  actions: read
+
+jobs:
+  release:
+    name: tag and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      # Releases are cut from main only, and only from a commit whose pull
+      # request checks and semver gate are green.
+      - name: Require main and green checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::releases are cut from main only, got $GITHUB_REF"
+            exit 1
+          fi
+          sha=$(git rev-parse HEAD)
+          checks=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --paginate             --jq '.check_runs[] | "\(.name)=\(.conclusion)"')
+          for name in "ci success" "semver-checks"; do
+            if ! grep -qxF "$name=success" <<< "$checks"; then
+              echo "::error::check '$name' is not green for $sha"
+              echo "$checks"
+              exit 1
+            fi
+          done
+      # Cargo versions never change on this fork, so the tag is the only thing
+      # that identifies a release. It has to be well formed, unused, and it has
+      # to match what the source already claims.
+      - name: Validate the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-mega\.[0-9]+$'; then
+            echo "::error::tag must look like v40.0.3-mega.1, got: $TAG"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag already exists locally: $TAG"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::tag already exists on the remote: $TAG"
+            exit 1
+          fi
+          # Anchored so a commented-out or differently named constant does not pass.
+          tag_re=$(printf '%s' "$TAG" | sed 's/\./\\./g')
+          if ! grep -qE "^pub const FORK_TAG: &str = \"$tag_re\";\$" crates/revm/src/megaeth.rs; then
+            echo "::error::crates/revm/src/megaeth.rs does not declare FORK_TAG = $TAG"
+            grep -n 'FORK_TAG' crates/revm/src/megaeth.rs || true
+            exit 1
+          fi
+      - name: Write the release notes
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # The upstream base tag is recorded in the tree, not derived from
+          # history: right after a base-line move `git describe` could still
+          # reach the previous base through upstream history.
+          base=$(tr -d '[:space:]' < scripts/mega/base.txt)
+          # Upstream tags are not mirrored into this repository; fetch the base tag from upstream.
+          git fetch --no-tags https://github.com/bluealloy/revm.git "refs/tags/$base:refs/tags/$base"
+          if ! git merge-base --is-ancestor "refs/tags/$base" HEAD; then
+            echo "::error::base tag $base from scripts/mega/base.txt is not an ancestor of HEAD"
+            exit 1
+          fi
+          sha=$(git rev-parse HEAD)
+          {
+            echo "Fork of bluealloy/revm at \`$base\`, commit \`$sha\`."
+            echo
+            echo "## Changes on top of $base"
+            echo
+            printf '```\n%s\n```\n' "$(git log --oneline "$base..HEAD")"
+            echo
+            echo "## Consumer wiring"
+            echo
+            echo "Patch all twelve crates together; patching only \`revm\` leaves two copies in the build."
+            echo
+            echo '```toml'
+            echo "# megaeth fork of revm, tag $TAG"
+            echo "[patch.crates-io]"
+            while read -r crate version dir || [ -n "$crate" ]; do
+              case "$crate" in ''|\#*) continue ;; esac
+              printf '%-23s = { git = "https://github.com/megaeth-labs/revm", rev = "%s" }\n' "$crate" "$sha"
+            done < scripts/mega/crates.txt
+            echo '```'
+          } > notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Tag and publish
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "refs/tags/$TAG"
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md

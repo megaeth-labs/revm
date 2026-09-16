@@ -5,33 +5,37 @@ concurrency:
   group: ${{github.workflow}}-${{github.ref}}
 
 on:
+  pull_request:
   push:
     branches: [main, "release/**"]
-  pull_request:
-    branches: [main, "release/**"]
+  merge_group:
 
 env:
   CARGO_TERM_COLOR: always
 
-permissions: {}
+# The default token only needs to read this repository.
+permissions:
+  contents: read
 
 jobs:
   test:
-    name: test ${{ matrix.rust }} ${{ matrix.flags }}
+    name: test ${{ matrix.flags }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        rust: ["1.91", "stable", "nightly"]
         flags: ["--no-default-features", "", "--all-features"]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: ${{ steps.rust.outputs.channel }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: taiki-e/install-action@nextest
       - name: Install GMP (all-features)
@@ -41,27 +45,27 @@ jobs:
           sudo apt-get install -y libgmp-dev
       - run: cargo nextest run --workspace ${{ matrix.flags }}
 
+  # Only the native x86_64 release run gates a pull request. The ethtests
+  # profile and the i686 cross run move to the nightly workflow.
   ethereum-tests:
-    name: eth ${{ matrix.profile }} ${{ matrix.target }}
+    name: eth release x86_64-unknown-linux-gnu
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [ethtests, release]
-        target: [i686-unknown-linux-gnu, x86_64-unknown-linux-gnu]
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
-      - name: Install cross
-        run: cargo install cross --locked
       - name: Run tests
-        run: ./scripts/run-tests.sh clean cross ${{ matrix.profile }} ${{ matrix.target }}
+        run: ./scripts/run-tests.sh clean cargo release
 
   check-no-std:
     name: check no_std ${{ matrix.target }} ${{ matrix.features }}
@@ -76,8 +80,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust.outputs.channel }}
           targets: ${{ matrix.target }}
       - run: |
           cargo check --target ${{ matrix.target }} --no-default-features --features=${{ matrix.features }}
@@ -95,7 +103,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
       - run: cargo check --no-default-features -p revm --features=${{ matrix.features }}
 
   feature-checks:
@@ -106,7 +119,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
       - uses: taiki-e/install-action@cargo-hack
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -126,8 +144,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust.outputs.channel }}
           components: clippy
       - name: Install GMP
         run: |
@@ -145,8 +167,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust.outputs.channel }}
           components: rust-docs
       - name: Install GMP
         run: |
@@ -164,7 +190,12 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
@@ -178,27 +209,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust.outputs.channel }}
           components: rustfmt
       - run: cargo fmt --all --check
 
-  feature-propagation:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: taiki-e/cache-cargo-install-action@417450f3c33ee20393705369577571770643d4c7 # v3.0.7
-        with:
-          tool: zepter
-      - name: Eagerly pull dependencies
-        run: cargo metadata --format-version=1 --locked > /dev/null
-      - run: zepter run check
 
   deny:
     runs-on: ubuntu-latest
@@ -211,14 +230,22 @@ jobs:
         with:
           command: check all
 
-  typos:
+
+  # Every upstream file a PR modifies must have a row in the touch-point table
+  # of MEGAETH-FORK.md (rule 4). Fork-owned files are exempt inside the script;
+  # cherry-pick PRs are exempt here, because a cherry-picked upstream commit is
+  # dropped, not re-applied, when the base line moves past it.
+  touch-points:
+    name: upstream touch points
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'mega:cherry-pick')
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: crate-ci/typos@5374cbf686e897b15713110e233094e2874de7ef # v1.46.1
+          fetch-depth: 0
+      - run: scripts/mega/check-touch-points.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
 
   ci-success:
     name: ci success
@@ -234,11 +261,12 @@ jobs:
       - docs
       - doctest
       - fmt
-      - feature-propagation
       - deny
-      - typos
+      - touch-points
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # release/v1
         with:
           jobs: ${{ toJSON(needs) }}
+          # The touch-point job only runs on pull requests.
+          allowed-skips: touch-points

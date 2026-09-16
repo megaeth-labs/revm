@@ -1,0 +1,161 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  # Keeps the upstream mirror branch and the upstream tags current, and reports
+  # what changed in the crates this fork touches.
+  mirror:
+    name: mirror upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/bluealloy/revm.git
+          git fetch --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
+      - name: Build the digest
+        id: digest
+        run: |
+          set -euo pipefail
+          # On the first run the mirror branch does not exist yet, so the
+          # digest starts at the upstream tag this fork is based on.
+          if git ls-remote --exit-code --heads origin upstream-main >/dev/null 2>&1; then
+            git fetch --no-tags origin +refs/heads/upstream-main:refs/remotes/origin/upstream-main
+            base=refs/remotes/origin/upstream-main
+          else
+            base_tag=$(tr -d '[:space:]' < scripts/mega/base.txt)
+            git fetch --no-tags upstream "refs/tags/$base_tag:refs/tags/$base_tag"
+            base=refs/tags/$base_tag
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+          commits=$(git log --oneline "$base..refs/remotes/upstream/main" -- \
+            crates/interpreter crates/handler crates/context crates/precompile crates/primitives)
+
+          # Upstream tags are reported, never mirrored: the fork's own tag list
+          # stays the fork's releases. A tag counts as new when its commit is
+          # reachable from upstream main but not from the last digest base.
+          git fetch --no-tags upstream '+refs/tags/v*:refs/upstream-tags/v*'
+          : > new-tags.txt
+          while read -r tag sha; do
+            case "$tag" in v[0-9]*) ;; *) continue ;; esac
+            if git merge-base --is-ancestor "$sha" refs/remotes/upstream/main &&
+               ! git merge-base --is-ancestor "$sha" "$base"; then
+              echo "$tag" >> new-tags.txt
+            fi
+          done < <(git for-each-ref refs/upstream-tags --format='%(refname:strip=2) %(objectname)' | sort -V)
+          new_tags=$(cat new-tags.txt)
+
+          {
+            echo "## Upstream digest"
+            echo
+            echo "Base \`$base\` at \`$(git rev-parse --short "$base")\`, upstream main at \`$(git rev-parse --short refs/remotes/upstream/main)\`."
+            echo
+            echo "### Commits touching interpreter, handler, context, precompile, primitives"
+            echo
+            if [ -n "$commits" ]; then
+              printf '```\n%s\n```\n' "$commits"
+            else
+              echo "None."
+            fi
+            echo
+            echo "### Upstream tags cut since the last digest"
+            echo
+            if [ -n "$new_tags" ]; then
+              printf '```\n%s\n```\n' "$new_tags"
+            else
+              echo "None."
+            fi
+          } > digest.md
+
+          cat digest.md >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$commits" ] || [ -n "$new_tags" ]; then
+            echo "has_content=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_content=false" >> "$GITHUB_OUTPUT"
+          fi
+      # Reporting comes before the mirror moves: if the issue update fails, the
+      # next run digests the same range again instead of losing it.
+      - name: Report the digest
+        if: steps.digest.outputs.has_content == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          number=$(gh issue list --state open --search 'in:title "Upstream digest"' --json number,title \
+            --jq '[.[] | select(.title == "Upstream digest")] | first | .number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file digest.md
+          else
+            gh issue create --title "Upstream digest" --body-file digest.md
+          fi
+      # No force: a mirror branch that cannot fast-forward means upstream
+      # rewrote history and a human has to look at it.
+      - name: Fast-forward the mirror branch
+        run: git push origin refs/remotes/upstream/main:refs/heads/upstream-main
+
+  # The full execution-spec-test suite, including the legacy tests, the
+  # debug-assertion `ethtests` profile and the 32-bit target that the pull
+  # request workflow leaves out.
+  eest-full:
+    name: eest ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: release x86_64-unknown-linux-gnu
+            cross: false
+            args: clean cargo release
+          - name: ethtests x86_64-unknown-linux-gnu
+            cross: false
+            args: clean cargo ethtests
+          - name: release i686-unknown-linux-gnu
+            cross: true
+            args: clean cross release i686-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Read the pinned toolchain
+        id: rust
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+      - name: Install cross
+        if: ${{ matrix.cross }}
+        run: cargo install cross --locked
+      - name: Run tests
+        run: ./scripts/run-tests.sh ${{ matrix.args }}
+
+  advisories:
+    name: advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
+        with:
+          command: check advisories
