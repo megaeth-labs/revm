@@ -68,6 +68,8 @@ Keep this list current; it is the expected conflict set of a rebase.
 | `crates/revm/src/lib.rs` | a short `pub mod megaeth;` block after the crate attributes | keep the block |
 | `.github/workflows/ci.yml` | fork CI in place of the upstream matrix | take the fork version; copy new upstream jobs by hand if wanted |
 | `.github/workflows/{bench,book,pr-audit,release-plz}.yml`, `.github/dependabot.yml` | deleted | keep deleted (`git rm`) |
+| `deny.toml` | advisory ignores the fork needs beyond upstream's list | take upstream's list, re-add the fork-only entries; drop an entry once the crate is gone from `Cargo.lock` |
+| `Cargo.lock` | dependency bumps that clear cargo-deny advisories | take upstream's lock, rerun `cargo deny check advisories`, bump again if needed |
 
 Everything under `.github/` resolves to the fork side.
 A maintainer who wants that automatic can add `.github/** merge=mega` to `.git/info/attributes` and run `git config merge.mega.driver 'cp %B %A'`; deleted files still need a `git rm`.
