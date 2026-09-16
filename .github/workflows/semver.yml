@@ -10,9 +10,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# The default token only needs to read this repository.
+# The default token reads this repository and the pull request's labels.
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   # Rule 1: the public API of every published crate only grows. Each pull
@@ -46,12 +47,20 @@ jobs:
           sudo apt-get install -y libgmp-dev
       - name: Check every crate against the pull request base
         env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'api:exception') }}
         run: |
           set -euo pipefail
           table=scripts/mega/crates.txt
           base=$(git merge-base "$BASE_SHA" HEAD)
+          # Labels come from the API, not the event payload: a label added right
+          # after the pull request opened is missing from the `opened` payload.
+          if gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name' | grep -qx 'api:exception'; then
+            EXCEPTION=true
+          else
+            EXCEPTION=false
+          fi
           echo "baseline: $base"
           expected=$(grep -cvE '^[[:space:]]*(#|$)' "$table")
           failed=""
