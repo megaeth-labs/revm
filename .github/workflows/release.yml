@@ -80,6 +80,8 @@ jobs:
           # history: right after a base-line move `git describe` could still
           # reach the previous base through upstream history.
           base=$(tr -d '[:space:]' < scripts/mega/base.txt)
+          # Upstream tags are not mirrored into this repository; fetch the base tag from upstream.
+          git fetch --no-tags https://github.com/bluealloy/revm.git "refs/tags/$base:refs/tags/$base"
           if ! git merge-base --is-ancestor "refs/tags/$base" HEAD; then
             echo "::error::base tag $base from scripts/mega/base.txt is not an ancestor of HEAD"
             exit 1

@@ -37,22 +37,27 @@ jobs:
             git fetch --no-tags origin +refs/heads/upstream-main:refs/remotes/origin/upstream-main
             base=refs/remotes/origin/upstream-main
           else
-            base=refs/tags/$(tr -d '[:space:]' < scripts/mega/base.txt)
+            base_tag=$(tr -d '[:space:]' < scripts/mega/base.txt)
+            git fetch --no-tags upstream "refs/tags/$base_tag:refs/tags/$base_tag"
+            base=refs/tags/$base_tag
           fi
           echo "base=$base" >> "$GITHUB_OUTPUT"
 
           commits=$(git log --oneline "$base..refs/remotes/upstream/main" -- \
             crates/interpreter crates/handler crates/context crates/precompile crates/primitives)
 
-          # Each lookup is a checked command of its own: an empty tag list is
-          # valid, a failed lookup is not.
-          list_tags() {
-            git ls-remote --tags "$1" 'v[0-9]*' > "$2.raw"
-            awk '{ print $2 }' "$2.raw" | sed 's|^refs/tags/||' | awk '!/\^\{\}$/' | sort -u > "$2"
-          }
-          list_tags origin origin-tags.txt
-          list_tags upstream upstream-tags.txt
-          comm -13 origin-tags.txt upstream-tags.txt > new-tags.txt
+          # Upstream tags are reported, never mirrored: the fork's own tag list
+          # stays the fork's releases. A tag counts as new when its commit is
+          # reachable from upstream main but not from the last digest base.
+          git fetch --no-tags upstream '+refs/tags/v*:refs/upstream-tags/v*'
+          : > new-tags.txt
+          while read -r tag sha; do
+            case "$tag" in v[0-9]*) ;; *) continue ;; esac
+            if git merge-base --is-ancestor "$sha" refs/remotes/upstream/main &&
+               ! git merge-base --is-ancestor "$sha" "$base"; then
+              echo "$tag" >> new-tags.txt
+            fi
+          done < <(git for-each-ref refs/upstream-tags --format='%(refname:strip=2) %(objectname)' | sort -V)
           new_tags=$(cat new-tags.txt)
 
           {
@@ -68,7 +73,7 @@ jobs:
               echo "None."
             fi
             echo
-            echo "### Upstream tags not yet mirrored"
+            echo "### Upstream tags cut since the last digest"
             echo
             if [ -n "$new_tags" ]; then
               printf '```\n%s\n```\n' "$new_tags"
@@ -98,22 +103,6 @@ jobs:
             gh issue comment "$number" --body-file digest.md
           else
             gh issue create --title "Upstream digest" --body-file digest.md
-          fi
-      # new-tags.txt was written by the digest step above. Tags are fetched one
-      # by one so an upstream tag that moved after it was mirrored cannot break
-      # the run; such a tag is not in the list and is never re-pushed.
-      - name: Push new upstream tags
-        run: |
-          set -euo pipefail
-          refs=""
-          while read -r tag || [ -n "$tag" ]; do
-            [ -n "$tag" ] || continue
-            git fetch --no-tags upstream "refs/tags/$tag:refs/tags/$tag"
-            refs="$refs refs/tags/$tag"
-          done < new-tags.txt
-          if [ -n "$refs" ]; then
-            echo "pushing:$refs"
-            git push origin $refs
           fi
       # No force: a mirror branch that cannot fast-forward means upstream
       # rewrote history and a human has to look at it.

@@ -29,8 +29,7 @@ It moves only when `mega-reth` moves its revm line.
 | `upstream-main` | Mirror of `bluealloy/revm` `main`. Fast-forwarded by the nightly workflow. Base for rebases and the upstream digest. | Bot only |
 | `release/v<N>` | Maintenance branch for an old base line, created from its last tag when `main` moves to a new base and a backport is needed. | PRs |
 | `archive/*` | Pre-2026 fork branches, read-only. | Nobody |
-| `v112`, `v113`, ... | Upstream `v<N>` tags, pushed unchanged by the nightly workflow. The current base is recorded in `scripts/mega/base.txt`. | Bot only |
-| `v40.0.3-mega.N` | Fork releases, always on `main`. | Release workflow |
+| `v40.0.3-mega.N` | Fork releases, always on `main`. The only tags in this repository: upstream tags are not mirrored; `scripts/mega/base.txt` names the upstream tag the fork is based on, and the workflows fetch it from upstream when they need it. | Release workflow |
 
 ## Rules
 
@@ -173,7 +172,7 @@ const fn str_eq(a: &str, b: &str) -> bool {
 ## Repository settings (admin)
 
 - Default branch `main`; branch protection: pull request required, status checks `ci success` and `semver-checks` required, force-push allowed for admins only (the base-line move needs it).
-- Tag ruleset for `v*-mega.*` that restricts update and deletion only, not creation: the release workflow creates those tags with the Actions token, which cannot bypass a creation restriction. No protection on upstream `v<N>` tags; the nightly workflow pushes them with the same token.
+- Tag ruleset for `v*-mega.*` that restricts update and deletion only, not creation: the release workflow creates those tags with the Actions token, which cannot bypass a creation restriction.
 - Actions enabled; status checks `require-labels` and `upstream touch points` required alongside `ci success` and `semver-checks`.
 - Repository description points at this file.
 - Secrets and variables the review bots need: repository secret `CLAUDE_CODE_OAUTH_TOKEN`; the organisation secret `MEGA_MAXWELL_PK` and variable `MEGA_MAXWELL_CLIENT_ID` granted to this repository; the `mega-maxwell` GitHub App installed on this repository (it is the identity the PR reviewer resolves threads and the release workflows push under).
@@ -191,7 +190,7 @@ git branch release/v40 v40.0.3-mega.N          # keep the old line reachable
 git rebase --onto v113 v112 main               # replay the mega: commits
 echo v113 > scripts/mega/base.txt              # and update the crate table versions
 # resolve conflicts, run the CI jobs locally, check a consumer against the result (see Consumer wiring)
-git push --force-with-lease origin main v113 release/v40
+git push --force-with-lease origin main release/v40   # upstream tags stay upstream
 ```
 
 Then release `v41.0.0-mega.1`.
@@ -203,7 +202,7 @@ Consumers follow together with the `mega-reth` upgrade that triggered the move.
 |---|---|---|
 | `ci.yml` | PR, push to `main` | Stable test matrix (three feature sets), `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
 | `semver.yml` | PR, push to `main`, merge queue | `cargo semver-checks` of the twelve crates against their crates.io baseline; any major-level change fails. Required for releases, so keep the push trigger |
-| `nightly.yml` | daily | Upstream digest, fast-forward `upstream-main`, mirror upstream tags, full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
+| `nightly.yml` | daily | Upstream digest (core-crate commits and upstream tags cut since the last run, posted to the "Upstream digest" issue), fast-forward `upstream-main`, full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
 | `release.yml` | manual, `main` only | Require green `ci success` and `semver-checks` for the commit, check `FORK_TAG`, tag and publish a fork release |
 | `claude.yml` | PR, comments, issues | The shared MegaETH Claude actions: incremental PR review under the `mega-maxwell` identity (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
 | `pr-labels.yml` | PR | Exactly one `mega:` and one `api:` label |
