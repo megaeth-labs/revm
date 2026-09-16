@@ -36,7 +36,8 @@ It moves only when `mega-reth` moves its revm line.
 1. **Public API is a superset of upstream.**
    Do not change existing signatures, remove items, add trait methods without a default body, add variants to enums that downstream code matches exhaustively, change the meaning of existing accessors, or rename features.
    `reth`, `alloy-evm`, `op-revm` and `revm-inspectors` are compiled against this fork unmodified.
-   The `semver` workflow enforces it here; each consumer's own CI builds against the tagged fork.
+   The `Semver` workflow checks every pull request against its base; a deviation passes only with the `api:exception` label and a row in the "API exceptions" table below, which is the record consumers read.
+   Each consumer's own CI builds against the tagged fork.
 2. **Thin layer.**
    The fork adds hooks and data; it does not implement MegaETH semantics.
    If a change needs a design decision, it belongs in `mega-evm`.
@@ -79,7 +80,7 @@ Every pull request carries exactly one `mega:` label and one `api:` label; the `
 ## API exceptions
 
 Changes that break the superset rule, accepted because every consumer was checked against them.
-The `Semver` workflow reports them; this table is what makes a reported change acceptable.
+The `Semver` workflow reports a major-level change on the pull request that makes it and passes only when the pull request carries the `api:exception` label and adds the row here; the table is the complete list of ways this fork's public API differs from the crates.io baseline.
 
 | Crate | Item | Change | Consumers checked | PR |
 |---|---|---|---|---|
@@ -207,9 +208,9 @@ Consumers follow together with the `mega-reth` upgrade that triggered the move.
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `ci.yml` | PR, push to `main` | Test matrix (three feature sets) on the pinned toolchain, `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
-| `semver.yml` | PR, push to `main`, merge queue | `cargo semver-checks` of the twelve crates against their crates.io baseline; any major-level change fails. Required for releases, so keep the push trigger |
+| `semver.yml` | PR | `cargo semver-checks` of the twelve crates against the pull request base; a major-level change fails unless the PR carries `api:exception` and adds a row to the API exceptions table |
 | `nightly.yml` | daily | Upstream digest (core-crate commits and upstream tags cut since the last run, posted to the "Upstream digest" issue), fast-forward `upstream-main`, full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
-| `release.yml` | manual, `main` only | Require green `ci success` and `semver-checks` for the commit, check `FORK_TAG`, tag and publish a fork release |
+| `release.yml` | manual, `main` only | Require green `ci success` for the commit, check `FORK_TAG`, tag and publish a fork release |
 | `claude.yml` | PR, comments, issues | The shared MegaETH Claude actions: incremental PR review under the `mega-maxwell` identity (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
 | `pr-labels.yml` | PR | Exactly one `mega:` and one `api:` label |
 | `ci.yml` `touch-points` job | PR without the `mega:cherry-pick` label | Every modified upstream file has a row in the touch-point table (`scripts/mega/check-touch-points.sh`); cherry-picks are exempt because a rebase past the upstream commit drops them instead of re-applying them |

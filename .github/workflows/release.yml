@@ -25,8 +25,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-      # Releases are cut from main only, and only from a commit whose pull
-      # request checks and semver gate are green.
+      # Releases are cut from main only, and only from a commit whose checks
+      # are green. Semver is a pull-request gate (every PR is checked against
+      # its base), so it is not looked up on the main commit.
       - name: Require main and green checks
         env:
           GH_TOKEN: ${{ github.token }}
@@ -38,7 +39,7 @@ jobs:
           fi
           sha=$(git rev-parse HEAD)
           checks=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --paginate             --jq '.check_runs[] | "\(.name)=\(.conclusion)"')
-          for name in "ci success" "semver-checks"; do
+          for name in "ci success"; do
             if ! grep -qxF "$name=success" <<< "$checks"; then
               echo "::error::check '$name' is not green for $sha"
               echo "$checks"
