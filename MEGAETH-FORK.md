@@ -28,7 +28,7 @@ It moves only when `mega-reth` moves its revm line.
 | `main` | Upstream history up to the baseline tag, then MegaETH commits on top, linear. `git log v112..main` is the whole fork diff. | PRs, CI green required |
 | `upstream-main` | Mirror of `bluealloy/revm` `main`. Fast-forwarded by the nightly workflow. Base for rebases and the upstream digest. | Bot only |
 | `release/v<N>` | Maintenance branch for an old base line, created from its last tag when `main` moves to a new base and a backport is needed. | PRs |
-| `archive/*` | Pre-2026 fork branches, read-only. | Nobody |
+| `refs/archive/<branch>` | The pre-2026 fork branches and the old bot branches, moved out of the branch list on 2026-09-16 so that only the live branches show. Not fetched by default; `git fetch origin '+refs/archive/*:refs/archive/*'` brings them back. | Nobody |
 | `v40.0.3-mega.N` | Fork releases, always on `main`. The only tags in this repository: upstream tags are not mirrored; `scripts/mega/base.txt` names the upstream tag the fork is based on, and the workflows fetch it from upstream when they need it. | Release workflow |
 
 ## Rules
@@ -53,7 +53,12 @@ It moves only when `mega-reth` moves its revm line.
 6. **`FORK_TAG` tracks the release.**
    `revm::megaeth::FORK_TAG` in `crates/revm/src/megaeth.rs` is bumped in the release commit.
    Consumers assert against it at compile time.
-7. **Consumers pin tagged commits only.**
+7. **The toolchain is pinned.**
+   `rust-toolchain.toml` names the compiler this repository is checked with, locally and in CI.
+   Upstream floats on `stable` and fixes each release's new clippy lints in its own code; the fork carries upstream code it does not edit, so a floating toolchain would fail CI on lints in code the fork must not touch.
+   The pin moves with each base-line move, or in a `mega:` commit of its own.
+   The MSRV consumers see is still `rust-version` in `Cargo.toml`.
+8. **Consumers pin tagged commits only.**
    `main` is rewritten when the base line moves, so an untagged commit may become unreachable.
    Nothing enforces this mechanically: `FORK_TAG` still holds the previous release's value on an untagged commit, so the compile-time guard below passes there.
 
@@ -189,6 +194,7 @@ git fetch upstream --tags
 git branch release/v40 v40.0.3-mega.N          # keep the old line reachable
 git rebase --onto v113 v112 main               # replay the mega: commits
 echo v113 > scripts/mega/base.txt              # and update the crate table versions
+# bump the channel in rust-toolchain.toml to the stable upstream's CI used at that tag
 # resolve conflicts, run the CI jobs locally, check a consumer against the result (see Consumer wiring)
 git push --force-with-lease origin main release/v40   # upstream tags stay upstream
 ```
@@ -200,7 +206,7 @@ Consumers follow together with the `mega-reth` upgrade that triggered the move.
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | PR, push to `main` | Stable test matrix (three feature sets), `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
+| `ci.yml` | PR, push to `main` | Test matrix (three feature sets) on the pinned toolchain, `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
 | `semver.yml` | PR, push to `main`, merge queue | `cargo semver-checks` of the twelve crates against their crates.io baseline; any major-level change fails. Required for releases, so keep the push trigger |
 | `nightly.yml` | daily | Upstream digest (core-crate commits and upstream tags cut since the last run, posted to the "Upstream digest" issue), fast-forward `upstream-main`, full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
 | `release.yml` | manual, `main` only | Require green `ci success` and `semver-checks` for the commit, check `FORK_TAG`, tag and publish a fork release |
