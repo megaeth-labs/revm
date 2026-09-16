@@ -6,22 +6,22 @@ concurrency:
 
 on:
   pull_request:
-  push:
-    branches: [main]
-  merge_group:
 
 env:
   CARGO_TERM_COLOR: always
 
-# The default token only needs to read this repository.
+# The default token reads this repository and the pull request's labels.
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
-  # The public API of this fork must stay a superset of the crates.io baseline.
-  # Every crate is compared against the version it was forked from; a
-  # major-level finding means a consumer that builds against crates.io would
-  # break, and fails the job.
+  # Rule 1: the public API of every published crate only grows. Each pull
+  # request is compared against its own base, so a change that removes or
+  # alters public API is caught where it is made. A deviation that was decided
+  # (an upstream change the fork takes as is) passes only with the
+  # `api:exception` label and a new row in the "API exceptions" table of
+  # MEGAETH-FORK.md; the table is the record consumers read.
   semver:
     name: semver-checks
     runs-on: ubuntu-latest
@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Read the pinned toolchain
         id: rust
         run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
@@ -44,25 +45,37 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgmp-dev
-      - name: Check every crate against its baseline
+      - name: Check every crate against the pull request base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           table=scripts/mega/crates.txt
+          base=$(git merge-base "$BASE_SHA" HEAD)
+          # Labels come from the API, not the event payload: a label added right
+          # after the pull request opened is missing from the `opened` payload.
+          if gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name' | grep -qx 'api:exception'; then
+            EXCEPTION=true
+          else
+            EXCEPTION=false
+          fi
+          echo "baseline: $base"
           expected=$(grep -cvE '^[[:space:]]*(#|$)' "$table")
           failed=""
           checked=0
           # `|| [ -n "$crate" ]` keeps a final record that lacks its newline.
           while read -r crate version dir || [ -n "$crate" ]; do
             case "$crate" in ''|\#*) continue ;; esac
-            echo "::group::$crate $version"
+            echo "::group::$crate"
             if cargo semver-checks check-release \
                  -p "$crate" \
-                 --baseline-version "$version" \
+                 --baseline-rev "$base" \
                  --release-type minor < /dev/null; then
               echo "::endgroup::"
             else
               echo "::endgroup::"
-              echo "::error::$crate has a major-level change against $version"
               failed="$failed $crate"
             fi
             checked=$((checked + 1))
@@ -71,8 +84,27 @@ jobs:
             echo "::error::checked $checked crates but the table lists $expected"
             exit 1
           fi
-          if [ -n "$failed" ]; then
-            echo "major-level changes found in:$failed" >&2
+          if [ -z "$failed" ]; then
+            echo "all $checked crates keep their public API a superset of the base"
+            exit 0
+          fi
+          # A major-level change needs the label and a registered row.
+          rows() {
+            git show "$1:MEGAETH-FORK.md" \
+              | awk '/^## API exceptions/{f=1; next} /^## /{f=0} f && /^\| /' \
+              | grep -cvE '^\| (Crate|---)' || true
+          }
+          before=$(rows "$base")
+          after=$(rows HEAD)
+          if [ "$EXCEPTION" != "true" ]; then
+            echo "::error::major-level API changes in:$failed. Register each in the API exceptions table of MEGAETH-FORK.md and label the pull request api:exception, or revert the change."
             exit 1
           fi
-          echo "all $checked crates are a superset of their baseline"
+          if [ "$after" -le "$before" ]; then
+            echo "::error::the pull request is labelled api:exception but adds no row to the API exceptions table of MEGAETH-FORK.md ($before rows before, $after after)"
+            exit 1
+          fi
+          for crate in $failed; do
+            echo "::warning::$crate has a registered major-level API change against the base"
+          done
+          echo "accepted: api:exception with $((after - before)) new row(s) in the exceptions table"
