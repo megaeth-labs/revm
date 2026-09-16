@@ -58,6 +58,28 @@ It moves only when `mega-reth` moves its revm line.
    `main` is rewritten when the base line moves, so an untagged commit may become unreachable.
    Nothing enforces this mechanically: `FORK_TAG` still holds the previous release's value on an untagged commit, so the compile-time guard below passes there.
 
+## Labels
+
+Every pull request carries exactly one `mega:` label and one `api:` label; the `PR Labels` workflow refuses to merge without them and the Claude label check judges whether they fit the diff.
+
+| Label | Meaning |
+|---|---|
+| `mega:cherry-pick` | Upstream commits brought into the fork unchanged apart from recorded conflicts |
+| `mega:hook` | A hook or data field added in the thin layer |
+| `mega:vendor` | A vendored crate (`crates/op-revm`) added or updated |
+| `mega:ci` | Workflows, `scripts/mega`, the fork documents |
+| `mega:rebase` | The base line moves to a new upstream tag |
+| `api:superset` | The public API stays a superset of the baseline (the default) |
+| `api:exception` | A registered exception to rule 1; the PR adds a row to the table below |
+
+## API exceptions
+
+Changes that break the superset rule, accepted because every consumer was checked against them.
+The `Semver` workflow reports them; this table is what makes a reported change acceptable.
+
+| Crate | Item | Change | Consumers checked | PR |
+|---|---|---|---|---|
+
 ## Upstream touch points
 
 Files that both upstream and the fork edit.
@@ -152,8 +174,11 @@ const fn str_eq(a: &str, b: &str) -> bool {
 
 - Default branch `main`; branch protection: pull request required, status checks `ci success` and `semver-checks` required, force-push allowed for admins only (the base-line move needs it).
 - Tag ruleset for `v*-mega.*` that restricts update and deletion only, not creation: the release workflow creates those tags with the Actions token, which cannot bypass a creation restriction. No protection on upstream `v<N>` tags; the nightly workflow pushes them with the same token.
-- Actions enabled.
+- Actions enabled; status checks `require-labels` and `upstream touch points` required alongside `ci success` and `semver-checks`.
 - Repository description points at this file.
+- Secrets and variables the review bots need: repository secret `CLAUDE_CODE_OAUTH_TOKEN`; the organisation secret `MEGA_MAXWELL_PK` and variable `MEGA_MAXWELL_CLIENT_ID` granted to this repository; the `mega-maxwell` GitHub App installed on this repository (it is the identity the PR reviewer resolves threads and the release workflows push under).
+- The Codex reviewer (`chatgpt-codex-connector`) is an organisation-level app; this repository must be added to its repository access in the ChatGPT settings, nothing in the repository configures it.
+- Labels from the table above created with `gh label create`.
 
 ## Moving to a new upstream base
 
@@ -180,3 +205,6 @@ Consumers follow together with the `mega-reth` upgrade that triggered the move.
 | `semver.yml` | PR, push to `main`, merge queue | `cargo semver-checks` of the twelve crates against their crates.io baseline; any major-level change fails. Required for releases, so keep the push trigger |
 | `nightly.yml` | daily | Upstream digest, fast-forward `upstream-main`, mirror upstream tags, full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
 | `release.yml` | manual, `main` only | Require green `ci success` and `semver-checks` for the commit, check `FORK_TAG`, tag and publish a fork release |
+| `claude.yml` | PR, comments, issues | The shared MegaETH Claude actions: incremental PR review under the `mega-maxwell` identity (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
+| `pr-labels.yml` | PR | Exactly one `mega:` and one `api:` label |
+| `ci.yml` `touch-points` job | PR without the `mega:cherry-pick` label | Every modified upstream file has a row in the touch-point table (`scripts/mega/check-touch-points.sh`); cherry-picks are exempt because a rebase past the upstream commit drops them instead of re-applying them |

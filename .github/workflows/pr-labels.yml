@@ -1,0 +1,47 @@
+name: PR Labels
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+# The deterministic half of the label convention (the "Labels" section of
+# MEGAETH-FORK.md): every pull request carries exactly one `mega:` label and
+# one `api:` label. The Claude label check judges whether the labels fit the
+# diff; this job only refuses to merge without them.
+jobs:
+  require-labels:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Check for required labels
+        if: github.event.pull_request.user.login != 'mega-maxwell[bot]'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          labels=$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')
+          fail=0
+          mega=$(echo "$labels" | grep -c '^mega:' || true)
+          api=$(echo "$labels" | grep -c '^api:' || true)
+          if [ "$mega" -ne 1 ]; then
+            echo "::error::PR must carry exactly one mega: label (mega:cherry-pick, mega:hook, mega:vendor, mega:ci, mega:rebase); found $mega"
+            fail=1
+          fi
+          if [ "$api" -ne 1 ]; then
+            echo "::error::PR must carry exactly one api: label (api:superset, api:exception); found $api"
+            fail=1
+          fi
+          if [ "$fail" -eq 1 ]; then
+            echo ""
+            echo "Current labels:"
+            echo "$labels"
+            echo ""
+            echo "Available labels:"
+            gh label list --repo "$REPO"
+            exit 1
+          fi
+          echo "Labels OK:"
+          echo "$labels"
