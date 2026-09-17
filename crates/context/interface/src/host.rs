@@ -71,7 +71,7 @@ pub trait Host {
 
     /// Returns whether Amsterdam opcodes are enabled independently of the spec id.
     ///
-    /// Default is `false`. The context implementation forwards [`Cfg::enable_amsterdam_opcodes`].
+    /// Default is `false`. The context implementation forwards [`crate::Cfg::enable_amsterdam_opcodes`].
     #[inline]
     fn enable_amsterdam_opcodes(&self) -> bool {
         false

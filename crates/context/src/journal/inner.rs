@@ -40,10 +40,6 @@ pub struct JournalCfg {
     /// [EIP-161]: https://eips.ethereum.org/EIPS/eip-161
     /// [EIP-6780]: https://eips.ethereum.org/EIPS/eip-6780
     pub spec: SpecId,
-    /// Whether Amsterdam opcodes (and the EIP-7708 journal path they share) are enabled
-    /// independently of [`JournalCfg::spec`].
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub enable_amsterdam_opcodes: bool,
     /// Whether EIP-7708 (ETH transfers emit logs) is disabled.
     pub eip7708_disabled: bool,
     /// Whether the EIP-8246 delayed clearing of self-destructed accounts is disabled.
@@ -346,7 +342,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     /// Enables Amsterdam opcodes independently of the spec id.
     #[inline]
     pub const fn set_amsterdam_opcodes_enabled(&mut self, enabled: bool) {
-        self.cfg.enable_amsterdam_opcodes = enabled;
+        self.warm_addresses.set_amsterdam_opcodes_enabled(enabled);
     }
 
     /// Whether EIP-7708 transfer logs should be emitted.
@@ -355,7 +351,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     /// and EIP-7708 itself is not disabled.
     #[inline]
     const fn eip7708_active(&self) -> bool {
-        (self.cfg.spec.is_enabled_in(AMSTERDAM) || self.cfg.enable_amsterdam_opcodes)
+        (self.cfg.spec.is_enabled_in(AMSTERDAM) || self.warm_addresses.amsterdam_opcodes_enabled())
             && !self.cfg.eip7708_disabled
     }
 
