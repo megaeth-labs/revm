@@ -236,6 +236,18 @@ pub trait Handler {
     /// moved to the state-gas reservoir, as EIP-8037 specifies for system calls:
     /// `GAS` inside a system contract then reports the regular budget only.
     ///
+    /// The runtime out-of-gas fallback ([`Handler::runtime_oog_result`])
+    /// rebuilds the tracker through [`Handler::tx_gas`], without this split. A
+    /// system call cannot reach that fallback today. For a call, first-frame
+    /// creation ([`Handler::first_frame_input`]) charges state gas only when
+    /// the call carries value to an empty account, and a system call carries
+    /// no value. The other first-frame charge, the access to an EIP-7702
+    /// delegation target, fits in the regular budget. A handler that overrides
+    /// [`Handler::first_frame_input`] so that a system call can run out of gas
+    /// there must also override [`Handler::run_system_call`], and its inspector
+    /// counterpart, so that the fallback rebuilds the tracker with
+    /// `system_call_gas`.
+    ///
     /// [`SYSTEM_MAX_SSTORES_PER_CALL`]: crate::system_call::SYSTEM_MAX_SSTORES_PER_CALL
     #[inline]
     fn system_call_gas(&self, evm: &mut Self::Evm) -> GasTracker {
