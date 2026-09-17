@@ -1635,8 +1635,11 @@ impl GasId {
     /// Zero on every schedule defined here, which is what makes the charge site in
     /// `return_create` inert. A chain that prices history bytes overrides it. The charge sits
     /// beside the EIP-8037 code-deposit state charge, so it is made only where EIP-8037 is enabled.
+    ///
+    /// A fork id, so it is allocated from the top of the table: upstream numbers its ids upward
+    /// from 1, and its next one must not land on this entry.
     pub const fn code_deposit_history_gas() -> GasId {
-        Self::new(50)
+        Self::new(255)
     }
 }
 
@@ -1676,6 +1679,7 @@ mod tests {
     #[test]
     fn test_gas_id_name_and_from_str_coverage() {
         let mut unique_names = HashSet::new();
+        let mut named_ids = HashSet::new();
         let mut known_gas_ids = 0;
 
         // Iterate over all possible GasId values (0..256)
@@ -1686,6 +1690,7 @@ mod tests {
             // Count unique names (excluding "unknown")
             if name != "unknown" {
                 unique_names.insert(name);
+                named_ids.insert(i);
             }
         }
 
@@ -1708,7 +1713,11 @@ mod tests {
             "Not all unique names are resolvable via from_str"
         );
 
-        // We should have exactly 50 known GasIds (based on the indices 1-50 used)
+        // The known GasIds are upstream's indices 1-49 (0 is unused) plus the fork's
+        // `code_deposit_history_gas` at 255, allocated from the top of the table so upstream's
+        // next sequential id does not collide with it. Every one of them has a name.
+        let expected_ids: HashSet<u8> = (1..=49).chain([255]).collect();
+        assert_eq!(named_ids, expected_ids);
         assert_eq!(
             unique_names.len(),
             50,
