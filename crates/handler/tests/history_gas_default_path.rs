@@ -2,8 +2,8 @@
 //!
 //! Every schedule here prices deposited code's history bytes at zero, and nothing in this
 //! workspace books history gas otherwise, so representative transactions report the gas they
-//! reported before the component existed. The expected figures were taken from `main` at
-//! `f120e3ed`, the commit this component was built on.
+//! reported before the component existed. The expected figures are what `main` at `83a92949`,
+//! the commit this component sits on, reports.
 
 use bytecode::opcode::{
     CALL, CODECOPY, CREATE, INVALID, LOG1, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH3, PUSH32,
@@ -30,8 +30,11 @@ const REVERTING_CHILD: Address = address!("0x00000000000000000000000000000000000
 const HALTING_CHILD: Address = address!("0x000000000000000000000000000000000000c1fe");
 
 const GAS_LIMIT: u64 = 3_000_000;
-/// Below [`GAS_LIMIT`] on Amsterdam, so the transactions there start with a reservoir.
-const AMSTERDAM_CAP: u64 = 2_000_000;
+/// The reservoir an Amsterdam transaction starts with: its cap is set this far below
+/// [`GAS_LIMIT`], and neither transaction here pays state gas in its intrinsic cost.
+const RESERVOIR: u64 = 1_000_000;
+/// A reservoir too small for either transaction's state gas, so the rest spills.
+const SHORT_RESERVOIR: u64 = 300_000;
 
 const fn sstore(slot: u8, value: u8) -> [u8; 5] {
     [PUSH1, value, PUSH1, slot, SSTORE]
@@ -106,13 +109,13 @@ fn db() -> Db {
     db
 }
 
-fn transact(spec: SpecId, kind: TxKind, data: Vec<u8>) -> ExecutionResult {
+fn transact(spec: SpecId, reservoir: u64, kind: TxKind, data: Vec<u8>) -> ExecutionResult {
     let mut evm = Context::mainnet()
         .with_db(db())
         .modify_cfg_chained(|cfg| {
             cfg.set_spec_and_mainnet_gas_params(spec);
             if spec == SpecId::AMSTERDAM {
-                cfg.tx_gas_limit_cap = Some(AMSTERDAM_CAP);
+                cfg.tx_gas_limit_cap = Some(GAS_LIMIT - reservoir);
             }
         })
         .build_mainnet();
@@ -125,24 +128,55 @@ fn transact(spec: SpecId, kind: TxKind, data: Vec<u8>) -> ExecutionResult {
     evm.transact(tx).expect("transaction runs").result
 }
 
-/// `(spec, the call's gas, the create's gas)`, as `main` reported them.
+/// `(spec, the reservoir, the call's gas, the create's gas)`, as `main` reports them.
 ///
-/// `ResultGas::new_with_state_gas(total_gas_spent, refunded, floor_gas, state_gas_spent)`.
-const EXPECTED: [(SpecId, ResultGas, ResultGas); 3] = [
+/// `ResultGas::new_with_state_gas(total_gas_spent, refunded, floor_gas, state_gas_spent)`,
+/// then `reservoir_remaining`: the reservoir the transaction started with, less the state gas it
+/// drew. Before Amsterdam there is neither (no cap below [`GAS_LIMIT`], no state gas price).
+///
+/// Amsterdam state gas: 97,920 a slot, 183,600 a new account, 1,530 a deposited byte.
+/// - The call draws 526,320: slot 2 and the successful child's slot (slot 1's restore refills
+///   its charge, and the reverting and halting children's charges are rolled back), then
+///   `CREATE`'s account, the initcode's slot and 32 deposited bytes:
+///   `2 × 97,920 + 183,600 + 97,920 + 32 × 1,530`.
+/// - The create draws 330,480: its account, the initcode's slot and 32 deposited bytes:
+///   `183,600 + 97,920 + 32 × 1,530`.
+///
+/// With [`SHORT_RESERVOIR`] each transaction draws the reservoir dry and the rest of its state
+/// gas spills onto regular gas, so the reservoir ends at 0 and every other figure stays as it
+/// is with [`RESERVOIR`]. None of it spills inside a child's 100,000: the reservoir holds at
+/// least `300,000 − 2 × 97,920 = 104,160` whenever a child writes its slot, and runs dry at
+/// `CREATE`.
+const EXPECTED: [(SpecId, u64, ResultGas, ResultGas); 4] = [
     (
         SpecId::PRAGUE,
-        ResultGas::new_with_state_gas(278_968, 19_900, 21_000, 0),
-        ResultGas::new_with_state_gas(82_218, 0, 22_730, 0),
+        0,
+        ResultGas::new_with_state_gas(278_968, 19_900, 21_000, 0).with_reservoir_remaining(0),
+        ResultGas::new_with_state_gas(82_218, 0, 22_730, 0).with_reservoir_remaining(0),
     ),
     (
         SpecId::OSAKA,
-        ResultGas::new_with_state_gas(278_968, 19_900, 21_000, 0),
-        ResultGas::new_with_state_gas(82_218, 0, 22_730, 0),
+        0,
+        ResultGas::new_with_state_gas(278_968, 19_900, 21_000, 0).with_reservoir_remaining(0),
+        ResultGas::new_with_state_gas(82_218, 0, 22_730, 0).with_reservoir_remaining(0),
     ),
     (
         SpecId::AMSTERDAM,
-        ResultGas::new_with_state_gas(724_094, 10_000, 15_000, 526_320),
-        ResultGas::new_with_state_gas(367_304, 0, 26_816, 330_480),
+        RESERVOIR,
+        // 1,000,000 − 526,320
+        ResultGas::new_with_state_gas(724_094, 10_000, 15_000, 526_320)
+            .with_reservoir_remaining(473_680),
+        // 1,000,000 − 330,480
+        ResultGas::new_with_state_gas(367_304, 0, 26_816, 330_480)
+            .with_reservoir_remaining(669_520),
+    ),
+    (
+        SpecId::AMSTERDAM,
+        SHORT_RESERVOIR,
+        // 300,000 − 526,320 < 0: 226,320 spills.
+        ResultGas::new_with_state_gas(724_094, 10_000, 15_000, 526_320).with_reservoir_remaining(0),
+        // 300,000 − 330,480 < 0: 30,480 spills.
+        ResultGas::new_with_state_gas(367_304, 0, 26_816, 330_480).with_reservoir_remaining(0),
     ),
 ];
 
@@ -159,24 +193,24 @@ fn test_no_schedule_prices_deposited_code_as_history() {
 
 #[test]
 fn test_result_gas_is_what_main_reported() {
-    for (spec, call_gas, create_gas) in EXPECTED {
-        let call = transact(spec, TxKind::Call(CONTRACT), Vec::new());
+    for (spec, reservoir, call_gas, create_gas) in EXPECTED {
+        let call = transact(spec, reservoir, TxKind::Call(CONTRACT), Vec::new());
         let ExecutionResult::Success { gas, logs, .. } = &call else {
-            panic!("{spec:?} call succeeds: {call:?}");
+            panic!("{spec:?} {reservoir} call succeeds: {call:?}");
         };
         assert_eq!(logs.len(), 1, "{spec:?}");
-        assert_eq!(*gas, call_gas, "{spec:?} call");
+        assert_eq!(*gas, call_gas, "{spec:?} {reservoir} call");
 
-        let create = transact(spec, TxKind::Create, initcode());
+        let create = transact(spec, reservoir, TxKind::Create, initcode());
         let ExecutionResult::Success {
             gas,
             output: Output::Create(code, Some(_)),
             ..
         } = &create
         else {
-            panic!("{spec:?} create succeeds: {create:?}");
+            panic!("{spec:?} {reservoir} create succeeds: {create:?}");
         };
         assert_eq!(code.len(), 32, "{spec:?}");
-        assert_eq!(*gas, create_gas, "{spec:?} create");
+        assert_eq!(*gas, create_gas, "{spec:?} {reservoir} create");
     }
 }
