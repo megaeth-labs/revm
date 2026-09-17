@@ -85,8 +85,15 @@ impl<R, S> ExecResultAndState<R, S> {
 ///
 /// An [`ExecutionResult`] cannot tell that history gas apart. A block-level consumer that
 /// budgets regular gas against a block limit must read the settled transaction's history counter
-/// ([`GasTracker::history_gas_spent`]), for example from a `Handler` override, and subtract it
-/// from `block_regular_gas_used()`.
+/// ([`GasTracker::history_gas_spent`]), for example from a `Handler` override, and compute the
+/// regular component itself as `max(total_gas_spent − state_gas_spent − history, floor_gas)`,
+/// with saturating subtraction. History has to come out before the floor is applied, not after:
+/// `block_regular_gas_used()` has already applied the floor, so subtracting history from it can
+/// land below the floor. For example, a call on Amsterdam that carries 500 non-zero calldata
+/// bytes, spends 23,003 regular gas and pays a 50,000 history charge from the reservoir reports
+/// `total_gas_spent = 73,003`, `state_gas_spent = 0` and `floor_gas = 47,000`. Its regular
+/// component is `max(73,003 − 0 − 50,000, 47,000) = 47,000`, but
+/// `block_regular_gas_used() − 50,000` gives 23,003, below the floor.
 ///
 /// [`GasTracker::record_history_cost`]: crate::cfg::gas::GasTracker::record_history_cost
 /// [`GasTracker::history_gas_spent`]: crate::cfg::gas::GasTracker::history_gas_spent
@@ -344,8 +351,12 @@ impl ResultGas {
     /// History gas is not subtracted, since `ResultGas` does not record it, so
     /// this value includes it. If the history charge was paid from the reservoir,
     /// the value can exceed the transaction's regular gas cap. A consumer that
-    /// budgets regular gas against a block limit must subtract the settled
-    /// tracker's history counter itself (see [History gas](ResultGas#history-gas)).
+    /// budgets regular gas against a block limit must not subtract the settled
+    /// tracker's history counter from this value, because the floor is already
+    /// applied here and the difference can fall below it. It must compute
+    /// `max(total_gas_spent - state_gas_spent - history, floor_gas)` itself,
+    /// with saturating subtraction, taking history out before the floor (see
+    /// [History gas](ResultGas#history-gas)).
     #[inline]
     pub const fn block_regular_gas_used(&self) -> u64 {
         max(

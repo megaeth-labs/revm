@@ -6,6 +6,15 @@ use primitives::hardfork::SpecId;
 /// Tracker for gas during execution.
 ///
 /// This is used to track the gas during execution.
+///
+/// The net counters (`state_gas_spent`, `history_gas_spent`) are `i64`, while charges and refills
+/// take `u64` amounts and convert them with saturation. The tracker assumes that the transaction
+/// gas limit, and so any single charge or refill and the state plus history net a rollback adds
+/// back, is at most `i64::MAX`. Upstream's state gas accounting assumes the same bound
+/// ([`record_state_cost`](Self::record_state_cost) converts the charge with `as i64`). Nothing
+/// checks it. Above it, a rollback no longer restores the reservoir exactly and can burn or mint
+/// gas at the boundary. Reaching it takes a transaction gas limit above `i64::MAX`
+/// (about 9.2 × 10^18).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GasTracker {
