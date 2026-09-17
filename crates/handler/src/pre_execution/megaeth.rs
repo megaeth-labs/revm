@@ -30,8 +30,10 @@ impl Eip7702AuthFacts {
     ///
     /// The list is buffered rather than streamed because the loop hands the whole context to the
     /// pricing hook. Each entry is 88 bytes, and every authorization has already paid at least
-    /// the per-authorization intrinsic gas (7,816 under EIP-2780), so the buffer is proportional
-    /// to gas the sender paid.
+    /// the per-authorization intrinsic gas ([`EIP7702_PER_AUTH_BASE_REGULAR`], 7,816, under
+    /// EIP-2780), so the buffer is proportional to gas the sender paid.
+    ///
+    /// [`EIP7702_PER_AUTH_BASE_REGULAR`]: primitives::eip8038::EIP7702_PER_AUTH_BASE_REGULAR
     pub fn collect(tx: &impl Transaction, chain_id: u64) -> Vec<Self> {
         let chain_id = U256::from(chain_id);
         tx.authorization_list()
