@@ -20,7 +20,7 @@ It is read by the automated reviewer as well as by people.
 | Label | Look for |
 |---|---|
 | `mega:cherry-pick` | The commit message names the upstream commit (`chore: cherry-pick upstream <sha> — <title>`); the diff equals the upstream diff apart from conflicts the message records; nothing MegaETH-specific rides along |
-| `mega:hook` | New logic in new files where practical; upstream files get a `mod` line or a call site; a default implementation keeps existing behaviour byte for byte; serde-skipped fields keep encodings unchanged |
+| `mega:hook` | New logic in new files where practical; upstream files get a `mod` line or a call site; a default implementation keeps existing behaviour byte for byte; a new serialized field carries `serde(default)` so payloads that predate it still decode |
 | `mega:vendor` | The vendored crate keeps its upstream version number and a note of the upstream commit it was taken from; its own tests run in CI |
 | `mega:ci` | Workflows pin action SHAs; nothing requires a secret the repository does not have; the local equivalent of every job is documented |
 | `mega:rebase` | `scripts/mega/base.txt` and the baseline table move together; every fork commit was replayed; the semver baseline versions were updated |
