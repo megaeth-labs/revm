@@ -298,22 +298,28 @@ impl Run {
     }
 }
 
-/// An Amsterdam context whose schedule charges `history_per_byte` for deposited code.
-fn amsterdam(db: Db, history_per_byte: u64) -> TestContext {
+/// A context on `spec` whose schedule charges `history_per_byte` for deposited code.
+fn context(db: Db, spec: SpecId, history_per_byte: u64) -> TestContext {
     Context::mainnet().with_db(db).modify_cfg_chained(|cfg| {
-        cfg.set_spec_and_mainnet_gas_params(SpecId::AMSTERDAM);
+        cfg.set_spec_and_mainnet_gas_params(spec);
         cfg.tx_gas_limit_cap = Some(REGULAR_CAP);
         cfg.gas_params
             .override_gas([(GasId::code_deposit_history_gas(), history_per_byte)]);
     })
 }
 
+/// An Amsterdam context whose schedule charges `history_per_byte` for deposited code.
+fn amsterdam(db: Db, history_per_byte: u64) -> TestContext {
+    context(db, SpecId::AMSTERDAM, history_per_byte)
+}
+
 fn run(ctx: TestContext, tx: TxEnv) -> Run {
-    let mut instructions = EthInstructions::new_mainnet_with_spec(SpecId::AMSTERDAM);
+    let spec = ctx.cfg.spec;
+    let mut instructions = EthInstructions::new_mainnet_with_spec(spec);
     instructions.insert_instruction(CHARGE_HISTORY, Instruction::new(charge_history), 0);
     instructions.insert_instruction(REFILL_HISTORY, Instruction::new(refill_history), 0);
     instructions.insert_instruction(CHARGE_STATE, Instruction::new(charge_state), 0);
-    let mut evm: TestEvm = Evm::new(ctx, instructions, EthPrecompiles::new(SpecId::AMSTERDAM));
+    let mut evm: TestEvm = Evm::new(ctx, instructions, EthPrecompiles::new(spec));
     evm.ctx.set_tx(tx);
 
     let mut observer = Observer::default();
@@ -483,6 +489,64 @@ fn test_a_reverting_frame_that_refilled_its_callers_state_gas_returns_the_inheri
     assert_eq!(charged.total(), uncharged.total());
 }
 
+/// State and history refills credit one shared spill counter, so a refill of one kind can return
+/// regular gas a charge of the other kind spilled. A frame that does this and then reverts still
+/// hands its caller the reservoir it inherited and the regular gas it was lent.
+#[test]
+fn test_a_reverting_frame_whose_refill_took_the_other_kinds_spill_returns_the_inherited_reservoir()
+{
+    // (child, the same child charging nothing, the child's counters as it reverts)
+    let rows = [
+        // The write leaves 2,080 of the reservoir. The history charge takes them and spills
+        // 47,920. Clearing the slot refills 97,920 state gas: the 47,920 the history charge
+        // spilled go back to regular gas and 50,000 to the reservoir.
+        (
+            Code::default()
+                .sstore(1)
+                .charge_history(HISTORY)
+                .sstore(0)
+                .revert(),
+            Code::default()
+                .sstore(1)
+                .charge_history(0)
+                .sstore(0)
+                .revert(),
+            (50_000, 0, HISTORY as i64, 0),
+        ),
+        // The history charge leaves 50,000 of the reservoir. The write takes them and spills
+        // 47,920. Refilling 20,000 history gas returns 20,000 of the write's spill to regular gas.
+        (
+            Code::default()
+                .charge_history(HISTORY)
+                .sstore(1)
+                .refill_history(20_000)
+                .revert(),
+            Code::default()
+                .charge_history(0)
+                .sstore(1)
+                .refill_history(0)
+                .revert(),
+            (0, SSTORE_SET as i64, 30_000, 27_920),
+        ),
+    ];
+
+    for (child, uncharged_child, reverting) in rows {
+        let charged = call(Code::default().call(CHILD).op(STOP), child);
+        let uncharged = call(Code::default().call(CHILD).op(STOP), uncharged_child);
+
+        let returned = charged.child();
+        assert_eq!(returned.result, InstructionResult::Revert);
+        assert_eq!(counters(&returned.gas), reverting);
+        assert_eq!(unwound_reservoir(&returned.gas), RESERVOIR as i64);
+
+        // The rollback ran: the caller holds the reservoir it lent and nothing the child charged.
+        assert_eq!(counters(&charged.settled), (RESERVOIR, 0, 0, 0));
+        assert_eq!(charged.settled.remaining(), uncharged.settled.remaining());
+        assert_eq!(charged.gas().reservoir_remaining(), RESERVOIR);
+        assert_eq!(charged.total(), uncharged.total());
+    }
+}
+
 /// A halting frame gives the reservoir back and burns all its regular gas, including what its
 /// charges spilled: it costs its caller the gas forwarded to it and nothing more.
 #[test]
@@ -513,6 +577,73 @@ fn test_a_halting_frame_returns_the_reservoir_and_burns_its_regular_gas() {
         halts_at_once.settled.remaining()
     );
     assert_eq!(charged.total(), halts_at_once.total());
+}
+
+/// The first frame settles into the transaction the same way. When a created contract's initcode
+/// charges history gas and halts, the transaction refills the create's upfront state charge and
+/// then burns its regular gas again, spill included: it keeps its whole reservoir and spends all
+/// of its regular gas, whatever the history charge took.
+#[test]
+fn test_a_halting_first_frame_returns_the_reservoir_and_burns_its_regular_gas() {
+    // (reservoir, history charged, the first frame's counters as it halts)
+    let rows = [
+        // The create's 183,600 state gas spills 83,600 onto regular gas, so the frame inherits
+        // no reservoir and the whole history charge spills.
+        (RESERVOIR, HISTORY, (0, 0, HISTORY as i64, HISTORY)),
+        // The create's state gas leaves 816,400 of the reservoir. The history charge takes them
+        // and spills 83,600.
+        (1_000_000, 900_000, (0, 0, 900_000, 83_600)),
+    ];
+
+    for (reservoir, history, halting) in rows {
+        let create = |amount| {
+            run(
+                amsterdam(db(Code::default(), Code::default()), 0),
+                tx(
+                    TxKind::Create,
+                    Code::default().charge_history(amount).op(INVALID).0,
+                    REGULAR_CAP + reservoir,
+                ),
+            )
+        };
+        let charged = create(history);
+        let uncharged = create(0);
+
+        let [returned] = charged.returned.as_slice() else {
+            panic!("only the create frame ran: {:?}", charged.returned);
+        };
+        assert_eq!(returned.result, InstructionResult::InvalidFEOpcode);
+        assert_eq!(counters(&returned.gas), halting);
+        assert_eq!(
+            unwound_reservoir(&returned.gas),
+            reservoir.saturating_sub(NEW_ACCOUNT) as i64,
+            "the reservoir the frame inherited"
+        );
+
+        assert_eq!(counters(&charged.settled), (reservoir, 0, 0, 0));
+        assert_eq!(charged.settled.remaining(), 0, "the spills are burned too");
+        assert!(
+            matches!(
+                charged.result,
+                ExecutionResult::Halt {
+                    reason: HaltReason::InvalidFEOpcode,
+                    ..
+                }
+            ),
+            "{:?}",
+            charged.result
+        );
+        // Everything but the reservoir is spent.
+        assert_eq!(charged.total(), REGULAR_CAP);
+        assert_eq!(charged.gas().reservoir_remaining(), reservoir);
+        assert_eq!(charged.gas(), uncharged.gas());
+        assert!(charged
+            .state
+            .get(&BENCH_CALLER.create(0))
+            .is_none_or(|account| {
+                !account.is_created() && account.info.code_hash == KECCAK_EMPTY
+            }));
+    }
 }
 
 /// With a schedule that prices history bytes, deposited code pays `len × price` as history gas
@@ -637,6 +768,52 @@ fn test_a_deposit_that_cannot_pay_its_history_gas_runs_out_of_gas() {
         "{:?}",
         short.state.get(&created)
     );
+}
+
+/// The deposit charge is made only where EIP-8037 is enabled: on Osaka, a schedule that prices
+/// history bytes charges deposited code nothing, while on Amsterdam the same price is charged.
+#[test]
+fn test_a_deposit_is_not_charged_history_gas_without_eip8037() {
+    let create = |spec: SpecId, history_per_byte, gas_limit| {
+        let ctx = context(db(Code::default(), Code::default()), spec, history_per_byte);
+        assert_eq!(
+            ctx.cfg.is_amsterdam_eip8037_enabled(),
+            spec == SpecId::AMSTERDAM
+        );
+        assert_eq!(
+            ctx.cfg
+                .gas_params
+                .code_deposit_history_gas(CODE_LEN as usize),
+            CODE_LEN * history_per_byte
+        );
+        run(ctx, tx(TxKind::Create, initcode(), gas_limit))
+    };
+    // Without EIP-8037 there is no reservoir, so the gas limit stays within the cap.
+    let priced = create(SpecId::OSAKA, HISTORY_PER_BYTE, REGULAR_CAP);
+    let unpriced = create(SpecId::OSAKA, 0, REGULAR_CAP);
+
+    let [frame] = priced.returned.as_slice() else {
+        panic!("only the create frame ran: {:?}", priced.returned);
+    };
+    assert_eq!(frame.result, InstructionResult::Return);
+    assert_eq!(frame.gas.history_gas_spent(), 0);
+    assert_eq!(priced.settled.history_gas_spent(), 0);
+    assert_eq!(priced.settled, unpriced.settled);
+    assert_eq!(priced.gas(), unpriced.gas());
+
+    let ExecutionResult::Success {
+        output: Output::Create(code, Some(created)),
+        ..
+    } = &priced.result
+    else {
+        panic!("create succeeds: {:?}", priced.result);
+    };
+    assert_eq!(code.len() as u64, CODE_LEN);
+    assert_ne!(priced.state[created].info.code_hash, KECCAK_EMPTY);
+
+    // The price is live: the same schedule on Amsterdam charges it.
+    let amsterdam = create(SpecId::AMSTERDAM, HISTORY_PER_BYTE, REGULAR_CAP + 1_000_000);
+    assert_eq!(amsterdam.settled.history_gas_spent(), HISTORY_FOR_CODE);
 }
 
 /// A frame that takes back some of its own history charge gets the spilled regular gas back first
