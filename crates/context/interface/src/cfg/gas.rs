@@ -323,10 +323,13 @@ impl GasTracker {
     /// so the spilled gas is consumed while the reservoir is left untouched.
     #[inline]
     pub const fn rollback_state_gas(&mut self) {
+        // The two nets are summed before they meet the reservoir: a frame that took back a parent's
+        // state charge after its own history charge spilled holds less reservoir than its state
+        // net is negative, and adding the terms one at a time would clamp at zero part-way.
+        let charged = self.state_gas_spent.saturating_add(self.history_gas_spent);
         self.reservoir = self
             .reservoir
-            .saturating_add_signed(self.state_gas_spent)
-            .saturating_add_signed(self.history_gas_spent)
+            .saturating_add_signed(charged)
             .saturating_sub(self.state_gas_spilled);
         self.remaining = self.remaining.saturating_add(self.state_gas_spilled);
         self.state_gas_spent = 0;

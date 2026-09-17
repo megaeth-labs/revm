@@ -15,8 +15,8 @@
 //! [`Gas::record_state_cost`]: interpreter::Gas::record_state_cost
 
 use bytecode::opcode::{
-    CALL, CODECOPY, CREATE, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH32, PUSH4, RETURN,
-    REVERT, SSTORE, STOP,
+    CALL, CODECOPY, CREATE, DELEGATECALL, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH32,
+    PUSH4, RETURN, REVERT, SSTORE, STOP,
 };
 use context::{
     result::{EVMError, ExecutionResult, HaltReason, OutOfGasError, Output},
@@ -28,7 +28,7 @@ use interpreter::{
     interpreter::EthInterpreter, interpreter_action::FrameInit, GasTracker, Instruction,
     InstructionContext, InstructionExecResult, InstructionResult,
 };
-use primitives::{eip8037, hardfork::SpecId, Address, Bytes, TxKind, KECCAK_EMPTY, U256};
+use primitives::{address, eip8037, hardfork::SpecId, Address, Bytes, TxKind, KECCAK_EMPTY, U256};
 use revm_handler::{
     instructions::EthInstructions, post_execution, EthPrecompiles, EvmTr, ExecuteEvm, FrameResult,
     Handler, ItemOrResult, MainContext, MainnetContext, MainnetEvm,
@@ -43,9 +43,9 @@ type TestEvm = MainnetEvm<TestContext>;
 type TestError = EVMError<DbError>;
 
 /// Contract the transaction calls.
-const CONTRACT: Address = address(0xc0de);
+const CONTRACT: Address = address!("0x000000000000000000000000000000000000c0de");
 /// Contract [`CONTRACT`] calls.
-const CHILD: Address = address(0xc41d);
+const CHILD: Address = address!("0x000000000000000000000000000000000000c41d");
 
 /// Books the popped amount as history gas; out of gas if the budget cannot pay it.
 const CHARGE_HISTORY: u8 = 0x0c;
@@ -77,14 +77,6 @@ const CODE_LEN: u64 = 32;
 const HISTORY_PER_BYTE: u64 = 1_000;
 /// State gas for depositing [`CODE_LEN`] bytes on the flat Amsterdam schedule.
 const CODE_STATE: u64 = CODE_LEN * eip8037::CODE_DEPOSIT_PER_BYTE * eip8037::CPSB_GLAMSTERDAM;
-
-const fn address(tail: u16) -> Address {
-    let mut bytes = [0; 20];
-    let [hi, lo] = tail.to_be_bytes();
-    bytes[18] = hi;
-    bytes[19] = lo;
-    Address::new(bytes)
-}
 
 fn charge_history(
     context: InstructionContext<'_, TestContext, EthInterpreter>,
@@ -144,17 +136,27 @@ impl Code {
         self.push(amount).op(CHARGE_STATE)
     }
 
-    /// A 0→x write to slot zero.
-    fn sstore(self) -> Self {
-        self.push(1).push(0).op(SSTORE)
+    /// Writes `value` to slot zero.
+    fn sstore(self, value: u64) -> Self {
+        self.push(value).push(0).op(SSTORE)
     }
 
     /// `CALL(CHILD_GAS, to, 0, 0, 0, 0, 0)`, dropping the success flag.
-    fn call(mut self, to: Address) -> Self {
-        self = self.op(PUSH0).op(PUSH0).op(PUSH0).op(PUSH0).op(PUSH0);
+    fn call(self, to: Address) -> Self {
+        self.op(PUSH0).call_code_at(to, CALL)
+    }
+
+    /// `DELEGATECALL(CHILD_GAS, to, 0, 0, 0, 0)`, dropping the success flag.
+    fn delegatecall(self, to: Address) -> Self {
+        self.call_code_at(to, DELEGATECALL)
+    }
+
+    /// Pushes empty argument and return buffers, `to` and [`CHILD_GAS`], then runs `call`.
+    fn call_code_at(mut self, to: Address, call: u8) -> Self {
+        self = self.op(PUSH0).op(PUSH0).op(PUSH0).op(PUSH0);
         self.0.push(PUSH20);
         self.0.extend_from_slice(to.as_slice());
-        self.push(CHILD_GAS).op(CALL).op(POP)
+        self.push(CHILD_GAS).op(call).op(POP)
     }
 
     /// `CREATE` with [`initcode`], which this code carries after its last instruction.
@@ -418,8 +420,8 @@ fn test_a_history_charge_draws_like_a_state_charge_and_is_booked_as_history() {
 /// order: the parent sees the reservoir it lent and the regular gas the charges spilled.
 #[test]
 fn test_a_reverting_frame_returns_its_state_and_history_charges() {
-    let history_last = |amount| Code::default().sstore().charge_history(amount).revert();
-    let history_first = |amount| Code::default().charge_history(amount).sstore().revert();
+    let history_last = |amount| Code::default().sstore(1).charge_history(amount).revert();
+    let history_first = |amount| Code::default().charge_history(amount).sstore(1).revert();
 
     for child in [history_last, history_first] {
         let charged = call(Code::default().call(CHILD).op(STOP), child(HISTORY));
@@ -444,13 +446,52 @@ fn test_a_reverting_frame_returns_its_state_and_history_charges() {
     }
 }
 
+/// A reverting frame that took back its caller's state charge after its own history charge
+/// spilled still lands on the reservoir it inherited. Its net state gas is negative while the
+/// reservoir it holds is smaller than that, so the unwind must not clamp part-way.
+#[test]
+fn test_a_reverting_frame_that_refilled_its_callers_state_gas_returns_the_inherited_reservoir() {
+    // The child runs in the caller's storage: it clears the slot the caller set, which refills
+    // the caller's 0→x charge.
+    let run = |amount| {
+        call(
+            Code::default().sstore(1).delegatecall(CHILD).op(STOP),
+            Code::default().charge_history(amount).sstore(0).revert(),
+        )
+    };
+    let charged = run(HISTORY);
+    let uncharged = run(0);
+
+    // The caller's write leaves 2,080 of the reservoir. The child's history charge takes those
+    // and spills 47,920; clearing the slot credits the 47,920 back to regular gas and 50,000 to
+    // the reservoir.
+    let inherited = RESERVOIR - SSTORE_SET;
+    let returned = charged.child();
+    assert_eq!(returned.result, InstructionResult::Revert);
+    assert_eq!(
+        counters(&returned.gas),
+        (50_000, -(SSTORE_SET as i64), HISTORY as i64, 0)
+    );
+    assert_eq!(unwound_reservoir(&returned.gas), inherited as i64);
+
+    assert_eq!(
+        counters(&charged.settled),
+        (inherited, SSTORE_SET as i64, 0, 0)
+    );
+    assert_eq!(counters(&uncharged.settled), counters(&charged.settled));
+    assert_eq!(charged.total(), uncharged.total());
+}
+
 /// A halting frame gives the reservoir back and burns all its regular gas, including what its
 /// charges spilled: it costs its caller the gas forwarded to it and nothing more.
 #[test]
 fn test_a_halting_frame_returns_the_reservoir_and_burns_its_regular_gas() {
     let charged = call(
         Code::default().call(CHILD).op(STOP),
-        Code::default().sstore().charge_history(HISTORY).op(INVALID),
+        Code::default()
+            .sstore(1)
+            .charge_history(HISTORY)
+            .op(INVALID),
     );
     let halts_at_once = call(
         Code::default().call(CHILD).op(STOP),
@@ -696,7 +737,7 @@ fn test_history_gas_stays_out_of_the_state_gas_column() {
     let run = |amount| {
         call(
             Code::default().call(CHILD).op(STOP),
-            Code::default().sstore().charge_history(amount).op(STOP),
+            Code::default().sstore(1).charge_history(amount).op(STOP),
         )
     };
     let charged = run(HISTORY);
