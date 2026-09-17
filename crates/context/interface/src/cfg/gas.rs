@@ -49,10 +49,8 @@ pub struct GasTracker {
     /// `code_deposit_history_gas` a price, so a chain that does not price history bytes behaves
     /// exactly as it did before this field existed.
     ///
-    /// Kept out of the serialized form so that the encoding of this struct is unchanged; the
-    /// counter is read in process, off the tracker the handler settles, and nothing reads it
-    /// across a serialization boundary.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// Encodings made before this field existed decode it as zero.
+    #[cfg_attr(feature = "serde", serde(default))]
     history_gas_spent: i64,
     /// Refunded gas. Used to refund the gas to the caller at the end of execution.
     refunded: i64,
