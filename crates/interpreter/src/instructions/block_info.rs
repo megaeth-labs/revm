@@ -87,6 +87,7 @@ pub fn slot_num<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
 }
 
 /// SLOTNUM without its `SpecId::AMSTERDAM` gate, for a consumer that activates EIP-7843 below Amsterdam.
+#[inline]
 pub fn slot_num_enabled<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     push!(context.interpreter, context.host.slot_num());
     Ok(())

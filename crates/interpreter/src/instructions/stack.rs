@@ -65,6 +65,7 @@ pub fn dupn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
 }
 
 /// DUPN without its `SpecId::AMSTERDAM` gate, for a consumer that activates EIP-8024 below Amsterdam.
+#[inline]
 pub fn dupn_enabled<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     let x: usize = context.interpreter.bytecode.read_u8().into();
     if let Some(n) = decode_single(x) {
@@ -87,6 +88,7 @@ pub fn swapn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
 }
 
 /// SWAPN without its `SpecId::AMSTERDAM` gate, for a consumer that activates EIP-8024 below Amsterdam.
+#[inline]
 pub fn swapn_enabled<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     let x: usize = context.interpreter.bytecode.read_u8().into();
     if let Some(n) = decode_single(x) {
@@ -109,6 +111,7 @@ pub fn exchange<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
 }
 
 /// EXCHANGE without its `SpecId::AMSTERDAM` gate, for a consumer that activates EIP-8024 below Amsterdam.
+#[inline]
 pub fn exchange_enabled<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     let x: usize = context.interpreter.bytecode.read_u8().into();
     if let Some((n, m)) = decode_pair(x) {

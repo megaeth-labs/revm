@@ -90,7 +90,10 @@ pub const fn gas_table() -> GasTable {
 /// For a consumer that activates EIP-8024 and EIP-7843 below [`SpecId::AMSTERDAM`].
 /// Nothing else in the table changes. The gas table is spec-keyed and is not modified:
 /// these four opcodes have constant static gas (`SLOTNUM` 2, `DUPN` / `SWAPN` / `EXCHANGE` 3)
-/// on every spec.
+/// on every spec. A consumer that wraps table entries for its own purposes (mega-evm wraps
+/// every entry for metering) must install first and wrap after, or wrap the `_enabled`
+/// functions itself; installing after wrapping silently removes the wrappers for these
+/// four entries.
 pub fn enable_amsterdam_opcodes<WIRE: InterpreterTypes, H: Host + ?Sized>(
     table: &mut InstructionTable<WIRE, H>,
 ) {
