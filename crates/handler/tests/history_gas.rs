@@ -861,6 +861,12 @@ fn test_a_child_refill_of_its_callers_charge_nets_out_on_success() {
         (LARGE_HISTORY, 0, -(LARGE_HISTORY as i64), 0)
     );
 
+    // The caller returns with the child's reservoir and its own 50,000 spill, and the child's
+    // net has cancelled the caller's charge.
+    let caller = refilled.returned[1];
+    assert_eq!(caller.result, InstructionResult::Stop);
+    assert_eq!(counters(&caller.gas), (LARGE_HISTORY, 0, 0, 50_000));
+
     // The caller's 50,000 spill stays spent as regular gas and comes back as reservoir.
     assert_eq!(counters(&refilled.settled), (LARGE_HISTORY, 0, 0, 50_000));
     assert_eq!(refilled.total(), baseline.total());
@@ -923,4 +929,71 @@ fn test_history_gas_stays_out_of_the_state_gas_column() {
         charged.gas().block_regular_gas_used(),
         uncharged.gas().block_regular_gas_used() + HISTORY
     );
+}
+
+/// A block-level consumer takes history gas out of the regular column before the calldata floor
+/// applies: `max(total − state − history, floor)`. `block_regular_gas_used()` has applied the
+/// floor already, so taking history out of it afterwards can land below the floor.
+#[test]
+fn test_history_gas_comes_out_of_the_regular_column_before_the_floor() {
+    // The call's intrinsic gas is 15,000 plus 16 per non-zero calldata byte, and its code costs 3
+    // (one `PUSH4`), so it spends 15,003 + 16 × bytes regular gas. Its floor is 15,000 + 64 × bytes.
+    // (calldata bytes, total_gas_spent, floor_gas, regular column, the subtraction after the floor)
+    let rows = [
+        // Regular gas 23,003 is below the 47,000 floor, and the total with history is above it.
+        (500, 73_003, 47_000, 47_000, 23_003),
+        // Regular gas 34,203 and the total with history are both below the 91,800 floor.
+        (1_200, 84_203, 91_800, 91_800, 41_800),
+    ];
+
+    for (bytes, total, floor, regular, after_floor) in rows {
+        let send = |amount| {
+            run(
+                amsterdam(
+                    db(
+                        Code::default().charge_history(amount).op(STOP),
+                        Code::default(),
+                    ),
+                    0,
+                ),
+                tx(
+                    TxKind::Call(CONTRACT),
+                    vec![0xff; bytes],
+                    REGULAR_CAP + RESERVOIR,
+                ),
+            )
+        };
+        let charged = send(HISTORY);
+        let uncharged = send(0);
+
+        // The whole charge came out of the reservoir.
+        assert_eq!(
+            counters(&charged.settled),
+            (RESERVOIR - HISTORY, 0, HISTORY as i64, 0)
+        );
+        let history = u64::try_from(charged.settled.history_gas_spent()).unwrap();
+        let gas = charged.gas();
+        assert_eq!(
+            (
+                gas.total_gas_spent(),
+                gas.state_gas_spent_final(),
+                gas.floor_gas()
+            ),
+            (total, 0, floor),
+            "{bytes} calldata bytes"
+        );
+
+        let column = gas
+            .total_gas_spent()
+            .saturating_sub(gas.state_gas_spent_final())
+            .saturating_sub(history)
+            .max(gas.floor_gas());
+        assert_eq!(column, regular);
+        assert_eq!(column, uncharged.gas().block_regular_gas_used());
+
+        // The trap: the floor is already in `block_regular_gas_used()`.
+        assert_eq!(gas.block_regular_gas_used(), total.max(floor));
+        assert_eq!(gas.block_regular_gas_used() - history, after_floor);
+        assert!(after_floor < floor);
+    }
 }
