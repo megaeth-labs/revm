@@ -70,10 +70,39 @@ impl<R, S> ExecResultAndState<R, S> {
 /// - [`block_state_gas_used()`](ResultGas::block_state_gas_used) = `state_gas_spent`
 /// - [`spent_sub_refunded()`](ResultGas::spent_sub_refunded) = `total_gas_spent − refunded` (before floor gas check)
 /// - [`final_refunded()`](ResultGas::final_refunded) = `refunded` when floor gas is inactive, `0` when floor gas kicks in
+///
+/// ## History gas
+///
+/// A chain can book history gas with [`GasTracker::record_history_cost`], which draws on the
+/// same reservoir-first budget as state gas. `ResultGas` has no field for it. History gas is
+/// part of `total_gas_spent` but not of `state_gas_spent`, so `block_regular_gas_used()` includes
+/// it. When the charge was paid from the reservoir, that value can exceed the transaction's
+/// regular gas cap ([`Cfg::tx_gas_limit_cap`]). For example, take a 2,000,000 cap and a
+/// 3,000,000 gas limit, which leaves a 1,000,000 reservoir. A transaction that spends 1,900,000
+/// regular gas and pays a 900,000 history charge from the reservoir reports
+/// `total_gas_spent = 2,800,000` and `state_gas_spent = 0`, so
+/// `block_regular_gas_used() = 2,800,000`.
+///
+/// An [`ExecutionResult`] cannot tell that history gas apart. A block-level consumer that
+/// budgets regular gas against a block limit must read the settled transaction's history counter
+/// ([`GasTracker::history_gas_spent`]), for example from a `Handler` override, and compute the
+/// regular component itself as `max(total_gas_spent − state_gas_spent − history, floor_gas)`,
+/// with saturating subtraction. History has to come out before the floor is applied, not after:
+/// `block_regular_gas_used()` has already applied the floor, so subtracting history from it can
+/// land below the floor. For example, a call on Amsterdam that carries 500 non-zero calldata
+/// bytes, spends 23,003 regular gas and pays a 50,000 history charge from the reservoir reports
+/// `total_gas_spent = 73,003`, `state_gas_spent = 0` and `floor_gas = 47,000`. Its regular
+/// component is `max(73,003 − 0 − 50,000, 47,000) = 47,000`, but
+/// `block_regular_gas_used() − 50,000` gives 23,003, below the floor.
+///
+/// [`GasTracker::record_history_cost`]: crate::cfg::gas::GasTracker::record_history_cost
+/// [`GasTracker::history_gas_spent`]: crate::cfg::gas::GasTracker::history_gas_spent
+/// [`Cfg::tx_gas_limit_cap`]: crate::Cfg::tx_gas_limit_cap
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ResultGas {
-    /// Total gas spent consisting of regular and state gas.
+    /// Total gas spent consisting of regular and state gas, plus any history gas a chain
+    /// charged, which has no field of its own (see [History gas](ResultGas#history-gas)).
     /// For actual gas used, use [`used()`](ResultGas::used).
     #[cfg_attr(feature = "serde", serde(rename = "gas_spent"))]
     total_gas_spent: u64,
@@ -92,6 +121,7 @@ pub struct ResultGas {
     /// EIP-7623 floor gas. Zero when not applicable.
     floor_gas: u64,
     /// State gas pool (EIP-8037 reservoir) still unspent when the transaction finished.
+    /// History gas charges draw on the same pool.
     ///
     /// Captured at the same point as [`total_gas_spent`](Self::total_gas_spent), before the
     /// EIP-7623 floor check may absorb the pool into the floor cost. Zero when state gas is
@@ -141,6 +171,8 @@ impl ResultGas {
 
     /// Returns the total gas spent inside execution before any refund.
     ///
+    /// Includes any history gas a chain charged (see [History gas](ResultGas#history-gas)).
+    ///
     /// If you want final gas used, use [`used()`](ResultGas::used).
     #[inline]
     pub const fn total_gas_spent(&self) -> u64 {
@@ -170,6 +202,10 @@ impl ResultGas {
     /// needs this: [`state_gas_spent_final`](Self::state_gas_spent_final) says how much state
     /// gas was consumed, whether from the pool or spilled onto the regular budget, and this says
     /// how much of the pool was never needed. It cannot be derived from the other fields.
+    ///
+    /// History gas charges drain the same pool, so on a chain that charges history gas the pool
+    /// can shrink by more than the state gas drawn from it (see
+    /// [History gas](ResultGas#history-gas)).
     #[inline]
     pub const fn reservoir_remaining(&self) -> u64 {
         self.reservoir_remaining
@@ -311,6 +347,16 @@ impl ResultGas {
     /// not discounted by state gas), while the refund only affects
     /// `tx_gas_used` (the receipt value), not the block-level regular
     /// component.
+    ///
+    /// History gas is not subtracted, since `ResultGas` does not record it, so
+    /// this value includes it. If the history charge was paid from the reservoir,
+    /// the value can exceed the transaction's regular gas cap. A consumer that
+    /// budgets regular gas against a block limit must not subtract the settled
+    /// tracker's history counter from this value, because the floor is already
+    /// applied here and the difference can fall below it. It must compute
+    /// `max(total_gas_spent - state_gas_spent - history, floor_gas)` itself,
+    /// with saturating subtraction, taking history out before the floor (see
+    /// [History gas](ResultGas#history-gas)).
     #[inline]
     pub const fn block_regular_gas_used(&self) -> u64 {
         max(

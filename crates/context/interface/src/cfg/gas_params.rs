@@ -805,6 +805,15 @@ impl GasParams {
         self.get(GasId::create_state_gas())
     }
 
+    /// History gas for code deposit of `len` bytes.
+    ///
+    /// Zero unless the schedule prices history bytes.
+    #[inline]
+    pub fn code_deposit_history_gas(&self, len: usize) -> u64 {
+        self.get(GasId::code_deposit_history_gas())
+            .saturating_mul(len as u64)
+    }
+
     /// Used in [GasParams::initial_tx_gas] to calculate the eip7702 per-auth cost.
     ///
     /// Pre-Amsterdam this is the pessimistic bundled `PER_EMPTY_ACCOUNT_COST`
@@ -1266,6 +1275,7 @@ impl GasId {
             }
             x if x == Self::tx_account_write_cost().as_u8() => "tx_account_write_cost",
             x if x == Self::tx_create_access_cost().as_u8() => "tx_create_access_cost",
+            x if x == Self::code_deposit_history_gas().as_u8() => "code_deposit_history_gas",
             _ => "unknown",
         }
     }
@@ -1340,6 +1350,7 @@ impl GasId {
             }
             "tx_account_write_cost" => Some(Self::tx_account_write_cost()),
             "tx_create_access_cost" => Some(Self::tx_create_access_cost()),
+            "code_deposit_history_gas" => Some(Self::code_deposit_history_gas()),
             _ => None,
         }
     }
@@ -1617,6 +1628,19 @@ impl GasId {
     pub const fn tx_create_access_cost() -> GasId {
         Self::new(49)
     }
+
+    /// History gas per byte of deposited code: what a chain charges for carrying the deployed
+    /// bytes in a block, as distinct from the state gas it charges for storing them.
+    ///
+    /// Zero on every schedule defined here, which is what makes the charge site in
+    /// `return_create` inert. A chain that prices history bytes overrides it. The charge sits
+    /// beside the EIP-8037 code-deposit state charge, so it is made only where EIP-8037 is enabled.
+    ///
+    /// A fork id, so it is allocated from the top of the table: upstream numbers its ids upward
+    /// from 1, and its next one must not land on this entry.
+    pub const fn code_deposit_history_gas() -> GasId {
+        Self::new(255)
+    }
 }
 
 #[cfg(test)]
@@ -1655,6 +1679,7 @@ mod tests {
     #[test]
     fn test_gas_id_name_and_from_str_coverage() {
         let mut unique_names = HashSet::new();
+        let mut named_ids = HashSet::new();
         let mut known_gas_ids = 0;
 
         // Iterate over all possible GasId values (0..256)
@@ -1665,6 +1690,7 @@ mod tests {
             // Count unique names (excluding "unknown")
             if name != "unknown" {
                 unique_names.insert(name);
+                named_ids.insert(i);
             }
         }
 
@@ -1687,11 +1713,15 @@ mod tests {
             "Not all unique names are resolvable via from_str"
         );
 
-        // We should have exactly 49 known GasIds (based on the indices 1-49 used)
+        // The known GasIds are upstream's indices 1-49 (0 is unused) plus the fork's
+        // `code_deposit_history_gas` at 255, allocated from the top of the table so upstream's
+        // next sequential id does not collide with it. Every one of them has a name.
+        let expected_ids: HashSet<u8> = (1..=49).chain([255]).collect();
+        assert_eq!(named_ids, expected_ids);
         assert_eq!(
             unique_names.len(),
-            49,
-            "Expected 49 unique GasIds, found {}",
+            50,
+            "Expected 50 unique GasIds, found {}",
             unique_names.len()
         );
     }

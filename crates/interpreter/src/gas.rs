@@ -194,6 +194,27 @@ impl Gas {
         self.tracker.add_state_gas_spilled(delta);
     }
 
+    /// Returns total history gas spent so far.
+    ///
+    /// Can be negative within a call frame that refilled more history gas
+    /// than this frame charged (see [`GasTracker::refill_history`]).
+    #[inline]
+    pub const fn history_gas_spent(&self) -> i64 {
+        self.tracker.history_gas_spent()
+    }
+
+    /// Sets the total history gas spent (used when propagating from child frame).
+    #[inline]
+    pub const fn set_history_gas_spent(&mut self, val: i64) {
+        self.tracker.set_history_gas_spent(val);
+    }
+
+    /// Refills history gas for bytes taken back. See [`GasTracker::refill_history`].
+    #[inline]
+    pub const fn refill_history(&mut self, amount: u64) {
+        self.tracker.refill_history(amount);
+    }
+
     /// Rolls back this frame's state-gas charges on revert or exceptional halt.
     ///
     /// See [`GasTracker::rollback_state_gas`].
@@ -307,6 +328,19 @@ impl Gas {
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_state_cost(&mut self, cost: u64) -> bool {
         self.tracker.record_state_cost(cost)
+    }
+
+    /// Records a history gas cost, drawn from the same budget as a state-gas charge.
+    ///
+    /// Deducts from the reservoir first and spills into `gas_left` once the reservoir is
+    /// exhausted, and counts the amount as history gas rather than state gas. See
+    /// [`GasTracker::record_history_cost`].
+    ///
+    /// Returns `false` if total remaining gas is insufficient.
+    #[inline]
+    #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
+    pub const fn record_history_cost(&mut self, cost: u64) -> bool {
+        self.tracker.record_history_cost(cost)
     }
 
     /// Deducts from `remaining` only (used for child frame gas forwarding).

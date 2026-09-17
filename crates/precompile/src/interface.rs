@@ -207,6 +207,12 @@ impl PrecompileOutput {
     /// The regular gas used is `tracker.limit() - tracker.remaining()`; the
     /// refund, state gas (with its spilled portion) and the reservoir are taken
     /// as-is. All fields are replaced, not accumulated.
+    ///
+    /// The history gas counter ([`GasTracker::history_gas_spent`]) is not carried.
+    /// This type has no field for it, and every field is public, so adding one
+    /// would break code that builds it with a struct literal. A history charge
+    /// made on `tracker` still shows in the reservoir and `gas_used` it was paid
+    /// from, so it is paid but counted nowhere.
     pub const fn set_gas(&mut self, tracker: GasTracker) {
         self.gas_used = tracker.limit().saturating_sub(tracker.remaining());
         self.gas_refunded = tracker.refunded();
@@ -220,6 +226,10 @@ impl PrecompileOutput {
     /// Inverse of [`from_gas_tracker`](Self::from_gas_tracker): `gas_used` is
     /// deducted from the regular gas (saturating at zero), and the refund, state
     /// gas, spilled state gas and reservoir are restored.
+    ///
+    /// The returned tracker's history gas counter
+    /// ([`GasTracker::history_gas_spent`]) is always zero, because this type has
+    /// no field to restore it from. See [`set_gas`](Self::set_gas).
     pub const fn to_gas_tracker(&self, gas_limit: u64) -> GasTracker {
         let mut tracker = GasTracker::new_used_gas(gas_limit, self.gas_used, self.reservoir);
         tracker.set_refunded(self.gas_refunded);

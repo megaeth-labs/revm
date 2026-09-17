@@ -619,9 +619,9 @@ impl EthFrame<EthInterpreter> {
 /// - the reservoir, a shared state-gas pool the child inherited at call time, is
 ///   always adopted from the child (restored to the inherited value on
 ///   revert/halt).
-/// - net state gas, its spilled portion, and the refund counter persist only on
-///   success; on revert/halt the child's state changes roll back and contribute
-///   nothing.
+/// - net state gas, net history gas, the spilled portion, and the refund counter
+///   persist only on success; on revert/halt the child's state changes roll back
+///   and contribute nothing.
 #[inline]
 pub const fn handle_reservoir_remaining_gas(
     instruction_result: InstructionResult,
@@ -657,6 +657,14 @@ pub const fn handle_reservoir_remaining_gas(
                 .saturating_add(child_gas.state_gas_spent()),
         );
         parent_gas.add_state_gas_spilled(child_gas.state_gas_spilled());
+        // History gas rides the same success-only merge, signed for the same reason: a
+        // failing child rolled it back along with its state gas, so it contributes
+        // nothing. Zero on any chain that never charges history gas.
+        parent_gas.set_history_gas_spent(
+            parent_gas
+                .history_gas_spent()
+                .saturating_add(child_gas.history_gas_spent()),
+        );
         parent_gas.record_refund(child_gas.refunded());
     }
 }
@@ -751,6 +759,9 @@ pub fn return_create<CTX: ContextTr>(
         // borrow above.
         let code_len = interpreter_result.output.len();
         let charges_state_gas = gas_params.code_deposit_state_gas(code_len) > 0;
+        // Read before the state-gas charge borrows the context: the value is a flat per-byte
+        // price, so it needs nothing but the schedule.
+        let history_gas_for_code = gas_params.code_deposit_history_gas(code_len);
         if charges_state_gas {
             let charge = StateGasCharge::units(
                 GasId::code_deposit_state_gas(),
@@ -770,6 +781,20 @@ pub fn return_create<CTX: ContextTr>(
                 };
                 return;
             }
+        }
+
+        // History gas for the same bytes, on the same condition: code that passed validation
+        // and is about to be written is also code every node has to carry in a block. The
+        // schedule decides whether that costs anything; it is zero everywhere here, so this
+        // charge does not exist unless a chain prices history bytes.
+        if history_gas_for_code > 0
+            && !interpreter_result
+                .gas
+                .record_history_cost(history_gas_for_code)
+        {
+            context.journal_mut().checkpoint_revert(checkpoint);
+            interpreter_result.result = InstructionResult::OutOfGas;
+            return;
         }
     }
 
