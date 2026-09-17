@@ -18,28 +18,20 @@ use context_interface::{
     result::ResultGas,
 };
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
-use primitives::{hardfork::SpecId, Address, Bytes, TxKind, U256};
+use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
 use revm_handler::{ExecuteEvm, MainBuilder, MainContext};
 use state::{AccountInfo, Bytecode};
 
 type Db = CacheDB<EmptyDB>;
 
-const CONTRACT: Address = address(0xc0de);
-const OK_CHILD: Address = address(0xc100);
-const REVERTING_CHILD: Address = address(0xc1fd);
-const HALTING_CHILD: Address = address(0xc1fe);
+const CONTRACT: Address = address!("0x000000000000000000000000000000000000c0de");
+const OK_CHILD: Address = address!("0x000000000000000000000000000000000000c100");
+const REVERTING_CHILD: Address = address!("0x000000000000000000000000000000000000c1fd");
+const HALTING_CHILD: Address = address!("0x000000000000000000000000000000000000c1fe");
 
 const GAS_LIMIT: u64 = 3_000_000;
 /// Below [`GAS_LIMIT`] on Amsterdam, so the transactions there start with a reservoir.
 const AMSTERDAM_CAP: u64 = 2_000_000;
-
-const fn address(tail: u16) -> Address {
-    let mut bytes = [0; 20];
-    let [hi, lo] = tail.to_be_bytes();
-    bytes[18] = hi;
-    bytes[19] = lo;
-    Address::new(bytes)
-}
 
 const fn sstore(slot: u8, value: u8) -> [u8; 5] {
     [PUSH1, value, PUSH1, slot, SSTORE]
