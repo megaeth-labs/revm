@@ -35,6 +35,8 @@ serde = { workspace = true, features = ["derive", "rc"], optional = true }
 
 [dev-dependencies]
 database.workspace = true
+interpreter.workspace = true
+serde_json = { workspace = true, features = ["alloc"] }
 
 [features]
 default = ["std"]
