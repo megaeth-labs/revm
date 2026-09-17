@@ -47,8 +47,7 @@ jobs:
             fi
           done
       # Cargo versions never change on this fork, so the tag is the only thing
-      # that identifies a release. It has to be well formed, unused, and it has
-      # to match what the source already claims.
+      # that identifies a release. It has to be well formed and unused.
       - name: Validate the tag
         env:
           TAG: ${{ inputs.tag }}
@@ -63,13 +62,6 @@ jobs:
           fi
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
             echo "::error::tag already exists on the remote: $TAG"
-            exit 1
-          fi
-          # Anchored so a commented-out or differently named constant does not pass.
-          tag_re=$(printf '%s' "$TAG" | sed 's/\./\\./g')
-          if ! grep -qE "^pub const FORK_TAG: &str = \"$tag_re\";\$" crates/revm/src/megaeth.rs; then
-            echo "::error::crates/revm/src/megaeth.rs does not declare FORK_TAG = $TAG"
-            grep -n 'FORK_TAG' crates/revm/src/megaeth.rs || true
             exit 1
           fi
       - name: Write the release notes

@@ -35,7 +35,7 @@ It moves only when `mega-reth` moves its revm line.
 
 1. **Public API is a superset of upstream.**
    Do not change existing signatures, remove items, add trait methods without a default body, add variants to enums that downstream code matches exhaustively, change the meaning of existing accessors, or rename features.
-   `reth`, `alloy-evm`, `op-revm` and `revm-inspectors` are compiled against this fork unmodified.
+   `reth`, `alloy-evm` and `revm-inspectors` are compiled against this fork unmodified; `op-revm` is forked separately at [megaeth-labs/op-revm](https://github.com/megaeth-labs/op-revm) and ported there.
    The `Semver` workflow checks every pull request against its base; a deviation passes only with the `api:exception` label and a row in the "API exceptions" table below, which is the record consumers read.
    Each consumer's own CI builds against the tagged fork.
 2. **Thin layer.**
@@ -51,17 +51,14 @@ It moves only when `mega-reth` moves its revm line.
 5. **`no_std` is mandatory.**
    MegaETH runs the engine inside a zkVM.
    Every crate must keep building for `riscv64imac-unknown-none-elf` with `--no-default-features`.
-6. **`FORK_TAG` tracks the release.**
-   `revm::megaeth::FORK_TAG` in `crates/revm/src/megaeth.rs` is bumped in the release commit.
-   Consumers assert against it at compile time.
-7. **The toolchain is pinned.**
+6. **The toolchain is pinned.**
    `rust-toolchain.toml` names the compiler this repository is checked with, locally and in CI.
    Upstream floats on `stable` and fixes each release's new clippy lints in its own code; the fork carries upstream code it does not edit, so a floating toolchain would fail CI on lints in code the fork must not touch.
    The pin moves with each base-line move, or in a `mega:` commit of its own.
    The MSRV consumers see is still `rust-version` in `Cargo.toml`.
-8. **Consumers pin tagged commits only.**
+7. **Consumers pin tagged commits only.**
    `main` is rewritten when the base line moves, so an untagged commit may become unreachable.
-   Nothing enforces this mechanically: `FORK_TAG` still holds the previous release's value on an untagged commit, so the compile-time guard below passes there.
+   Nothing enforces this mechanically; the consumer's `Cargo.lock` is the record of what it built against.
 
 ## Labels
 
@@ -84,22 +81,23 @@ The `Semver` workflow reports a major-level change on the pull request that make
 
 | Crate | Item | Change | Consumers checked | PR |
 |---|---|---|---|---|
-| `revm-primitives` | `CPSB_SIGNIFICANT_BITS`, `CPSB_OFFSET`, `TARGET_STATE_GROWTH_PER_YEAR`, `BLOCKS_PER_YEAR`, `EIP7702_PER_EMPTY_ACCOUNT_REGULAR` | constants removed (dead CPSB constants, EIP-7702 GasId rename) | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-interpreter` | `CreateOutcome.charged_create_state_gas`, `InputsImpl.depth` | fields added to exhaustively constructible structs | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-interpreter` | `InputsTr::depth` | trait method added without a default | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-context` | `JournalCfg` | field `eip7708_delayed_burn_disabled` removed, field `eip8246_delayed_clear_disabled` added | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-context` | `CfgEnv.amsterdam_eip7708_delayed_burn_disabled` | field removed | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-context` | `JournalInner::eip7708_emit_burn_remaining_balance_logs`, `JournalInner::eip7708_burn_log` | methods removed | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-context-interface` | `JournalEntry::CodeChange` | fields `had_code_hash`, `had_code` added | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-context-interface` | `JournalEntryTr::code_changed` | 1 → 3 parameters | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-context-interface` | `Cfg` | `is_eip7708_delayed_burn_disabled` removed; `is_eip8246_delayed_clear_disabled`, `is_amsterdam_eip2780_enabled` added without defaults | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-context-interface` | `calculate_initial_tx_gas`, `calculate_initial_tx_gas_for_tx`, `GasParams::initial_tx_gas`, `GasParams::initial_tx_gas_for_tx` | one parameter added (EIP-2780 runtime gas phase) | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-context-interface` | `GasParams::tx_eip7702_auth_refund`, `tx_eip7702_state_gas`, `tx_eip7702_state_refund`, `GasId::tx_eip7702_per_empty_account_cost`, `GasId::tx_eip7702_auth_refund` | removed or renamed to the regular-gas names | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-context-interface` | `InitialAndFloorGas.state_refund` | field removed | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-handler` | `validate_initial_tx_gas`, `validate_initial_tx_gas_with_gas_params`, `create_init_frame`, `Handler::execution`, `Handler::first_frame_input` | parameter counts changed | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-handler` | `Handler::refund` | return value added (fallible refund) | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-precompile` | `PrecompileOutput.state_gas_spilled` | field added to an exhaustively constructible struct (alloy-evm builds it through `PrecompileOutput::new`, unaffected) | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
-| `revm-inspector` | `InspectorHandler::inspect_execution` | 2 → 3 parameters | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: replaced by the vendored revm 43 port (next PR). mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-primitives` | `CPSB_SIGNIFICANT_BITS`, `CPSB_OFFSET`, `TARGET_STATE_GROWTH_PER_YEAR`, `BLOCKS_PER_YEAR`, `EIP7702_PER_EMPTY_ACCOUNT_REGULAR` | constants removed (dead CPSB constants, EIP-7702 GasId rename) | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-interpreter` | `CreateOutcome.charged_create_state_gas`, `InputsImpl.depth` | fields added to exhaustively constructible structs | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-interpreter` | `InputsTr::depth` | trait method added without a default | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-context` | `JournalCfg` | field `eip7708_delayed_burn_disabled` removed, field `eip8246_delayed_clear_disabled` added | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-context` | `CfgEnv.amsterdam_eip7708_delayed_burn_disabled` | field removed | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-context` | `JournalInner::eip7708_emit_burn_remaining_balance_logs`, `JournalInner::eip7708_burn_log` | methods removed | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-context-interface` | `JournalEntry::CodeChange` | fields `had_code_hash`, `had_code` added | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-context-interface` | `JournalEntryTr::code_changed` | 1 → 3 parameters | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-context-interface` | `Cfg` | `is_eip7708_delayed_burn_disabled` removed; `is_eip8246_delayed_clear_disabled`, `is_amsterdam_eip2780_enabled` added without defaults | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-context-interface` | `calculate_initial_tx_gas`, `calculate_initial_tx_gas_for_tx`, `GasParams::initial_tx_gas`, `GasParams::initial_tx_gas_for_tx` | one parameter added (EIP-2780 runtime gas phase) | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-context-interface` | `GasParams::tx_eip7702_auth_refund`, `tx_eip7702_state_gas`, `tx_eip7702_state_refund`, `GasId::tx_eip7702_per_empty_account_cost`, `GasId::tx_eip7702_auth_refund` | removed or renamed to the regular-gas names | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-context-interface` | `InitialAndFloorGas.state_refund` | field removed | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-handler` | `validate_initial_tx_gas`, `validate_initial_tx_gas_with_gas_params`, `create_init_frame`, `Handler::execution`, `Handler::first_frame_input` | parameter counts changed | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-handler` | `Handler::refund` | return value added (fallible refund) | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-precompile` | `PrecompileOutput.state_gas_spilled` | field added to an exhaustively constructible struct (alloy-evm builds it through `PrecompileOutput::new`, unaffected) | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm-inspector` | `InspectorHandler::inspect_execution` | 2 → 3 parameters | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`: no use. op-revm: ported in megaeth-labs/op-revm. mega-evm: adapts in its own PR | #45 upstream gas core |
+| `revm` | `megaeth::FORK_TAG` (module `revm::megaeth`) | fork-only module removed; releases are identified by tags and the consumer's `Cargo.lock` | alloy-evm 0.36.0, alloy-op-evm 0.15.0, revm-inspectors 0.43.0, mega-reth `2dc2f44a`, megaeth-labs/op-revm: no use | FORK_TAG removal |
 
 ## Upstream touch points
 
@@ -108,7 +106,6 @@ Keep this list current; it is the expected conflict set of a rebase.
 
 | File | Fork change | Rebase rule |
 |---|---|---|
-| `crates/revm/src/lib.rs` | a short `pub mod megaeth;` block after the crate attributes | keep the block |
 | `.github/workflows/ci.yml` | fork CI in place of the upstream matrix | take the fork version; copy new upstream jobs by hand if wanted |
 | `.github/workflows/{bench,book,pr-audit,release-plz}.yml`, `.github/dependabot.yml` | deleted | keep deleted (`git rm`) |
 | `deny.toml` | advisory ignores the fork needs beyond upstream's list | take upstream's list, re-add the fork-only entries; drop an entry once the crate is gone from `Cargo.lock` |
@@ -156,40 +153,22 @@ args=$(/abs/fork/scripts/mega/patch-args.sh /abs/fork) && cargo check --workspac
 cargo tree --workspace --duplicates $args | grep -cE '^revm v40\.' # expect 0 or 1
 ```
 
-A consumer that uses fork-only API should add a compile-time guard:
+A consumer that uses `op-revm` takes the MegaETH fork of it as well, pinned to a tag of [megaeth-labs/op-revm](https://github.com/megaeth-labs/op-revm) and redirected at the source the workspace declares it from:
 
-```rust
-/// If this fails to compile, the workspace resolves `revm` from crates.io.
-/// Copy the `[patch.crates-io]` block from MEGAETH-FORK.md into the root Cargo.toml.
-const EXPECTED_REVM_FORK: &str = "v40.0.3-mega.1";
-const _: () = assert!(
-    str_eq(revm::megaeth::FORK_TAG, EXPECTED_REVM_FORK),
-    "revm fork tag mismatch: refresh the [patch.crates-io] block"
-);
-
-const fn str_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
+```toml
+[patch."https://github.com/ethereum-optimism/optimism"]
+# mega-reth declares op-revm from the OP monorepo
+op-revm = { git = "https://github.com/megaeth-labs/op-revm", tag = "v20.0.0-mega.1" }
 ```
+
+That fork names the commit of this repository it is built against in its `.cargo/config.toml`; the consumer's revm patch block points at that commit or a later compatible one.
 
 ## Release procedure
 
 1. Merge the changes into `main` through PRs.
-2. Open the release PR: bump `FORK_TAG` to the new tag name; nothing else changes.
-3. Run the `release` workflow with the tag name.
-   It checks the tag format, that `FORK_TAG` matches, tags the commit and publishes a GitHub release with the fork changelog (`git log v<base>..HEAD`).
-4. Consumers bump `rev` in their patch block and their `EXPECTED_REVM_FORK` in one PR.
+2. Run the `release` workflow with the tag name.
+   It checks the tag format, tags the commit and publishes a GitHub release with the fork changelog (`git log v<base>..HEAD`).
+3. Consumers bump `rev` in their patch block.
 
 ## Repository settings (admin)
 
@@ -226,7 +205,7 @@ Consumers follow together with the `mega-reth` upgrade that triggered the move.
 | `ci.yml` | PR, push to `main` | Test matrix (three feature sets) on the pinned toolchain, `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
 | `semver.yml` | PR | `cargo semver-checks` of the twelve crates against the pull request base; a major-level change fails unless the PR carries `api:exception` and adds a row to the API exceptions table |
 | `nightly.yml` | daily | Upstream digest (core-crate commits and upstream tags cut since the last run, posted to the "Upstream digest" issue), fast-forward `upstream-main`, full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
-| `release.yml` | manual, `main` only | Require green `ci success` for the commit, check `FORK_TAG`, tag and publish a fork release |
+| `release.yml` | manual, `main` only | Require green `ci success` for the commit, tag and publish a fork release |
 | `claude.yml` | PR, comments, issues | The shared MegaETH Claude actions: incremental PR review under the `mega-maxwell` identity (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
 | `pr-labels.yml` | PR | Exactly one `mega:` and one `api:` label |
-| `ci.yml` `touch-points` job | PR without the `mega:cherry-pick` label | Every modified upstream file has a row in the touch-point table (`scripts/mega/check-touch-points.sh`); cherry-picks are exempt because a rebase past the upstream commit drops them instead of re-applying them |
+| `ci.yml` `touch-points` job | PR without the `mega:cherry-pick` label | Every modified upstream file has a row in the touch-point table (`scripts/mega/check-touch-points.sh`), a file restored to its upstream content needs none; cherry-picks are exempt because a rebase past the upstream commit drops them instead of re-applying them |

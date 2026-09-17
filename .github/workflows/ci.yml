@@ -261,7 +261,11 @@ jobs:
             echo "::notice::cherry-pick pull request: upstream files are not touch points"
             exit 0
           fi
-          scripts/mega/check-touch-points.sh "$BASE" "$HEAD"
+          # Upstream tags are not mirrored here; fetch the base tag so a file
+          # restored to upstream content is recognised as such.
+          upstream=$(tr -d '[:space:]' < scripts/mega/base.txt)
+          git fetch -q --no-tags https://github.com/bluealloy/revm.git "refs/tags/$upstream:refs/upstream-base/$upstream"
+          scripts/mega/check-touch-points.sh "$BASE" "$HEAD" "refs/upstream-base/$upstream"
 
   ci-success:
     name: ci success

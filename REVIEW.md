@@ -7,7 +7,7 @@ It is read by the automated reviewer as well as by people.
 ## What every PR must satisfy
 
 1. **Superset.** The public API of every published crate stays a superset of the crates.io baseline recorded in `scripts/mega/crates.txt`.
-   The `Semver` workflow enforces it; a PR that must break it carries the `api:exception` label, names the consumers it was checked against (`reth`, `alloy-evm`, `op-revm`, `revm-inspectors`), and adds a row to the exception table in `MEGAETH-FORK.md`.
+   The `Semver` workflow enforces it; a PR that must break it carries the `api:exception` label, names the consumers it was checked against (`reth`, `alloy-evm`, `revm-inspectors`, the `op-revm` fork), and adds a row to the exception table in `MEGAETH-FORK.md`.
 2. **Thin layer.** The fork adds hooks and data, never MegaETH semantics.
    If a change makes a design decision (a price, a limit, a policy), ask for it to move to `mega-evm` and for the fork to expose only the hook it needs.
 3. **Touch points.** Every upstream file the PR modifies has a row in the "Upstream touch points" table of `MEGAETH-FORK.md` with a rebase rule that a future rebase can follow without the author.
