@@ -9,7 +9,8 @@ expression: "&(baseline_result, result)"
         "gas_spent": 33112,
         "state_gas_spent": 0,
         "gas_refunded": 0,
-        "floor_gas": 12000
+        "floor_gas": 12000,
+        "reservoir_remaining": 0
       },
       "logs": [],
       "output": "0x"
@@ -21,7 +22,8 @@ expression: "&(baseline_result, result)"
         "gas_spent": 33112,
         "state_gas_spent": 0,
         "gas_refunded": 0,
-        "floor_gas": 12000
+        "floor_gas": 12000,
+        "reservoir_remaining": 0
       },
       "logs": [],
       "output": "0x"

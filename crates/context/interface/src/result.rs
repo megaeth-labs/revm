@@ -54,11 +54,13 @@ impl<R, S> ExecResultAndState<R, S> {
 /// | [`inner_refunded()`]   | `Gas::refunded()` as u64           | Gas refunded (capped per EIP-3529)             |
 /// | [`floor_gas()`]        | `InitialAndFloorGas::floor_gas`    | EIP-7623 floor gas (0 if not applicable)       |
 /// | [`state_gas_spent_final()`] | `Gas::state_gas_spent`        | State gas consumed during execution (EIP-8037) |
+/// | [`reservoir_remaining()`] | `Gas::reservoir`                | State gas pool left unspent (EIP-8037)         |
 ///
 /// [`total_gas_spent()`]: ResultGas::total_gas_spent
 /// [`inner_refunded()`]: ResultGas::inner_refunded
 /// [`floor_gas()`]: ResultGas::floor_gas
 /// [`state_gas_spent_final()`]: ResultGas::state_gas_spent_final
+/// [`reservoir_remaining()`]: ResultGas::reservoir_remaining
 ///
 /// ## Derived values
 ///
@@ -89,6 +91,14 @@ pub struct ResultGas {
     refunded: u64,
     /// EIP-7623 floor gas. Zero when not applicable.
     floor_gas: u64,
+    /// State gas pool (EIP-8037 reservoir) still unspent when the transaction finished.
+    ///
+    /// Captured at the same point as [`total_gas_spent`](Self::total_gas_spent), before the
+    /// EIP-7623 floor check may absorb the pool into the floor cost. Zero when state gas is
+    /// not enabled: validation then holds the gas limit to the transaction gas cap, which
+    /// leaves no pool.
+    #[cfg_attr(feature = "serde", serde(default))]
+    reservoir_remaining: u64,
 }
 
 impl ResultGas {
@@ -106,6 +116,7 @@ impl ResultGas {
             refunded,
             floor_gas,
             state_gas_spent: 0,
+            reservoir_remaining: 0,
         }
     }
 
@@ -122,6 +133,7 @@ impl ResultGas {
             refunded,
             floor_gas,
             state_gas_spent,
+            reservoir_remaining: 0,
         }
     }
 
@@ -150,6 +162,17 @@ impl ResultGas {
     #[inline]
     pub const fn floor_gas(&self) -> u64 {
         self.floor_gas
+    }
+
+    /// Returns the unspent EIP-8037 state gas pool.
+    ///
+    /// Block-level accounting that reports execution gas and state gas as separate columns
+    /// needs this: [`state_gas_spent_final`](Self::state_gas_spent_final) says how much state
+    /// gas was consumed, whether from the pool or spilled onto the regular budget, and this says
+    /// how much of the pool was never needed. It cannot be derived from the other fields.
+    #[inline]
+    pub const fn reservoir_remaining(&self) -> u64 {
+        self.reservoir_remaining
     }
 
     /// Returns the raw refund from EVM execution, before EIP-7623 floor gas adjustment.
@@ -199,6 +222,12 @@ impl ResultGas {
         self.state_gas_spent = state_gas_spent;
     }
 
+    /// Sets the `reservoir_remaining` field by mutable reference.
+    #[inline]
+    pub const fn set_reservoir_remaining(&mut self, reservoir_remaining: u64) {
+        self.reservoir_remaining = reservoir_remaining;
+    }
+
     /// Sets the `spent` field by mutable reference.
     #[inline]
     #[deprecated(
@@ -238,6 +267,13 @@ impl ResultGas {
     #[inline]
     pub const fn with_state_gas_spent(mut self, state_gas_spent: u64) -> Self {
         self.state_gas_spent = state_gas_spent;
+        self
+    }
+
+    /// Sets the `reservoir_remaining` field.
+    #[inline]
+    pub const fn with_reservoir_remaining(mut self, reservoir_remaining: u64) -> Self {
+        self.reservoir_remaining = reservoir_remaining;
         self
     }
 
@@ -1431,5 +1467,42 @@ mod tests {
             .with_total_gas_spent(20_000)
             .with_state_gas_spent(30_000);
         assert_eq!(gas.block_regular_gas_used(), 0);
+    }
+
+    #[test]
+    fn test_result_gas_reservoir_remaining() {
+        assert_eq!(ResultGas::default().reservoir_remaining(), 0);
+
+        let gas = ResultGas::default()
+            .with_total_gas_spent(100_000)
+            .with_state_gas_spent(30_000)
+            .with_reservoir_remaining(70_000);
+        assert_eq!(gas.reservoir_remaining(), 70_000);
+        // The other fields are untouched.
+        assert_eq!(gas.total_gas_spent(), 100_000);
+        assert_eq!(gas.state_gas_spent_final(), 30_000);
+
+        let mut gas = gas;
+        gas.set_reservoir_remaining(5);
+        assert_eq!(gas.reservoir_remaining(), 5);
+        assert_eq!(gas.total_gas_spent(), 100_000);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_result_gas_reservoir_remaining_serde() {
+        // A payload written before the field existed reads as zero.
+        let gas: ResultGas = serde_json::from_str(
+            r#"{"gas_spent":100000,"state_gas_spent":30000,"gas_refunded":0,"floor_gas":0}"#,
+        )
+        .unwrap();
+        assert_eq!(gas.reservoir_remaining(), 0);
+        assert_eq!(gas.total_gas_spent(), 100_000);
+
+        // A round trip keeps a non-zero value.
+        let gas = gas.with_reservoir_remaining(70_000);
+        let json = serde_json::to_string(&gas).unwrap();
+        assert!(json.contains(r#""reservoir_remaining":70000"#), "{json}");
+        assert_eq!(serde_json::from_str::<ResultGas>(&json).unwrap(), gas);
     }
 }

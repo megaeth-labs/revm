@@ -32,6 +32,9 @@ either.workspace = true
 # Optional
 serde = { workspace = true, optional = true }
 
+[dev-dependencies]
+serde_json = { workspace = true, features = ["alloc"] }
+
 [features]
 default = ["std"]
 std = [
@@ -42,6 +45,7 @@ std = [
 	"primitives/std",
 	"state/std",
 	"either/std",
+	"serde_json/std",
 ]
 serde = [
 	"dep:serde",
