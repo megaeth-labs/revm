@@ -15,7 +15,9 @@ use core::cmp::Ordering;
 use interpreter::GasTracker;
 use primitives::{hardfork::SpecId, Address, AddressMap, HashSet, StorageKey, TxKind, U256};
 use state::AccountInfo;
-use std::vec::Vec;
+
+mod megaeth;
+pub use megaeth::Eip7702AuthFacts;
 
 /// Loads and warms accounts for execution, including precompiles and access list.
 pub fn load_accounts<
@@ -467,34 +469,6 @@ pub fn apply_auth_list_eip2780<
     }
 
     Ok(false)
-}
-
-/// The scalar facts of one EIP-7702 authorization, lifted out of the transaction so the
-/// authorization loop can hold the whole context instead of only the journal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Eip7702AuthFacts {
-    /// Chain id the authorization is bound to; zero means any chain.
-    pub chain_id: U256,
-    /// Nonce the authority must be at for the authorization to apply.
-    pub nonce: u64,
-    /// Recovered authority, or `None` when signature recovery failed.
-    pub authority: Option<Address>,
-    /// Address to delegate to; zero clears the delegation.
-    pub address: Address,
-}
-
-impl Eip7702AuthFacts {
-    /// Lifts every authorization of `tx` into the scalar form.
-    pub fn collect(tx: &impl Transaction) -> Vec<Self> {
-        tx.authorization_list()
-            .map(|authorization| Self {
-                chain_id: authorization.chain_id(),
-                nonce: authorization.nonce(),
-                authority: authorization.authority(),
-                address: authorization.address(),
-            })
-            .collect()
-    }
 }
 
 /// Apply EIP-7702 style auth list and return number gas refund on already created accounts.
