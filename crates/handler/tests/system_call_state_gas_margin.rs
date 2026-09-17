@@ -8,7 +8,7 @@
 //!
 //! [`Cfg::system_call_state_gas_margin_in_reservoir`]: context_interface::Cfg::system_call_state_gas_margin_in_reservoir
 
-use bytecode::opcode::{GAS, INVALID, PUSH0, PUSH1, REVERT, SSTORE, STOP};
+use bytecode::opcode::{GAS, INVALID, PUSH0, PUSH1, REVERT, SSTORE, STOP, SUB, SWAP1};
 use context::{
     result::{EVMError, ExecutionResult, HaltReason},
     Context, ContextSetters, TxEnv,
@@ -53,6 +53,23 @@ const SSTORE_AND_REVERT: &[u8] = &[PUSH1, 1, PUSH0, SSTORE, PUSH0, PUSH0, REVERT
 const SSTORE_AND_REVERT_REGULAR: u64 = 3 + 2 + SSTORE_SET_REGULAR + 2 + 2;
 /// `SSTORE(0, 1); INVALID`
 const SSTORE_AND_HALT: &[u8] = &[PUSH1, 1, PUSH0, SSTORE, INVALID];
+/// Regular gas of each write in [`fresh_writes`]: two `PUSH1` at 3 each and the cold 0→x `SSTORE`.
+const FRESH_WRITE_REGULAR: u64 = 3 + 3 + SSTORE_SET_REGULAR;
+/// Fresh storage writes one past the number the margin is sized for.
+const WRITES_PAST_THE_MARGIN: u64 = SYSTEM_MAX_SSTORES_PER_CALL + 1;
+/// Follows an earlier `GAS` whose reading is still on the stack: `SSTORE(0, earlier - GAS); STOP`.
+/// Stores the regular gas spent between the two readings, this `GAS`'s own 2 gas included.
+const SPENT_SINCE_GAS_TO_SLOT: &[u8] = &[GAS, SWAP1, SUB, PUSH0, SSTORE, STOP];
+
+/// `SSTORE(slot, 1)` for each `slot` in `0..writes`.
+fn fresh_writes(writes: u64) -> Vec<u8> {
+    let mut code = Vec::new();
+    for slot in 0..writes {
+        let slot = u8::try_from(slot).expect("slot fits in PUSH1");
+        code.extend_from_slice(&[PUSH1, 1, PUSH1, slot, SSTORE]);
+    }
+    code
+}
 
 fn db_with(code: &[u8]) -> Db {
     let mut db = Db::default();
@@ -90,7 +107,7 @@ fn system_call(
     (output.result, output.state)
 }
 
-/// The value [`GAS_TO_SLOT`] stored in slot zero of [`SYSTEM_CONTRACT`].
+/// The value [`GAS_TO_SLOT`] or [`SPENT_SINCE_GAS_TO_SLOT`] stored in slot zero of [`SYSTEM_CONTRACT`].
 fn stored_gas(state: &EvmState) -> U256 {
     state[&SYSTEM_CONTRACT]
         .storage
@@ -105,6 +122,8 @@ fn test_system_call_gas_limit_is_the_regular_budget_plus_the_margin() {
     assert_eq!(SYSTEM_CALL_STATE_GAS_RESERVOIR, MARGIN);
     assert_eq!(SYSTEM_CALL_GAS_LIMIT, 30_000_000 + MARGIN);
     assert_eq!(SYSTEM_CALL_GAS_LIMIT, 31_566_720);
+    assert_eq!(SYSTEM_MAX_SSTORES_PER_CALL, 16);
+    assert_eq!(WRITES_PAST_THE_MARGIN, 17);
 }
 
 /// Ported from upstream #3892 (`test_system_call_eip8037_state_gas_reservoir`), switch on.
@@ -189,6 +208,109 @@ fn test_system_call_halt_consumes_the_margin_by_default() {
     assert!(result.is_halt(), "{result:?}");
     assert_eq!(result.gas().total_gas_spent(), SYSTEM_CALL_GAS_LIMIT);
     assert_eq!(result.gas().reservoir_remaining(), 0);
+}
+
+// The tests below use 16 fresh storage writes, the number the 1,566,720 margin is sized for
+// (16 × 97,920), and 17, one past it. Each write spends 12,106 regular gas.
+
+#[test]
+fn test_system_call_margin_in_reservoir_spills_only_the_write_past_the_margin() {
+    assert_eq!(FRESH_WRITE_REGULAR, 12_106);
+
+    // Reads `GAS`, runs the writes, then stores the regular gas they spent in slot zero. The first
+    // write already changed that slot, so the last `SSTORE` charges no state gas.
+    let regular_gas_spent = |writes: u64, margin_in_reservoir: bool| {
+        let code = [
+            &[GAS],
+            fresh_writes(writes).as_slice(),
+            SPENT_SINCE_GAS_TO_SLOT,
+        ]
+        .concat();
+        let (result, state) = system_call(&code, SpecId::AMSTERDAM, margin_in_reservoir);
+
+        assert!(result.is_success(), "{result:?}");
+        assert_eq!(result.gas().reservoir_remaining(), 0);
+        stored_gas(&state)
+    };
+
+    // With the switch on, 16 writes use up the reservoir exactly and take no state gas from
+    // regular gas: 16 × 12,106 + 2 = 193,698.
+    assert_eq!(
+        regular_gas_spent(SYSTEM_MAX_SSTORES_PER_CALL, true),
+        U256::from(193_698)
+    );
+    // The 17th write finds the reservoir empty and takes its 97,920 state gas from regular gas:
+    // 17 × 12,106 + 97,920 + 2 = 303,724.
+    assert_eq!(
+        regular_gas_spent(WRITES_PAST_THE_MARGIN, true),
+        U256::from(303_724)
+    );
+    // Switch-off twin: every write takes its state gas from regular gas.
+    // 16 × (12,106 + 97,920) + 2 = 1,760,418 and 17 × (12,106 + 97,920) + 2 = 1,870,444.
+    assert_eq!(
+        regular_gas_spent(SYSTEM_MAX_SSTORES_PER_CALL, false),
+        U256::from(1_760_418)
+    );
+    assert_eq!(
+        regular_gas_spent(WRITES_PAST_THE_MARGIN, false),
+        U256::from(1_870_444)
+    );
+}
+
+#[test]
+fn test_system_call_margin_switch_keeps_the_gas_spent_past_the_margin() {
+    let code = [fresh_writes(WRITES_PAST_THE_MARGIN).as_slice(), &[STOP]].concat();
+
+    // 17 × 12,106 = 205,802 regular gas and 17 × 97,920 = 1,664,640 state gas, 1,870,442 in all.
+    // The switch only changes which pool the state gas came from.
+    for margin_in_reservoir in [false, true] {
+        let (result, _) = system_call(&code, SpecId::AMSTERDAM, margin_in_reservoir);
+
+        assert!(result.is_success(), "{result:?}");
+        assert_eq!(result.gas().total_gas_spent(), 1_870_442);
+        assert_eq!(result.gas().block_regular_gas_used(), 205_802);
+        assert_eq!(result.gas().block_state_gas_used(), 1_664_640);
+        assert_eq!(result.gas().reservoir_remaining(), 0);
+    }
+}
+
+#[test]
+fn test_system_call_margin_in_reservoir_takes_back_state_gas_past_the_margin() {
+    let code = [
+        fresh_writes(WRITES_PAST_THE_MARGIN).as_slice(),
+        &[PUSH0, PUSH0, REVERT],
+    ]
+    .concat();
+    let (on, _) = system_call(&code, SpecId::AMSTERDAM, true);
+    let (off, _) = system_call(&code, SpecId::AMSTERDAM, false);
+
+    assert!(matches!(on, ExecutionResult::Revert { .. }), "{on:?}");
+    assert!(matches!(off, ExecutionResult::Revert { .. }), "{off:?}");
+    // With the switch on, the revert gives the 17th write's spilled 97,920 back to regular gas and
+    // the other 16 writes' state gas back to the reservoir, which is full again.
+    assert_eq!(on.gas().state_gas_spent_final(), 0);
+    assert_eq!(on.gas().reservoir_remaining(), 1_566_720);
+    assert_eq!(off.gas().state_gas_spent_final(), 0);
+    assert_eq!(off.gas().reservoir_remaining(), 0);
+    // Only the regular gas stays spent: 17 × 12,106 + 2 + 2 for the `PUSH0`s = 205,806.
+    assert_eq!(on.gas().total_gas_spent(), 205_806);
+    assert_eq!(off.gas().total_gas_spent(), 205_806);
+}
+
+#[test]
+fn test_system_call_margin_in_reservoir_survives_a_halt_past_the_margin() {
+    let code = [fresh_writes(WRITES_PAST_THE_MARGIN).as_slice(), &[INVALID]].concat();
+    let (on, _) = system_call(&code, SpecId::AMSTERDAM, true);
+    let (off, _) = system_call(&code, SpecId::AMSTERDAM, false);
+
+    assert!(on.is_halt(), "{on:?}");
+    assert!(off.is_halt(), "{off:?}");
+    // With the switch on, the halt consumes the 30,000,000 regular budget, the spilled 97,920
+    // included, and returns the 1,566,720 reservoir; without it the halt consumes all 31,566,720.
+    assert_eq!(on.gas().total_gas_spent(), 30_000_000);
+    assert_eq!(on.gas().reservoir_remaining(), 1_566_720);
+    assert_eq!(off.gas().total_gas_spent(), 31_566_720);
+    assert_eq!(off.gas().reservoir_remaining(), 0);
 }
 
 /// Without EIP-8037 there is no reservoir, so the switch has nothing to move.
