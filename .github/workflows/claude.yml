@@ -105,9 +105,8 @@ jobs:
             Read `MEGAETH-FORK.md` and `REVIEW.md` first; their rules take precedence.
             The questions that matter most here:
 
-            - Does the change keep the public API a superset of upstream (rule 1), or is the exception registered?
+            - Does the change keep the public API a superset of upstream (rule 1), or does the PR carry `api:exception` and list the items?
             - Is MegaETH logic kept out of the fork (rule 2)? A design decision belongs in `mega-evm`, not here.
-            - Does every edited upstream file have a row in the "Upstream touch points" table, with a rebase rule that a future rebase can follow?
             - Is `no_std` preserved (no `std::` without a gate, no new default-on `std` dependency)?
             - For a cherry-pick: does the commit message name the upstream commit, and does the diff match it apart from the recorded conflicts?
 

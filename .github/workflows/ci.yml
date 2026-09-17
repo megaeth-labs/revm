@@ -231,38 +231,6 @@ jobs:
           command: check all
 
 
-  # Every upstream file a PR modifies must have a row in the touch-point table
-  # of MEGAETH-FORK.md (rule 4). Fork-owned files are exempt inside the script;
-  # cherry-pick PRs are exempt, because a cherry-picked upstream commit is
-  # dropped, not re-applied, when the base line moves past it. The labels are
-  # read from the API, not the event payload: a label added right after the PR
-  # opened is missing from the `opened` payload.
-  touch-points:
-    name: upstream touch points
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          if gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name' | grep -qx 'mega:cherry-pick'; then
-            echo "::notice::cherry-pick pull request: upstream files are not touch points"
-            exit 0
-          fi
-          scripts/mega/check-touch-points.sh "$BASE" "$HEAD"
-
   ci-success:
     name: ci success
     runs-on: ubuntu-latest
@@ -278,11 +246,8 @@ jobs:
       - doctest
       - fmt
       - deny
-      - touch-points
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # release/v1
         with:
           jobs: ${{ toJSON(needs) }}
-          # The touch-point job only runs on pull requests.
-          allowed-skips: touch-points

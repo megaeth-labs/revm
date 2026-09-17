@@ -2,9 +2,9 @@
 
 <!-- What does this PR add to the fork and why? One topic per PR. -->
 
-## Upstream touch points
+## API exceptions
 
-<!-- Every upstream file this PR modifies, with its row in the "Upstream touch points" table of MEGAETH-FORK.md. Write "none" if only fork-owned files change. -->
+<!-- Every public-API deviation from the PR base that `cargo semver-checks` reports, with the consumers it was checked against (reth, alloy-evm, revm-inspectors, the op-revm fork). Write "none" if the API stays a superset. -->
 
 ## Test plan
 
@@ -14,4 +14,4 @@
 
 <!-- Exactly one of each; see the "Labels" section of MEGAETH-FORK.md. -->
 <!-- mega: mega:cherry-pick / mega:hook / mega:vendor / mega:ci / mega:rebase -->
-<!-- api: api:superset / api:exception (exception: add the row to the exception table) -->
+<!-- api: api:superset / api:exception (exception: list the items above) -->
