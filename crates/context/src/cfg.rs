@@ -680,4 +680,27 @@ mod test {
         assert!(cfg.enable_amsterdam_eip7708());
         assert!(!cfg.spec.is_enabled_in(SpecId::AMSTERDAM));
     }
+
+    #[test]
+    fn test_system_call_state_gas_margin_switch_defaults_off() {
+        let cfg: CfgEnv = Default::default();
+        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
+        // Amsterdam turns EIP-8037 on, but not the switch.
+        let cfg = CfgEnv::new_with_spec(SpecId::AMSTERDAM);
+        assert!(cfg.is_amsterdam_eip8037_enabled());
+        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
+    }
+
+    #[test]
+    fn test_system_call_state_gas_margin_switch_survives_a_spec_change() {
+        let cfg = CfgEnv::new_with_spec(SpecId::OSAKA)
+            .with_system_call_state_gas_margin_in_reservoir(true);
+        assert!(cfg.system_call_state_gas_margin_in_reservoir());
+
+        let cfg = cfg.with_spec_and_mainnet_gas_params(SpecId::AMSTERDAM);
+        assert!(cfg.system_call_state_gas_margin_in_reservoir());
+
+        let cfg = cfg.with_system_call_state_gas_margin_in_reservoir(false);
+        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
+    }
 }
