@@ -85,6 +85,22 @@ pub const fn gas_table() -> GasTable {
     const { gas_table_impl() }
 }
 
+/// Overwrites `DUPN`, `SWAPN`, `EXCHANGE`, and `SLOTNUM` with the ungated implementations.
+///
+/// For a consumer that activates EIP-8024 and EIP-7843 below [`SpecId::AMSTERDAM`].
+/// Nothing else in the table changes. The gas table is spec-keyed and is not modified:
+/// these four opcodes have constant static gas (`SLOTNUM` 2, `DUPN` / `SWAPN` / `EXCHANGE` 3)
+/// on every spec.
+pub fn enable_amsterdam_opcodes<WIRE: InterpreterTypes, H: Host + ?Sized>(
+    table: &mut InstructionTable<WIRE, H>,
+) {
+    use bytecode::opcode::{DUPN, EXCHANGE, SLOTNUM, SWAPN};
+    table[DUPN as usize] = Instruction::new(stack::dupn_enabled);
+    table[SWAPN as usize] = Instruction::new(stack::swapn_enabled);
+    table[EXCHANGE as usize] = Instruction::new(stack::exchange_enabled);
+    table[SLOTNUM as usize] = Instruction::new(block_info::slot_num_enabled);
+}
+
 /// Create a gas table with applied spec changes to static gas cost.
 #[inline]
 pub const fn gas_table_spec(spec: SpecId) -> GasTable {

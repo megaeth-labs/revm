@@ -109,15 +109,6 @@ pub trait Cfg {
     /// EIP-7702-delegated recipients.
     fn is_amsterdam_eip2780_enabled(&self) -> bool;
 
-    /// Returns whether Amsterdam opcodes are enabled independently of the spec id.
-    ///
-    /// Covers EIP-8024 (`DUPN` / `SWAPN` / `EXCHANGE`) and EIP-7843 (`SLOTNUM`).
-    /// Default is `false`: activation then follows `SpecId::AMSTERDAM` only.
-    #[inline]
-    fn enable_amsterdam_opcodes(&self) -> bool {
-        false
-    }
-
     /// Returns whether EIP-7708 transfer logs are enabled independently of the spec id.
     ///
     /// Default is `false`: emission then follows `SpecId::AMSTERDAM` only.

@@ -82,70 +82,12 @@ pub fn blob_basefee<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Resu
 
 /// EIP-7843: SLOTNUM opcode
 pub fn slot_num<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
-    check_amsterdam_opcodes!(context);
-    push!(context.interpreter, context.host.slot_num());
-    Ok(())
+    check!(context.interpreter, AMSTERDAM);
+    slot_num_enabled(context)
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{
-        host::DummyHost,
-        instructions::{gas_table, instruction_table},
-        interpreter::{EthInterpreter, ExtBytecode, InputsImpl, SharedMemory},
-        InstructionResult, Interpreter, InterpreterAction,
-    };
-    use bytecode::opcode::SLOTNUM;
-    use bytecode::Bytecode;
-    use primitives::{hardfork::SpecId, Bytes, U256};
-
-    fn run_slot_num(spec: SpecId, enable_amsterdam_opcodes: bool) -> Interpreter {
-        let bytecode = Bytecode::new_raw(Bytes::copy_from_slice(&[SLOTNUM]));
-        let mut interpreter = Interpreter::<EthInterpreter>::new(
-            SharedMemory::new(),
-            ExtBytecode::new(bytecode),
-            InputsImpl::default(),
-            false,
-            spec,
-            u64::MAX,
-        );
-        let table = instruction_table::<EthInterpreter, DummyHost>();
-        let gas = gas_table();
-        let mut host = DummyHost::new(spec).with_amsterdam_opcodes(enable_amsterdam_opcodes);
-        interpreter.run_plain(&table, &gas, &mut host);
-        interpreter
-    }
-
-    fn run_slot_num_action(spec: SpecId, enable_amsterdam_opcodes: bool) -> InterpreterAction {
-        let bytecode = Bytecode::new_raw(Bytes::copy_from_slice(&[SLOTNUM]));
-        let mut interpreter = Interpreter::<EthInterpreter>::new(
-            SharedMemory::new(),
-            ExtBytecode::new(bytecode),
-            InputsImpl::default(),
-            false,
-            spec,
-            u64::MAX,
-        );
-        let table = instruction_table::<EthInterpreter, DummyHost>();
-        let gas = gas_table();
-        let mut host = DummyHost::new(spec).with_amsterdam_opcodes(enable_amsterdam_opcodes);
-        interpreter.run_plain(&table, &gas, &mut host)
-    }
-
-    #[test]
-    fn test_slot_num_not_activated_on_osaka_when_switch_off() {
-        let action = run_slot_num_action(SpecId::OSAKA, false);
-        assert_eq!(
-            action.instruction_result(),
-            Some(InstructionResult::NotActivated)
-        );
-    }
-
-    #[test]
-    fn test_slot_num_on_osaka_with_switch_matches_amsterdam() {
-        let with_switch = run_slot_num(SpecId::OSAKA, true);
-        let on_amsterdam = run_slot_num(SpecId::AMSTERDAM, false);
-        assert_eq!(with_switch.stack.data(), on_amsterdam.stack.data());
-        assert_eq!(with_switch.stack.data()[0], U256::ZERO);
-    }
+/// SLOTNUM without its `SpecId::AMSTERDAM` gate, for a consumer that activates EIP-7843 below Amsterdam.
+pub fn slot_num_enabled<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
+    push!(context.interpreter, context.host.slot_num());
+    Ok(())
 }

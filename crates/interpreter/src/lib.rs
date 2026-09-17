@@ -39,7 +39,9 @@ pub use context_interface::{
 pub use gas::{Gas, GasTracker};
 pub use instruction_context::InstructionContext;
 pub use instruction_result::*;
-pub use instructions::{gas_table, instruction_table, GasTable, Instruction, InstructionTable};
+pub use instructions::{
+    enable_amsterdam_opcodes, gas_table, instruction_table, GasTable, Instruction, InstructionTable,
+};
 pub use interpreter::{
     num_words, InputsImpl, Interpreter, InterpreterResult, SharedMemory, Stack, STACK_LIMIT,
 };

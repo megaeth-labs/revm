@@ -69,14 +69,6 @@ pub trait Host {
     /// Returns whether state gas (EIP-8037) is enabled.
     fn is_amsterdam_eip8037_enabled(&self) -> bool;
 
-    /// Returns whether Amsterdam opcodes are enabled independently of the spec id.
-    ///
-    /// Default is `false`. The context implementation forwards [`crate::Cfg::enable_amsterdam_opcodes`].
-    #[inline]
-    fn enable_amsterdam_opcodes(&self) -> bool {
-        false
-    }
-
     /// Unit price of one EIP-8037 state gas charge.
     ///
     /// Every state gas charge and every state gas refund goes through here, so a charge and the
@@ -245,7 +237,7 @@ pub trait Host {
 pub struct DummyHost {
     gas_params: GasParams,
     spec: SpecId,
-    enable_amsterdam_opcodes: bool,
+    slot_num: U256,
 }
 
 impl DummyHost {
@@ -254,13 +246,13 @@ impl DummyHost {
         Self {
             gas_params: GasParams::new_spec(spec),
             spec,
-            enable_amsterdam_opcodes: false,
+            slot_num: U256::ZERO,
         }
     }
 
-    /// Enable or disable Amsterdam opcodes independently of the spec id.
-    pub const fn with_amsterdam_opcodes(mut self, enable: bool) -> Self {
-        self.enable_amsterdam_opcodes = enable;
+    /// Sets the value [`Host::slot_num`] returns.
+    pub const fn with_slot_num(mut self, slot_num: U256) -> Self {
+        self.slot_num = slot_num;
         self
     }
 }
@@ -286,10 +278,6 @@ impl Host for DummyHost {
         self.spec.is_enabled_in(SpecId::AMSTERDAM)
     }
 
-    fn enable_amsterdam_opcodes(&self) -> bool {
-        self.enable_amsterdam_opcodes
-    }
-
     fn difficulty(&self) -> U256 {
         U256::ZERO
     }
@@ -311,7 +299,7 @@ impl Host for DummyHost {
     }
 
     fn slot_num(&self) -> U256 {
-        U256::ZERO
+        self.slot_num
     }
 
     fn chain_id(&self) -> U256 {

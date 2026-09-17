@@ -468,11 +468,6 @@ impl<
         self.cfg().is_amsterdam_eip8037_enabled()
     }
 
-    #[inline]
-    fn enable_amsterdam_opcodes(&self) -> bool {
-        self.cfg().enable_amsterdam_opcodes()
-    }
-
     fn block_number(&self) -> U256 {
         self.block().number()
     }
