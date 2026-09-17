@@ -35,12 +35,28 @@ pub const SYSTEM_ADDRESS: Address = address!("0xffffffffffffffffffffffffffffffff
 /// Maximum number of SSTOREs a system call reserves state gas for under EIP-8037.
 pub const SYSTEM_MAX_SSTORES_PER_CALL: u64 = 16;
 
+/// Regular-gas budget of a system call: the `gas_left` a system contract runs on.
+///
+/// This is the pre-EIP-8037 system call gas limit. Under EIP-8037 it stays the
+/// regular budget while state gas is provided through the reservoir.
+pub const SYSTEM_CALL_REGULAR_GAS_LIMIT: u64 = 30_000_000;
+
+/// State-gas reservoir of a system call under EIP-8037, sized for
+/// `SYSTEM_MAX_SSTORES_PER_CALL` fresh storage writes.
+pub const SYSTEM_CALL_STATE_GAS_RESERVOIR: u64 =
+    eip8037::SSTORE_SET_BYTES * eip8037::CPSB_GLAMSTERDAM * SYSTEM_MAX_SSTORES_PER_CALL;
+
 /// Gas limit for system calls under EIP-8037.
 ///
 /// System calls get the base 30M regular-gas budget plus
-/// a state-gas reservoir sized for `SYSTEM_MAX_SSTORES_PER_CALL` storage writes.
-pub const SYSTEM_CALL_GAS_LIMIT: u64 = 30_000_000
-    + eip8037::SSTORE_SET_BYTES * eip8037::CPSB_GLAMSTERDAM * SYSTEM_MAX_SSTORES_PER_CALL;
+/// a state-gas margin sized for `SYSTEM_MAX_SSTORES_PER_CALL` storage writes.
+/// [`Handler::system_call_gas`] moves the part above [`SYSTEM_CALL_REGULAR_GAS_LIMIT`] into the
+/// state-gas reservoir only when [`Cfg::system_call_state_gas_margin_in_reservoir`] is enabled;
+/// otherwise the whole limit is regular gas.
+///
+/// [`Cfg::system_call_state_gas_margin_in_reservoir`]: context::Cfg::system_call_state_gas_margin_in_reservoir
+pub const SYSTEM_CALL_GAS_LIMIT: u64 =
+    SYSTEM_CALL_REGULAR_GAS_LIMIT + SYSTEM_CALL_STATE_GAS_RESERVOIR;
 
 /// Creates the system transaction with default values and set data and tx call target to system contract address
 /// that is going to be called.

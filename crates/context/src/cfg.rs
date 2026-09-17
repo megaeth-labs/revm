@@ -177,6 +177,15 @@ pub struct CfgEnv<SPEC = SpecId> {
     ///
     /// [EIP-8246]: https://eips.ethereum.org/EIPS/eip-8246
     pub amsterdam_eip8246_delayed_clear_disabled: bool,
+    /// Places the EIP-8037 state-gas margin of a system call in the reservoir.
+    ///
+    /// When enabled together with EIP-8037, a system call runs on at most the base 30M regular
+    /// gas and the rest of its gas limit becomes the state-gas reservoir, as EIP-8037 specifies
+    /// for system calls. Transactions are not affected.
+    ///
+    /// By default, it is set to `false`: the whole system call gas limit is regular gas.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub system_call_state_gas_margin_in_reservoir: bool,
 }
 
 impl CfgEnv {
@@ -297,6 +306,8 @@ impl<SPEC> CfgEnv<SPEC> {
             enable_amsterdam_eip7708: self.enable_amsterdam_eip7708,
             amsterdam_eip7708_disabled: self.amsterdam_eip7708_disabled,
             amsterdam_eip8246_delayed_clear_disabled: self.amsterdam_eip8246_delayed_clear_disabled,
+            system_call_state_gas_margin_in_reservoir: self
+                .system_call_state_gas_margin_in_reservoir,
         }
     }
 
@@ -355,6 +366,12 @@ impl<SPEC> CfgEnv<SPEC> {
         self.enable_amsterdam_eip7708 = enable;
         self
     }
+
+    /// Sets whether a system call places its EIP-8037 state-gas margin in the reservoir.
+    pub const fn with_system_call_state_gas_margin_in_reservoir(mut self, enable: bool) -> Self {
+        self.system_call_state_gas_margin_in_reservoir = enable;
+        self
+    }
 }
 
 impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
@@ -395,6 +412,7 @@ impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
             enable_amsterdam_eip7708: false,
             amsterdam_eip7708_disabled: false,
             amsterdam_eip8246_delayed_clear_disabled: false,
+            system_call_state_gas_margin_in_reservoir: false,
         }
     }
 
@@ -623,6 +641,11 @@ impl<SPEC: Into<SpecId> + Clone> Cfg for CfgEnv<SPEC> {
     #[inline]
     fn enable_amsterdam_eip7708(&self) -> bool {
         self.enable_amsterdam_eip7708
+    }
+
+    #[inline]
+    fn system_call_state_gas_margin_in_reservoir(&self) -> bool {
+        self.system_call_state_gas_margin_in_reservoir
     }
 }
 
