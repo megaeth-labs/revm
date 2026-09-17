@@ -657,10 +657,14 @@ pub const fn handle_reservoir_remaining_gas(
                 .saturating_add(child_gas.state_gas_spent()),
         );
         parent_gas.add_state_gas_spilled(child_gas.state_gas_spilled());
-        // History gas rides the same success-only merge: a failing child rolled it back
-        // along with its state gas, so it contributes nothing. Zero on any chain that
-        // never charges history gas.
-        parent_gas.add_history_gas_net(child_gas.history_gas_net());
+        // History gas rides the same success-only merge, signed for the same reason: a
+        // failing child rolled it back along with its state gas, so it contributes
+        // nothing. Zero on any chain that never charges history gas.
+        parent_gas.set_history_gas_spent(
+            parent_gas
+                .history_gas_spent()
+                .saturating_add(child_gas.history_gas_spent()),
+        );
         parent_gas.record_refund(child_gas.refunded());
     }
 }

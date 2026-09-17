@@ -194,31 +194,19 @@ impl Gas {
         self.tracker.add_state_gas_spilled(delta);
     }
 
-    /// Returns the history gas spent. See [`GasTracker::history_gas_spent`].
+    /// Returns total history gas spent so far.
+    ///
+    /// Can be negative within a call frame that refilled more history gas
+    /// than this frame charged (see [`GasTracker::refill_history`]).
     #[inline]
-    pub const fn history_gas_spent(&self) -> u64 {
+    pub const fn history_gas_spent(&self) -> i64 {
         self.tracker.history_gas_spent()
     }
 
-    /// Sets the history gas spent.
+    /// Sets the total history gas spent (used when propagating from child frame).
     #[inline]
-    pub const fn set_history_gas_spent(&mut self, val: u64) {
+    pub const fn set_history_gas_spent(&mut self, val: i64) {
         self.tracker.set_history_gas_spent(val);
-    }
-
-    /// Adds `delta` to the history gas spent. See [`GasTracker::add_history_gas_spent`].
-    ///
-    /// A successful child frame is merged with [`GasTracker::add_history_gas_net`] instead, whose
-    /// signed delta carries a child's refill of history gas this frame charged.
-    #[inline]
-    pub const fn add_history_gas_spent(&mut self, delta: u64) {
-        self.tracker.add_history_gas_spent(delta);
-    }
-
-    /// Returns the signed net history gas spent. See [`GasTracker::history_gas_net`].
-    #[inline]
-    pub const fn history_gas_net(&self) -> i64 {
-        self.tracker.history_gas_net()
     }
 
     /// Refills history gas for bytes taken back. See [`GasTracker::refill_history`].

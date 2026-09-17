@@ -148,52 +148,19 @@ impl GasTracker {
         self.state_gas_spilled = self.state_gas_spilled.saturating_add(delta);
     }
 
-    /// Returns the history gas spent, or zero while this frame has refilled more than it charged.
-    /// See [`history_gas_net`](Self::history_gas_net) for the signed figure.
+    /// Returns the history gas spent.
+    ///
+    /// Negative while this frame has refilled more history gas than it charged, like
+    /// [`state_gas_spent`](Self::state_gas_spent).
     #[inline]
-    pub const fn history_gas_spent(&self) -> u64 {
-        if self.history_gas_spent < 0 {
-            0
-        } else {
-            self.history_gas_spent as u64
-        }
-    }
-
-    /// Returns the net history gas spent, which is negative while this frame has refilled more
-    /// history gas than it charged.
-    #[inline]
-    pub const fn history_gas_net(&self) -> i64 {
+    pub const fn history_gas_spent(&self) -> i64 {
         self.history_gas_spent
     }
 
     /// Sets the history gas spent.
     #[inline]
-    pub const fn set_history_gas_spent(&mut self, val: u64) {
-        self.history_gas_spent = if val > i64::MAX as u64 {
-            i64::MAX
-        } else {
-            val as i64
-        };
-    }
-
-    /// Adds `delta` to the history gas spent, saturating.
-    #[inline]
-    pub const fn add_history_gas_spent(&mut self, delta: u64) {
-        let delta = if delta > i64::MAX as u64 {
-            i64::MAX
-        } else {
-            delta as i64
-        };
-        self.history_gas_spent = self.history_gas_spent.saturating_add(delta);
-    }
-
-    /// Adds a signed `delta` to the net history gas spent, saturating.
-    ///
-    /// Used to merge a successful child frame's net history gas into this (parent) frame; the
-    /// child's net is negative when it refilled history gas this frame charged.
-    #[inline]
-    pub const fn add_history_gas_net(&mut self, delta: i64) {
-        self.history_gas_spent = self.history_gas_spent.saturating_add(delta);
+    pub const fn set_history_gas_spent(&mut self, val: i64) {
+        self.history_gas_spent = val;
     }
 
     /// Returns the refunded gas.
@@ -263,7 +230,9 @@ impl GasTracker {
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_history_cost(&mut self, cost: u64) -> bool {
         if self.reservoir >= cost {
-            self.add_history_gas_spent(cost);
+            self.history_gas_spent = self
+                .history_gas_spent
+                .saturating_add(saturating_signed(cost));
             self.reservoir -= cost;
             return true;
         }
@@ -272,7 +241,9 @@ impl GasTracker {
 
         let success = self.record_regular_cost(spill);
         if success {
-            self.add_history_gas_spent(cost);
+            self.history_gas_spent = self
+                .history_gas_spent
+                .saturating_add(saturating_signed(cost));
             self.state_gas_spilled = self.state_gas_spilled.saturating_add(spill);
             self.reservoir = 0;
         }
@@ -296,12 +267,9 @@ impl GasTracker {
         self.remaining = self.remaining.saturating_add(to_remaining);
         self.state_gas_spilled -= to_remaining;
         self.reservoir = self.reservoir.saturating_add(amount - to_remaining);
-        let amount = if amount > i64::MAX as u64 {
-            i64::MAX
-        } else {
-            amount as i64
-        };
-        self.history_gas_spent = self.history_gas_spent.saturating_sub(amount);
+        self.history_gas_spent = self
+            .history_gas_spent
+            .saturating_sub(saturating_signed(amount));
     }
 
     /// Rolls back this frame's state-gas and history-gas charges on revert or
@@ -383,6 +351,16 @@ impl GasTracker {
     #[inline]
     pub const fn spend_all(&mut self) {
         self.remaining = 0;
+    }
+}
+
+/// `value` as a signed gas amount, saturating at `i64::MAX`.
+#[inline]
+const fn saturating_signed(value: u64) -> i64 {
+    if value > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        value as i64
     }
 }
 
@@ -510,11 +488,12 @@ mod tests {
             "the other 50 go back to the reservoir"
         );
         assert_eq!(tracker.state_gas_spilled(), 0);
-        assert_eq!(tracker.history_gas_net(), 250);
+        assert_eq!(tracker.history_gas_spent(), 250);
     }
 
     /// A child that refills history its parent charged goes below zero, and merging it into the
-    /// parent on success nets the two out.
+    /// parent on success nets the two out. The merge is the one the state counter gets: read the
+    /// signed figure, add, write it back.
     #[test]
     fn test_a_child_refill_of_a_parent_charge_nets_out_on_merge() {
         let mut parent = GasTracker::new(1_000, 1_000, 500);
@@ -522,13 +501,30 @@ mod tests {
 
         let mut child = GasTracker::new(300, 300, parent.reservoir());
         child.refill_history(100);
-        assert_eq!(child.history_gas_net(), -100);
-        assert_eq!(child.history_gas_spent(), 0, "the unsigned view clamps");
+        assert_eq!(child.history_gas_spent(), -100);
 
         parent.set_reservoir(child.reservoir());
-        parent.add_history_gas_net(child.history_gas_net());
-        assert_eq!(parent.history_gas_net(), 0);
+        parent.set_history_gas_spent(
+            parent
+                .history_gas_spent()
+                .saturating_add(child.history_gas_spent()),
+        );
+        assert_eq!(parent.history_gas_spent(), 0);
         assert_eq!(parent.reservoir(), 500);
+    }
+
+    /// Copying the counter through its getter and setter, as `PrecompileOutput` does for state gas,
+    /// keeps a negative net.
+    #[test]
+    fn test_a_negative_history_net_survives_a_copy_through_the_accessors() {
+        let mut child = GasTracker::new(300, 300, 0);
+        child.refill_history(100);
+
+        let mut copy = GasTracker::new(300, 300, child.reservoir());
+        copy.set_history_gas_spent(child.history_gas_spent());
+
+        assert_eq!(copy.history_gas_spent(), -100);
+        assert_eq!(copy, child);
     }
 
     /// Rolling back a frame that refilled a parent's history charge takes the refill back out of
@@ -542,7 +538,7 @@ mod tests {
         child.rollback_state_gas();
 
         assert_eq!(child.reservoir(), 400);
-        assert_eq!(child.history_gas_net(), 0);
+        assert_eq!(child.history_gas_spent(), 0);
     }
 
     #[test]

@@ -72,7 +72,7 @@ fn test_gas_decodes_with_and_without_the_history_counter() {
 fn test_a_negative_net_round_trips() {
     let mut tracker = GasTracker::new(100_000, 100_000, 0);
     tracker.refill_history(CHARGED);
-    assert_eq!(tracker.history_gas_net(), -(CHARGED as i64));
+    assert_eq!(tracker.history_gas_spent(), -(CHARGED as i64));
 
     let encoded = serde_json::to_value(tracker).unwrap();
     assert_eq!(encoded[FIELD], Value::from(-(CHARGED as i64)));

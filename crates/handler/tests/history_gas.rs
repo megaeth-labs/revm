@@ -75,6 +75,8 @@ const NEW_ACCOUNT: u64 = eip8037::NEW_ACCOUNT_BYTES * eip8037::CPSB_GLAMSTERDAM;
 const CODE_LEN: u64 = 32;
 /// History gas per deposited byte in the schedule that prices it.
 const HISTORY_PER_BYTE: u64 = 1_000;
+/// History gas for depositing [`CODE_LEN`] bytes at [`HISTORY_PER_BYTE`], signed like the counter.
+const HISTORY_FOR_CODE: i64 = (CODE_LEN * HISTORY_PER_BYTE) as i64;
 /// State gas for depositing [`CODE_LEN`] bytes on the flat Amsterdam schedule.
 const CODE_STATE: u64 = CODE_LEN * eip8037::CODE_DEPOSIT_PER_BYTE * eip8037::CPSB_GLAMSTERDAM;
 
@@ -362,16 +364,16 @@ fn call(contract: Code, child: Code) -> Run {
 /// `reservoir + state_spent + history_spent − spilled`: what a rollback sets the reservoir to,
 /// which must be the reservoir the frame inherited.
 const fn unwound_reservoir(gas: &GasTracker) -> i64 {
-    gas.reservoir() as i64 + gas.state_gas_spent() + gas.history_gas_net()
+    gas.reservoir() as i64 + gas.state_gas_spent() + gas.history_gas_spent()
         - gas.state_gas_spilled() as i64
 }
 
-/// `(reservoir, state_spent, history_net, spilled)`.
+/// `(reservoir, state_spent, history_spent, spilled)`.
 const fn counters(gas: &GasTracker) -> (u64, i64, i64, u64) {
     (
         gas.reservoir(),
         gas.state_gas_spent(),
-        gas.history_gas_net(),
+        gas.history_gas_spent(),
         gas.state_gas_spilled(),
     )
 }
@@ -399,7 +401,6 @@ fn test_a_history_charge_draws_like_a_state_charge_and_is_booked_as_history() {
             (reservoir, 0, amount as i64, spilled),
             "history charge of {amount}"
         );
-        assert_eq!(history.settled.history_gas_spent(), amount);
         assert_eq!(
             history.settled.remaining(),
             baseline.settled.remaining() - spilled
@@ -530,11 +531,8 @@ fn test_deposited_code_is_charged_history_gas_beside_its_state_gas() {
     let frame = priced.returned[0];
     assert_eq!(frame.result, InstructionResult::Return);
     assert_eq!(frame.gas.state_gas_spent(), CODE_STATE as i64);
-    assert_eq!(frame.gas.history_gas_spent(), CODE_LEN * HISTORY_PER_BYTE);
-    assert_eq!(
-        priced.settled.history_gas_spent(),
-        CODE_LEN * HISTORY_PER_BYTE
-    );
+    assert_eq!(frame.gas.history_gas_spent(), HISTORY_FOR_CODE);
+    assert_eq!(priced.settled.history_gas_spent(), HISTORY_FOR_CODE);
     assert_eq!(unpriced.settled.history_gas_spent(), 0);
 
     assert_eq!(
@@ -545,10 +543,7 @@ fn test_deposited_code_is_charged_history_gas_beside_its_state_gas() {
         unpriced.gas().state_gas_spent_final(),
         NEW_ACCOUNT + CODE_STATE
     );
-    assert_eq!(
-        priced.total(),
-        unpriced.total() + CODE_LEN * HISTORY_PER_BYTE
-    );
+    assert_eq!(priced.total(), unpriced.total() + HISTORY_FOR_CODE as u64);
 
     let ExecutionResult::Success {
         output: Output::Create(code, Some(created)),
@@ -575,11 +570,8 @@ fn test_a_nested_deposit_merges_its_history_gas_into_the_caller() {
 
     let child = priced.child();
     assert_eq!(child.result, InstructionResult::Return);
-    assert_eq!(child.gas.history_gas_spent(), CODE_LEN * HISTORY_PER_BYTE);
-    assert_eq!(
-        priced.settled.history_gas_spent(),
-        CODE_LEN * HISTORY_PER_BYTE
-    );
+    assert_eq!(child.gas.history_gas_spent(), HISTORY_FOR_CODE);
+    assert_eq!(priced.settled.history_gas_spent(), HISTORY_FOR_CODE);
     assert_eq!(
         priced.gas().state_gas_spent_final(),
         NEW_ACCOUNT + CODE_STATE
@@ -606,7 +598,7 @@ fn test_a_deposit_that_cannot_pay_its_history_gas_runs_out_of_gas() {
     assert!(paid.result.is_success(), "{:?}", paid.result);
     assert_eq!(paid.total(), exact + history);
     assert_eq!(paid.settled.remaining(), 0);
-    assert_eq!(paid.settled.history_gas_spent(), history);
+    assert_eq!(paid.settled.history_gas_spent(), HISTORY_FOR_CODE);
 
     // The same gas limit is enough when the schedule does not price the bytes.
     assert!(create(0, exact + history - 1).result.is_success());
@@ -628,7 +620,7 @@ fn test_a_deposit_that_cannot_pay_its_history_gas_runs_out_of_gas() {
         "the state charge went through"
     );
     assert_eq!(
-        frame.gas.history_gas_net(),
+        frame.gas.history_gas_spent(),
         0,
         "the history charge was refused whole"
     );
@@ -691,7 +683,6 @@ fn test_a_child_refill_of_its_callers_charge_nets_out_on_success() {
         counters(&child.gas),
         (LARGE_HISTORY, 0, -(LARGE_HISTORY as i64), 0)
     );
-    assert_eq!(child.gas.history_gas_spent(), 0, "the unsigned view clamps");
 
     // The caller's 50,000 spill stays spent as regular gas and comes back as reservoir.
     assert_eq!(counters(&refilled.settled), (LARGE_HISTORY, 0, 0, 50_000));
@@ -743,8 +734,8 @@ fn test_history_gas_stays_out_of_the_state_gas_column() {
     let charged = run(HISTORY);
     let uncharged = run(0);
 
-    assert_eq!(charged.child().gas.history_gas_spent(), HISTORY);
-    assert_eq!(charged.settled.history_gas_spent(), HISTORY);
+    assert_eq!(charged.child().gas.history_gas_spent(), HISTORY as i64);
+    assert_eq!(charged.settled.history_gas_spent(), HISTORY as i64);
     assert_eq!(charged.settled.state_gas_spent(), SSTORE_SET as i64);
 
     assert_eq!(charged.gas().state_gas_spent_final(), SSTORE_SET);
