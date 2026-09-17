@@ -12,7 +12,8 @@ expression: "&(result_halt, result_revert)"
         "gas_spent": 25000,
         "state_gas_spent": 0,
         "gas_refunded": 0,
-        "floor_gas": 12000
+        "floor_gas": 12000,
+        "reservoir_remaining": 0
       },
       "logs": []
     }
@@ -23,7 +24,8 @@ expression: "&(result_halt, result_revert)"
         "gas_spent": 33112,
         "state_gas_spent": 0,
         "gas_refunded": 0,
-        "floor_gas": 12000
+        "floor_gas": 12000,
+        "reservoir_remaining": 0
       },
       "logs": [],
       "output": "0x"

@@ -9,7 +9,8 @@ expression: "&result_fits"
       "gas_spent": 233106,
       "state_gas_spent": 200000,
       "gas_refunded": 0,
-      "floor_gas": 12000
+      "floor_gas": 12000,
+      "reservoir_remaining": 0
     },
     "logs": [],
     "output": {
