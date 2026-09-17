@@ -237,6 +237,7 @@ pub trait Host {
 pub struct DummyHost {
     gas_params: GasParams,
     spec: SpecId,
+    slot_num: U256,
 }
 
 impl DummyHost {
@@ -245,7 +246,14 @@ impl DummyHost {
         Self {
             gas_params: GasParams::new_spec(spec),
             spec,
+            slot_num: U256::ZERO,
         }
+    }
+
+    /// Sets the value [`Host::slot_num`] returns.
+    pub const fn with_slot_num(mut self, slot_num: U256) -> Self {
+        self.slot_num = slot_num;
+        self
     }
 }
 
@@ -291,7 +299,7 @@ impl Host for DummyHost {
     }
 
     fn slot_num(&self) -> U256 {
-        U256::ZERO
+        self.slot_num
     }
 
     fn chain_id(&self) -> U256 {

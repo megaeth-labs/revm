@@ -61,6 +61,12 @@ pub fn swap<const N: usize, IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Res
 /// Duplicates the Nth stack item to the top of the stack, with N given by an immediate.
 pub fn dupn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     check!(context.interpreter, AMSTERDAM);
+    dupn_enabled(context)
+}
+
+/// DUPN without its `SpecId::AMSTERDAM` gate, for a consumer that activates EIP-8024 below Amsterdam.
+#[inline]
+pub fn dupn_enabled<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     let x: usize = context.interpreter.bytecode.read_u8().into();
     if let Some(n) = decode_single(x) {
         if !context.interpreter.stack.dup(n) {
@@ -78,6 +84,12 @@ pub fn dupn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
 /// Swaps the top stack item with the N+1th stack item, with N given by an immediate.
 pub fn swapn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     check!(context.interpreter, AMSTERDAM);
+    swapn_enabled(context)
+}
+
+/// SWAPN without its `SpecId::AMSTERDAM` gate, for a consumer that activates EIP-8024 below Amsterdam.
+#[inline]
+pub fn swapn_enabled<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     let x: usize = context.interpreter.bytecode.read_u8().into();
     if let Some(n) = decode_single(x) {
         if !context.interpreter.stack.exchange(0, n) {
@@ -95,6 +107,12 @@ pub fn swapn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
 /// Swaps the N+1th stack item with the M+1th stack item, with N, M given by an immediate.
 pub fn exchange<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     check!(context.interpreter, AMSTERDAM);
+    exchange_enabled(context)
+}
+
+/// EXCHANGE without its `SpecId::AMSTERDAM` gate, for a consumer that activates EIP-8024 below Amsterdam.
+#[inline]
+pub fn exchange_enabled<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     let x: usize = context.interpreter.bytecode.read_u8().into();
     if let Some((n, m)) = decode_pair(x) {
         if !context.interpreter.stack.exchange(n, m - n) {

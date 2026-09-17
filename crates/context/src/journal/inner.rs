@@ -339,6 +339,22 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         self.cfg.eip8246_delayed_clear_disabled = eip8246_delayed_clear_disabled;
     }
 
+    /// Enables EIP-7708 transfer logs independently of the spec id.
+    #[inline]
+    pub const fn set_amsterdam_eip7708_enabled(&mut self, enabled: bool) {
+        self.warm_addresses.set_amsterdam_eip7708_enabled(enabled);
+    }
+
+    /// Whether EIP-7708 transfer logs should be emitted.
+    ///
+    /// True when the spec is Amsterdam or later, or when the EIP-7708 switch is on,
+    /// and EIP-7708 itself is not disabled.
+    #[inline]
+    const fn eip7708_active(&self) -> bool {
+        (self.cfg.spec.is_enabled_in(AMSTERDAM) || self.warm_addresses.amsterdam_eip7708_enabled())
+            && !self.cfg.eip7708_disabled
+    }
+
     /// Mark account as touched as only touched accounts will be added to state.
     /// This is especially important for state clear where touched empty accounts needs to
     /// be removed from state.
@@ -1118,14 +1134,14 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     /// Creates and pushes an EIP-7708 ETH transfer log.
     ///
     /// This emits a LOG3 with the Transfer event signature, matching ERC-20 transfer events.
-    /// Only emitted if EIP-7708 is enabled (Amsterdam and later) and balance is non-zero.
+    /// Only emitted if EIP-7708 is enabled (Amsterdam and later, or the 7708 switch) and
+    /// balance is non-zero.
     ///
     /// [EIP-7708](https://eips.ethereum.org/EIPS/eip-7708)
     #[inline]
     pub fn eip7708_transfer_log(&mut self, from: Address, to: Address, balance: U256) {
         // Only emit log if EIP-7708 is enabled and balance is non-zero
-        if !self.cfg.spec.is_enabled_in(AMSTERDAM) || self.cfg.eip7708_disabled || balance.is_zero()
-        {
+        if !self.eip7708_active() || balance.is_zero() {
             return;
         }
 
@@ -1190,5 +1206,44 @@ mod tests {
         let state_load = result.unwrap();
         assert!(!state_load.is_cold); // Should be warm
         assert_eq!(state_load.data, U256::ZERO); // Empty slot
+    }
+
+    #[test]
+    fn test_eip7708_silent_on_osaka_when_eip7708_switch_off() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        journal.set_spec_id(OSAKA);
+        journal.eip7708_transfer_log(
+            Address::ZERO,
+            address!("0000000000000000000000000000000000000001"),
+            U256::from(1),
+        );
+        assert!(journal.logs.is_empty());
+    }
+
+    #[test]
+    fn test_eip7708_emits_on_osaka_when_eip7708_switch_on() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        journal.set_spec_id(OSAKA);
+        journal.set_amsterdam_eip7708_enabled(true);
+        journal.eip7708_transfer_log(
+            Address::ZERO,
+            address!("0000000000000000000000000000000000000001"),
+            U256::from(1),
+        );
+        assert_eq!(journal.logs.len(), 1);
+    }
+
+    #[test]
+    fn test_eip7708_disabled_flag_still_suppresses_when_eip7708_switch_on() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        journal.set_spec_id(OSAKA);
+        journal.set_amsterdam_eip7708_enabled(true);
+        journal.set_eip7708_config(true, false);
+        journal.eip7708_transfer_log(
+            Address::ZERO,
+            address!("0000000000000000000000000000000000000001"),
+            U256::from(1),
+        );
+        assert!(journal.logs.is_empty());
     }
 }

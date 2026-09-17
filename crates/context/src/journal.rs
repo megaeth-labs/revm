@@ -209,6 +209,11 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
     }
 
     #[inline]
+    fn set_amsterdam_eip7708_enabled(&mut self, enabled: bool) {
+        self.inner.set_amsterdam_eip7708_enabled(enabled);
+    }
+
+    #[inline]
     fn transfer(
         &mut self,
         from: Address,

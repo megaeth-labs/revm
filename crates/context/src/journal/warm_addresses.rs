@@ -31,6 +31,12 @@ pub struct WarmAddresses {
     coinbase: Option<Address>,
     /// Access list
     access_list: AddressMap<HashSet<StorageKey>>,
+    /// EIP-7708 transfer logs, independently of spec.
+    ///
+    /// Stored here rather than on [`super::JournalCfg`]: that struct is exhaustively
+    /// constructible, so a new field would be a major API break.
+    #[cfg_attr(feature = "serde", serde(default))]
+    enable_amsterdam_eip7708: bool,
 }
 
 impl Default for WarmAddresses {
@@ -49,7 +55,20 @@ impl WarmAddresses {
             precompile_all_short_addresses: true,
             coinbase: None,
             access_list: AddressMap::default(),
+            enable_amsterdam_eip7708: false,
         }
+    }
+
+    /// Enables EIP-7708 transfer logs independently of the spec id.
+    #[inline]
+    pub(crate) const fn set_amsterdam_eip7708_enabled(&mut self, enabled: bool) {
+        self.enable_amsterdam_eip7708 = enabled;
+    }
+
+    /// Returns whether EIP-7708 transfer logs are enabled independently of the spec id.
+    #[inline]
+    pub(crate) const fn amsterdam_eip7708_enabled(&self) -> bool {
+        self.enable_amsterdam_eip7708
     }
 
     /// Returns the precompile addresses.

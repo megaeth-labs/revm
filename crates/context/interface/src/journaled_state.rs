@@ -151,6 +151,18 @@ pub trait JournalTr {
     ///   when applying accounts to database state.
     fn set_eip7708_config(&mut self, disabled: bool, eip8246_delayed_clear_disabled: bool);
 
+    /// Enables EIP-7708 transfer logs independently of spec.
+    ///
+    /// Default is a no-op so existing `JournalTr` implementors keep compiling.
+    ///
+    /// The journal learns the value through the context's cfg sync (construction,
+    /// `with_cfg`, `modify_cfg`, journal/database replacement). Assigning the field
+    /// on an existing context's `cfg` directly does not reach the journal. A custom
+    /// [`JournalTr`] that keeps this default no-op emits no logs below Amsterdam.
+    fn set_amsterdam_eip7708_enabled(&mut self, enabled: bool) {
+        let _ = enabled;
+    }
+
     /// Touches the account.
     fn touch_account(&mut self, address: Address);
 

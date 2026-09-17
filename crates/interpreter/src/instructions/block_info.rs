@@ -83,6 +83,12 @@ pub fn blob_basefee<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Resu
 /// EIP-7843: SLOTNUM opcode
 pub fn slot_num<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     check!(context.interpreter, AMSTERDAM);
+    slot_num_enabled(context)
+}
+
+/// SLOTNUM without its `SpecId::AMSTERDAM` gate, for a consumer that activates EIP-7843 below Amsterdam.
+#[inline]
+pub fn slot_num_enabled<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
     push!(context.interpreter, context.host.slot_num());
     Ok(())
 }
