@@ -28,6 +28,26 @@ macro_rules! check {
     };
 }
 
+/// Activate Amsterdam opcodes when the spec is Amsterdam or the cfg switch is on.
+///
+/// The spec check is first so an Amsterdam interpreter never loads the host flag.
+#[macro_export]
+#[collapse_debuginfo(yes)]
+macro_rules! check_amsterdam_opcodes {
+    ($context:expr) => {
+        if !$context
+            .interpreter
+            .runtime_flag
+            .spec_id()
+            .is_enabled_in(primitives::hardfork::SpecId::AMSTERDAM)
+            && !$context.host.enable_amsterdam_opcodes()
+        {
+            $crate::primitives::hints_util::cold_path();
+            return Err($crate::InstructionResult::NotActivated);
+        }
+    };
+}
+
 /// Records a state gas cost (EIP-8037) and fails the instruction if it would exceed the available gas.
 /// State gas only deducts from `remaining` (not `regular_gas_remaining`).
 #[macro_export]

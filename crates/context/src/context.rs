@@ -47,6 +47,7 @@ fn sync_cfg_to_journal<CFG: Cfg, JOURNAL: JournalTr>(cfg: &CFG, journal: &mut JO
         cfg.is_eip7708_disabled(),
         cfg.is_eip8246_delayed_clear_disabled(),
     );
+    journal.set_amsterdam_opcodes_enabled(cfg.enable_amsterdam_opcodes());
 }
 
 impl<
@@ -465,6 +466,11 @@ impl<
 
     fn is_amsterdam_eip8037_enabled(&self) -> bool {
         self.cfg().is_amsterdam_eip8037_enabled()
+    }
+
+    #[inline]
+    fn enable_amsterdam_opcodes(&self) -> bool {
+        self.cfg().enable_amsterdam_opcodes()
     }
 
     fn block_number(&self) -> U256 {

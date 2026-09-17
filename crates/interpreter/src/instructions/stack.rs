@@ -1,6 +1,6 @@
 use crate::{
     interpreter_types::{Immediates, InterpreterTypes as ITy, Jumps, RuntimeFlag, StackTr},
-    InstructionContext as Ictx, InstructionExecResult as Result, InstructionResult,
+    Host, InstructionContext as Ictx, InstructionExecResult as Result, InstructionResult,
 };
 use primitives::U256;
 
@@ -59,8 +59,8 @@ pub fn swap<const N: usize, IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Res
 /// Implements the DUPN instruction.
 ///
 /// Duplicates the Nth stack item to the top of the stack, with N given by an immediate.
-pub fn dupn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
-    check!(context.interpreter, AMSTERDAM);
+pub fn dupn<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
+    check_amsterdam_opcodes!(context);
     let x: usize = context.interpreter.bytecode.read_u8().into();
     if let Some(n) = decode_single(x) {
         if !context.interpreter.stack.dup(n) {
@@ -76,8 +76,8 @@ pub fn dupn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
 /// Implements the SWAPN instruction.
 ///
 /// Swaps the top stack item with the N+1th stack item, with N given by an immediate.
-pub fn swapn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
-    check!(context.interpreter, AMSTERDAM);
+pub fn swapn<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
+    check_amsterdam_opcodes!(context);
     let x: usize = context.interpreter.bytecode.read_u8().into();
     if let Some(n) = decode_single(x) {
         if !context.interpreter.stack.exchange(0, n) {
@@ -93,8 +93,8 @@ pub fn swapn<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
 /// Implements the EXCHANGE instruction.
 ///
 /// Swaps the N+1th stack item with the M+1th stack item, with N, M given by an immediate.
-pub fn exchange<IT: ITy, H: ?Sized>(context: Ictx<'_, H, IT>) -> Result {
-    check!(context.interpreter, AMSTERDAM);
+pub fn exchange<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
+    check_amsterdam_opcodes!(context);
     let x: usize = context.interpreter.bytecode.read_u8().into();
     if let Some((n, m)) = decode_pair(x) {
         if !context.interpreter.stack.exchange(n, m - n) {
@@ -136,27 +136,47 @@ mod tests {
         instructions::{gas_table, instruction_table},
         interpreter::{EthInterpreter, ExtBytecode, InputsImpl, SharedMemory},
         interpreter_types::LoopControl,
-        Interpreter,
+        InstructionResult, Interpreter, InterpreterAction,
     };
     use bytecode::opcode::*;
     use bytecode::Bytecode;
     use primitives::{hardfork::SpecId, Bytes, U256};
 
-    fn run_bytecode(code: &[u8]) -> Interpreter {
+    fn run_bytecode_with(code: &[u8], spec: SpecId, enable_amsterdam_opcodes: bool) -> Interpreter {
         let bytecode = Bytecode::new_raw(Bytes::copy_from_slice(code));
         let mut interpreter = Interpreter::<EthInterpreter>::new(
             SharedMemory::new(),
             ExtBytecode::new(bytecode),
             InputsImpl::default(),
             false,
-            SpecId::AMSTERDAM,
+            spec,
             u64::MAX,
         );
         let table = instruction_table::<EthInterpreter, DummyHost>();
         let gas = gas_table();
-        let mut host = DummyHost::new(SpecId::AMSTERDAM);
+        let mut host = DummyHost::new(spec).with_amsterdam_opcodes(enable_amsterdam_opcodes);
         interpreter.run_plain(&table, &gas, &mut host);
         interpreter
+    }
+
+    fn run_action(code: &[u8], spec: SpecId, enable_amsterdam_opcodes: bool) -> InterpreterAction {
+        let bytecode = Bytecode::new_raw(Bytes::copy_from_slice(code));
+        let mut interpreter = Interpreter::<EthInterpreter>::new(
+            SharedMemory::new(),
+            ExtBytecode::new(bytecode),
+            InputsImpl::default(),
+            false,
+            spec,
+            u64::MAX,
+        );
+        let table = instruction_table::<EthInterpreter, DummyHost>();
+        let gas = gas_table();
+        let mut host = DummyHost::new(spec).with_amsterdam_opcodes(enable_amsterdam_opcodes);
+        interpreter.run_plain(&table, &gas, &mut host)
+    }
+
+    fn run_bytecode(code: &[u8]) -> Interpreter {
+        run_bytecode_with(code, SpecId::AMSTERDAM, false)
     }
 
     #[test]
@@ -217,5 +237,64 @@ mod tests {
         assert_eq!(interpreter.stack.data()[2], U256::from(1));
         assert_eq!(interpreter.stack.data()[1], U256::ZERO);
         assert_eq!(interpreter.stack.data()[0], U256::ZERO);
+    }
+
+    const DUPN_VECTOR: &[u8] = &[
+        PUSH1, 0x01, PUSH1, 0x00, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1,
+        DUP1, DUP1, DUP1, DUP1, DUPN, 0x80,
+    ];
+    const SWAPN_VECTOR: &[u8] = &[
+        PUSH1, 0x01, PUSH1, 0x00, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1, DUP1,
+        DUP1, DUP1, DUP1, DUP1, PUSH1, 0x02, SWAPN, 0x80,
+    ];
+    const EXCHANGE_VECTOR: &[u8] = &[PUSH1, 0x00, PUSH1, 0x01, PUSH1, 0x02, EXCHANGE, 0x8E];
+
+    #[test]
+    fn test_dupn_not_activated_on_osaka_when_switch_off() {
+        let action = run_action(DUPN_VECTOR, SpecId::OSAKA, false);
+        assert_eq!(
+            action.instruction_result(),
+            Some(InstructionResult::NotActivated)
+        );
+    }
+
+    #[test]
+    fn test_dupn_on_osaka_with_switch_matches_amsterdam() {
+        let with_switch = run_bytecode_with(DUPN_VECTOR, SpecId::OSAKA, true);
+        let on_amsterdam = run_bytecode(DUPN_VECTOR);
+        assert_eq!(with_switch.stack.data(), on_amsterdam.stack.data());
+        assert_eq!(with_switch.stack.len(), 18);
+    }
+
+    #[test]
+    fn test_swapn_not_activated_on_osaka_when_switch_off() {
+        let action = run_action(SWAPN_VECTOR, SpecId::OSAKA, false);
+        assert_eq!(
+            action.instruction_result(),
+            Some(InstructionResult::NotActivated)
+        );
+    }
+
+    #[test]
+    fn test_swapn_on_osaka_with_switch_matches_amsterdam() {
+        let with_switch = run_bytecode_with(SWAPN_VECTOR, SpecId::OSAKA, true);
+        let on_amsterdam = run_bytecode(SWAPN_VECTOR);
+        assert_eq!(with_switch.stack.data(), on_amsterdam.stack.data());
+    }
+
+    #[test]
+    fn test_exchange_not_activated_on_osaka_when_switch_off() {
+        let action = run_action(EXCHANGE_VECTOR, SpecId::OSAKA, false);
+        assert_eq!(
+            action.instruction_result(),
+            Some(InstructionResult::NotActivated)
+        );
+    }
+
+    #[test]
+    fn test_exchange_on_osaka_with_switch_matches_amsterdam() {
+        let with_switch = run_bytecode_with(EXCHANGE_VECTOR, SpecId::OSAKA, true);
+        let on_amsterdam = run_bytecode(EXCHANGE_VECTOR);
+        assert_eq!(with_switch.stack.data(), on_amsterdam.stack.data());
     }
 }
