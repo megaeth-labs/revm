@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  # Reports what changed upstream in the crates this fork touches; the digest
+  # Reports what changed upstream in the crates this fork publishes; the digest
   # is the run's job summary. Upstream is fetched directly: no mirror branch is
   # kept, because pushing upstream's workflow files needs a token this job
   # does not have.
@@ -35,8 +35,14 @@ jobs:
           # last 25 hours of upstream main (one hour of overlap, nothing lost
           # if a run is late). A manual run shows the same window.
           since="25 hours ago"
-          commits=$(git log --oneline --since="$since" refs/remotes/upstream/main -- \
-            crates/interpreter crates/handler crates/context crates/precompile crates/primitives)
+          # All twelve published crates, from the table the semver and release
+          # workflows read.
+          dirs=()
+          while read -r crate version dir || [ -n "$crate" ]; do
+            case "$crate" in ''|\#*) continue ;; esac
+            dirs+=("$dir")
+          done < scripts/mega/crates.txt
+          commits=$(git log --oneline --since="$since" refs/remotes/upstream/main -- "${dirs[@]}")
 
           # Upstream tags are reported, never mirrored: the fork's own tag list
           # stays the fork's releases. A tag counts as new when its commit is on
@@ -57,7 +63,7 @@ jobs:
             echo
             echo "Upstream main at \`$(git rev-parse --short refs/remotes/upstream/main)\`, window: the last 25 hours."
             echo
-            echo "### Commits touching interpreter, handler, context, precompile, primitives"
+            echo "### Commits touching the twelve published crates"
             echo
             if [ -n "$commits" ]; then
               printf '\`\`\`\n%s\n\`\`\`\n' "$commits"
