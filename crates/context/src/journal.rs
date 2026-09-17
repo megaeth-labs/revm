@@ -209,8 +209,8 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
     }
 
     #[inline]
-    fn set_amsterdam_opcodes_enabled(&mut self, enabled: bool) {
-        self.inner.set_amsterdam_opcodes_enabled(enabled);
+    fn set_amsterdam_eip7708_enabled(&mut self, enabled: bool) {
+        self.inner.set_amsterdam_eip7708_enabled(enabled);
     }
 
     #[inline]

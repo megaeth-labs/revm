@@ -31,12 +31,12 @@ pub struct WarmAddresses {
     coinbase: Option<Address>,
     /// Access list
     access_list: AddressMap<HashSet<StorageKey>>,
-    /// Amsterdam opcodes (and the EIP-7708 journal path they share), independently of spec.
+    /// EIP-7708 transfer logs, independently of spec.
     ///
     /// Stored here rather than on [`super::JournalCfg`]: that struct is exhaustively
     /// constructible, so a new field would be a major API break.
     #[cfg_attr(feature = "serde", serde(default))]
-    enable_amsterdam_opcodes: bool,
+    enable_amsterdam_eip7708: bool,
 }
 
 impl Default for WarmAddresses {
@@ -55,20 +55,20 @@ impl WarmAddresses {
             precompile_all_short_addresses: true,
             coinbase: None,
             access_list: AddressMap::default(),
-            enable_amsterdam_opcodes: false,
+            enable_amsterdam_eip7708: false,
         }
     }
 
-    /// Enables Amsterdam opcodes independently of the spec id.
+    /// Enables EIP-7708 transfer logs independently of the spec id.
     #[inline]
-    pub(crate) const fn set_amsterdam_opcodes_enabled(&mut self, enabled: bool) {
-        self.enable_amsterdam_opcodes = enabled;
+    pub(crate) const fn set_amsterdam_eip7708_enabled(&mut self, enabled: bool) {
+        self.enable_amsterdam_eip7708 = enabled;
     }
 
-    /// Returns whether Amsterdam opcodes are enabled independently of the spec id.
+    /// Returns whether EIP-7708 transfer logs are enabled independently of the spec id.
     #[inline]
-    pub(crate) const fn amsterdam_opcodes_enabled(&self) -> bool {
-        self.enable_amsterdam_opcodes
+    pub(crate) const fn amsterdam_eip7708_enabled(&self) -> bool {
+        self.enable_amsterdam_eip7708
     }
 
     /// Returns the precompile addresses.

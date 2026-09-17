@@ -117,6 +117,15 @@ pub trait Cfg {
     fn enable_amsterdam_opcodes(&self) -> bool {
         false
     }
+
+    /// Returns whether EIP-7708 transfer logs are enabled independently of the spec id.
+    ///
+    /// Default is `false`: emission then follows `SpecId::AMSTERDAM` only.
+    /// [`Cfg::is_eip7708_disabled`] still wins over both the spec and this switch.
+    #[inline]
+    fn enable_amsterdam_eip7708(&self) -> bool {
+        false
+    }
 }
 
 /// What bytecode analysis to perform

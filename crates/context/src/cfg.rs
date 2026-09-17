@@ -154,6 +154,12 @@ pub struct CfgEnv<SPEC = SpecId> {
     /// Default is `false`: those opcodes then follow `SpecId::AMSTERDAM` only.
     #[cfg_attr(feature = "serde", serde(default))]
     pub enable_amsterdam_opcodes: bool,
+    /// Enables EIP-7708 transfer logs independently of the spec id.
+    ///
+    /// Default is `false`: emission then follows `SpecId::AMSTERDAM` only.
+    /// [`CfgEnv::amsterdam_eip7708_disabled`] still wins over both the spec and this switch.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub enable_amsterdam_eip7708: bool,
     /// Disables EIP-7708 (ETH transfers emit logs).
     ///
     /// By default, it is set to `false`.
@@ -289,6 +295,7 @@ impl<SPEC> CfgEnv<SPEC> {
             enable_amsterdam_eip8037: self.enable_amsterdam_eip8037,
             enable_amsterdam_eip2780: self.enable_amsterdam_eip2780,
             enable_amsterdam_opcodes: self.enable_amsterdam_opcodes,
+            enable_amsterdam_eip7708: self.enable_amsterdam_eip7708,
             amsterdam_eip7708_disabled: self.amsterdam_eip7708_disabled,
             amsterdam_eip8246_delayed_clear_disabled: self.amsterdam_eip8246_delayed_clear_disabled,
         }
@@ -349,6 +356,12 @@ impl<SPEC> CfgEnv<SPEC> {
         self.enable_amsterdam_opcodes = enable;
         self
     }
+
+    /// Enables EIP-7708 transfer logs independently of the spec id.
+    pub const fn with_enable_amsterdam_eip7708(mut self, enable: bool) -> Self {
+        self.enable_amsterdam_eip7708 = enable;
+        self
+    }
 }
 
 impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
@@ -387,6 +400,7 @@ impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
             enable_amsterdam_eip8037: is_amsterdam,
             enable_amsterdam_eip2780: is_amsterdam,
             enable_amsterdam_opcodes: false,
+            enable_amsterdam_eip7708: false,
             amsterdam_eip7708_disabled: false,
             amsterdam_eip8246_delayed_clear_disabled: false,
         }
@@ -618,6 +632,11 @@ impl<SPEC: Into<SpecId> + Clone> Cfg for CfgEnv<SPEC> {
     fn enable_amsterdam_opcodes(&self) -> bool {
         self.enable_amsterdam_opcodes
     }
+
+    #[inline]
+    fn enable_amsterdam_eip7708(&self) -> bool {
+        self.enable_amsterdam_eip7708
+    }
 }
 
 impl<SPEC: Default + Into<SpecId> + Clone> Default for CfgEnv<SPEC> {
@@ -649,6 +668,21 @@ mod test {
     fn test_amsterdam_opcodes_switch_can_be_enabled_on_osaka() {
         let cfg = CfgEnv::new_with_spec(SpecId::OSAKA).with_enable_amsterdam_opcodes(true);
         assert!(cfg.enable_amsterdam_opcodes());
+        assert!(!cfg.enable_amsterdam_eip7708());
+        assert!(!cfg.spec.is_enabled_in(SpecId::AMSTERDAM));
+    }
+
+    #[test]
+    fn test_amsterdam_eip7708_switch_defaults_off() {
+        let cfg: CfgEnv = Default::default();
+        assert!(!cfg.enable_amsterdam_eip7708());
+    }
+
+    #[test]
+    fn test_amsterdam_eip7708_switch_can_be_enabled_on_osaka() {
+        let cfg = CfgEnv::new_with_spec(SpecId::OSAKA).with_enable_amsterdam_eip7708(true);
+        assert!(cfg.enable_amsterdam_eip7708());
+        assert!(!cfg.enable_amsterdam_opcodes());
         assert!(!cfg.spec.is_enabled_in(SpecId::AMSTERDAM));
     }
 }

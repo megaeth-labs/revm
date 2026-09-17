@@ -151,10 +151,10 @@ pub trait JournalTr {
     ///   when applying accounts to database state.
     fn set_eip7708_config(&mut self, disabled: bool, eip8246_delayed_clear_disabled: bool);
 
-    /// Enables Amsterdam opcodes (and the EIP-7708 journal path they share) independently of spec.
+    /// Enables EIP-7708 transfer logs independently of spec.
     ///
     /// Default is a no-op so existing `JournalTr` implementors keep compiling.
-    fn set_amsterdam_opcodes_enabled(&mut self, enabled: bool) {
+    fn set_amsterdam_eip7708_enabled(&mut self, enabled: bool) {
         let _ = enabled;
     }
 
