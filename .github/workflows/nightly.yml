@@ -10,11 +10,10 @@ env:
 
 permissions:
   contents: write
-  issues: write
 
 jobs:
-  # Keeps the upstream mirror branch and the upstream tags current, and reports
-  # what changed in the crates this fork touches.
+  # Keeps the upstream mirror branch current and reports what changed in the
+  # crates this fork touches; the digest is the run's job summary.
   mirror:
     name: mirror upstream
     runs-on: ubuntu-latest
@@ -91,19 +90,6 @@ jobs:
           fi
       # Reporting comes before the mirror moves: if the issue update fails, the
       # next run digests the same range again instead of losing it.
-      - name: Report the digest
-        if: steps.digest.outputs.has_content == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          number=$(gh issue list --state open --search 'in:title "Upstream digest"' --json number,title \
-            --jq '[.[] | select(.title == "Upstream digest")] | first | .number // empty')
-          if [ -n "$number" ]; then
-            gh issue comment "$number" --body-file digest.md
-          else
-            gh issue create --title "Upstream digest" --body-file digest.md
-          fi
       # No force: a mirror branch that cannot fast-forward means upstream
       # rewrote history and a human has to look at it.
       - name: Fast-forward the mirror branch
