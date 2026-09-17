@@ -5,6 +5,7 @@
 use crate::{EvmTr, PrecompileProvider};
 use bytecode::Bytecode;
 use context_interface::{
+    cfg::{GasId, StateGasCharge, StateGasSite},
     journaled_state::{account::JournaledAccountTr, JournalCheckpoint, JournalTr},
     result::InvalidTransaction,
     transaction::{AccessListItemTr, AuthorizationTr, Transaction, TransactionType},
@@ -14,6 +15,9 @@ use core::cmp::Ordering;
 use interpreter::GasTracker;
 use primitives::{hardfork::SpecId, Address, AddressMap, HashSet, StorageKey, TxKind, U256};
 use state::AccountInfo;
+
+mod megaeth;
+pub use megaeth::Eip7702AuthFacts;
 
 /// Loads and warms accounts for execution, including precompiles and access list.
 pub fn load_accounts<
@@ -249,17 +253,8 @@ pub fn apply_eip7702_auth_list<
         let is_eip8037 = context.cfg().is_amsterdam_eip8037_enabled();
         let params = context.cfg().gas_params();
         let account_write_cost = params.tx_account_write_cost();
-        let new_account_state_gas = if is_eip8037 {
-            params.new_account_state_gas()
-        } else {
-            0
-        };
-        let delegation_bytes_state_gas = if is_eip8037 {
-            params.tx_eip7702_state_gas_bytecode()
-        } else {
-            0
-        };
-        let (tx, journal) = context.tx_journal_mut();
+        let tx = context.tx();
+        let auth_list = Eip7702AuthFacts::collect(tx, chain_id);
 
         // Accounts this transaction has already written (their `ACCOUNT_WRITE`
         // is already paid): the sender's leaf is written at inclusion (priced
@@ -273,12 +268,11 @@ pub fn apply_eip7702_auth_list<
             }
         }
         let oog = apply_auth_list_eip2780::<_, ERROR>(
+            context,
             chain_id,
-            tx.authorization_list(),
-            journal,
+            &auth_list,
             account_write_cost,
-            new_account_state_gas,
-            delegation_bytes_state_gas,
+            is_eip8037,
             &mut written_accounts,
             gas,
         )?;
@@ -326,15 +320,14 @@ pub fn apply_eip7702_auth_list<
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn apply_auth_list_eip2780<
-    JOURNAL: JournalTr,
-    ERROR: From<InvalidTransaction> + From<<JOURNAL::Database as Database>::Error>,
+    CTX: ContextTr,
+    ERROR: From<InvalidTransaction> + From<<CTX::Db as Database>::Error>,
 >(
+    ctx: &mut CTX,
     chain_id: u64,
-    auth_list: impl Iterator<Item = impl AuthorizationTr>,
-    journal: &mut JOURNAL,
+    auth_list: &[Eip7702AuthFacts],
     account_write_cost: u64,
-    new_account_state_gas: u64,
-    delegation_bytes_state_gas: u64,
+    is_eip8037: bool,
     written_accounts: &mut HashSet<Address>,
     gas: &mut GasTracker,
 ) -> Result<bool, ERROR> {
@@ -347,40 +340,25 @@ pub fn apply_auth_list_eip2780<
 
     for authorization in auth_list {
         // 1. Verify the chain id is either 0 or the chain's current ID.
-        let auth_chain_id = authorization.chain_id();
+        let auth_chain_id = authorization.chain_id;
         if !auth_chain_id.is_zero() && auth_chain_id != U256::from(chain_id) {
             continue;
         }
 
         // 2. Verify the `nonce` is less than `2**64 - 1`.
-        if authorization.nonce() == u64::MAX {
+        if authorization.nonce == u64::MAX {
             continue;
         }
 
         // recover authority and authorized addresses.
         // 3. `authority = ecrecover(keccak(MAGIC || rlp([chain_id, address, nonce])), y_parity, r, s]`
-        let Some(authority) = authorization.authority() else {
+        let Some(authority) = authorization.authority else {
             continue;
         };
 
         // warm authority account and check nonce.
         // 4. Add `authority` to `accessed_addresses` (as defined in [EIP-2929](./eip-2929.md).)
-        let mut authority_acc = journal.load_account_with_code_mut(authority)?;
-        let authority_acc_info = &authority_acc.account().info;
-
-        // 5. Verify the code of `authority` is either empty or already delegated.
-        if let Some(bytecode) = &authority_acc_info.code {
-            // if it is not empty and it is not eip7702
-            if !bytecode.is_empty() && !bytecode.is_eip7702() {
-                continue;
-            }
-        }
-
-        // 6. Verify the nonce of `authority` is equal to `nonce`. In case `authority` does not exist in the trie, verify that `nonce` is equal to `0`.
-        if authorization.nonce() != authority_acc_info.nonce {
-            continue;
-        }
-
+        //
         // Refund-relevant facts for this accepted authorization (mirrors
         // execution-specs `set_delegation` / evm2 `apply_one_auth`).
         //   existed             — the authority account already existed in state.
@@ -397,21 +375,56 @@ pub fn apply_auth_list_eip2780<
         //                          only changes within a transaction through earlier
         //                          accepted authorizations, which keep it
         //                          empty-or-delegation.
-        //   clearing            — this authorization clears the delegation.
-        let existed = !(authority_acc_info.is_empty()
-            && authority_acc
-                .account()
-                .is_loaded_as_not_existing_not_touched());
-        let delegated_now = !authority_acc_info.is_code_hash_empty_or_zero();
-        let delegated_before_tx = !authority_acc
-            .account()
-            .original_info()
-            .is_code_hash_empty_or_zero();
-        let clearing = authorization.address().is_zero();
+        //
+        // The handle is scoped so the pricing hook below can take the whole context.
+        let facts = {
+            let authority_acc = ctx.journal_mut().load_account_with_code_mut(authority)?;
+            let authority_acc_info = &authority_acc.account().info;
 
+            // 5. Verify the code of `authority` is either empty or already delegated.
+            let valid_code = authority_acc_info
+                .code
+                .as_ref()
+                .is_none_or(|bytecode| bytecode.is_empty() || bytecode.is_eip7702());
+
+            // 6. Verify the nonce of `authority` is equal to `nonce`. In case `authority` does not exist in the trie, verify that `nonce` is equal to `0`.
+            if !valid_code || authorization.nonce != authority_acc_info.nonce {
+                None
+            } else {
+                Some((
+                    !(authority_acc_info.is_empty()
+                        && authority_acc
+                            .account()
+                            .is_loaded_as_not_existing_not_touched()),
+                    !authority_acc_info.is_code_hash_empty_or_zero(),
+                    !authority_acc
+                        .account()
+                        .original_info()
+                        .is_code_hash_empty_or_zero(),
+                ))
+            }
+        };
+        let Some((existed, delegated_now, delegated_before_tx)) = facts else {
+            continue;
+        };
+        //   clearing            — this authorization clears the delegation.
+        let clearing = authorization.address.is_zero();
+
+        // The pricing hook takes the whole context, so the authority's journal handle is
+        // released for each lookup and retaken to apply the delegation. The re-load is warm and
+        // observationally identical.
         // Non-existent authority: pay for the new account leaf's state bytes.
-        if !existed && !gas.record_state_cost(new_account_state_gas) {
-            return Ok(true);
+        if is_eip8037 && !existed {
+            let charge = StateGasCharge::one(
+                GasId::new_account_state_gas(),
+                StateGasSite::account(authority),
+            );
+            let Some(new_account_state_gas) = ctx.state_gas_charge(charge) else {
+                return Ok(true);
+            };
+            if !gas.record_state_cost(new_account_state_gas) {
+                return Ok(true);
+            }
         }
 
         // First write to the authority's leaf within the transaction pays
@@ -427,11 +440,19 @@ pub fn apply_auth_list_eip2780<
 
         // Net-new delegation bytes: the 23-byte delegation indicator written
         // into a previously empty slot.
-        if !clearing
+        if is_eip8037
+            && !clearing
             && !delegated_now
             && !delegated_before_tx
             && !charged_delegation_bytes.contains(&authority)
         {
+            let charge = StateGasCharge::one(
+                GasId::tx_eip7702_state_gas_bytecode(),
+                StateGasSite::account(authority),
+            );
+            let Some(delegation_bytes_state_gas) = ctx.state_gas_charge(charge) else {
+                return Ok(true);
+            };
             if !gas.record_state_cost(delegation_bytes_state_gas) {
                 return Ok(true);
             }
@@ -442,7 +463,9 @@ pub fn apply_auth_list_eip2780<
         //  * As a special case, if `address` is `0x0000000000000000000000000000000000000000` do not write the designation.
         //    Clear the accounts code and reset the account's code hash to the empty hash `0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470`.
         // 9. Increase the nonce of `authority` by one.
-        authority_acc.delegate(authorization.address());
+        ctx.journal_mut()
+            .load_account_with_code_mut(authority)?
+            .delegate(authorization.address);
     }
 
     Ok(false)

@@ -3,7 +3,11 @@ use crate::{
     interpreter_types::{InterpreterTypes as ITy, MemoryTr, RuntimeFlag, StackTr},
     InstructionContext as Ictx, InstructionResult,
 };
-use context_interface::{cfg::GasParams, host::LoadError, Host};
+use context_interface::{
+    cfg::{GasId, GasParams, StateGasCharge, StateGasSite},
+    host::LoadError,
+    Host,
+};
 use core::{cmp::min, ops::Range};
 use primitives::{
     hardfork::SpecId::{self, *},
@@ -171,7 +175,11 @@ pub fn load_account_delegated<H: Host + ?Sized>(
             .gas_params()
             .new_account_cost(is_spurious_dragon, transfers_value);
         if host.is_amsterdam_eip8037_enabled() && transfers_value {
-            state_gas_cost += host.gas_params().new_account_state_gas();
+            let charge = StateGasCharge::one(
+                GasId::new_account_state_gas(),
+                StateGasSite::account(address),
+            );
+            state_gas_cost += host.state_gas_charge(charge).ok_or(LoadError::DBError)?;
         }
         return Ok((cost, state_gas_cost, bytecode, code_hash));
     }

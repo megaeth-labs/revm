@@ -4,6 +4,7 @@ use crate::{
 };
 use context::result::FromStringError;
 use context_interface::{
+    cfg::{GasId, StateGasCharge, StateGasSite},
     context::{take_error, ContextError},
     journaled_state::{account::JournaledAccountTr, JournalCheckpoint, JournalTr},
     local::{FrameToken, OutFrame},
@@ -25,7 +26,7 @@ use primitives::{
     Address, Bytes, U256,
 };
 use state::Bytecode;
-use std::{borrow::ToOwned, boxed::Box, vec::Vec};
+use std::{borrow::ToOwned, boxed::Box, string::ToString, vec::Vec};
 
 /// Frame implementation for Ethereum.
 #[derive_where(Clone, Debug; IW,
@@ -155,6 +156,7 @@ impl EthFrame<EthInterpreter> {
     ) -> Result<ItemOrResult<FrameToken, FrameResult>, ERROR> {
         let reservoir_remaining_gas = inputs.reservoir;
         let charged_new_account_state_gas = inputs.charged_new_account_state_gas;
+        let charged_state_gas_address = inputs.target_address;
         let gas =
             Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, reservoir_remaining_gas);
 
@@ -169,6 +171,7 @@ impl EthFrame<EthInterpreter> {
                 was_precompile_called: false,
                 precompile_call_logs: Vec::new(),
                 charged_new_account_state_gas,
+                charged_state_gas_address,
             })))
         };
 
@@ -222,6 +225,7 @@ impl EthFrame<EthInterpreter> {
                 was_precompile_called: true,
                 precompile_call_logs: logs,
                 charged_new_account_state_gas,
+                charged_state_gas_address,
             })));
         }
 
@@ -273,6 +277,9 @@ impl EthFrame<EthInterpreter> {
         // halt, or early-fail with `address == None`), so early-fail results
         // only carry the reservoir they inherited from the parent.
         let charged_create_state_gas = inputs.charged_create_state_gas();
+        // Recorded by whoever made the charge — the CREATE opcode or the EIP-2780 runtime phase
+        // — because the created address is not derivable here on the early-fail paths.
+        let charged_state_gas_address = inputs.charged_state_gas_address();
         let return_error = |e| {
             Ok(ItemOrResult::Result(FrameResult::Create(CreateOutcome {
                 result: InterpreterResult {
@@ -285,6 +292,7 @@ impl EthFrame<EthInterpreter> {
                 },
                 address: None,
                 charged_create_state_gas,
+                charged_state_gas_address,
             })))
         };
 
@@ -430,13 +438,16 @@ impl EthFrame<EthInterpreter> {
                 // Propagate EIP-8037 new-account state-gas flag from the frame
                 // input so the parent can refund the upfront charge if the call
                 // ends in revert/halt.
-                let charged_new_account_state_gas = match &self.input {
-                    FrameInput::Call(inputs) => inputs.charged_new_account_state_gas,
-                    _ => false,
+                let (charged_new_account_state_gas, charged_state_gas_address) = match &self.input {
+                    FrameInput::Call(inputs) => {
+                        (inputs.charged_new_account_state_gas, inputs.target_address)
+                    }
+                    _ => (false, Address::ZERO),
                 };
                 let mut outcome =
                     CallOutcome::new(interpreter_result, frame.return_memory_range.clone());
                 outcome.charged_new_account_state_gas = charged_new_account_state_gas;
+                outcome.charged_state_gas_address = charged_state_gas_address;
                 ItemOrResult::Result(FrameResult::Call(outcome))
             }
             FrameData::Create(frame) => {
@@ -449,10 +460,18 @@ impl EthFrame<EthInterpreter> {
 
                 let mut create_outcome =
                     CreateOutcome::new(interpreter_result, Some(frame.created_address));
-                create_outcome.charged_create_state_gas = match &self.input {
-                    FrameInput::Create(inputs) => inputs.charged_create_state_gas(),
-                    _ => false,
+                // The charged address comes from the inputs, not `frame.created_address`: the
+                // EIP-2780 runtime phase charges the address the transaction nonce gives, which
+                // differs from the created one when the nonce check is disabled.
+                let (charged_create_state_gas, charged_state_gas_address) = match &self.input {
+                    FrameInput::Create(inputs) => (
+                        inputs.charged_create_state_gas(),
+                        inputs.charged_state_gas_address(),
+                    ),
+                    _ => (false, Address::ZERO),
                 };
+                create_outcome.charged_create_state_gas = charged_create_state_gas;
+                create_outcome.charged_state_gas_address = charged_state_gas_address;
                 ItemOrResult::Result(FrameResult::Create(create_outcome))
             }
         };
@@ -475,7 +494,20 @@ impl EthFrame<EthInterpreter> {
         // refunded below via `refill_reservoir` (matching 0→x→0 storage
         // restoration) — the child rollback in `handle_reservoir_remaining_gas`
         // cannot do it, since the charge lives on the parent, not the child.
-        let refund_state_gas = result.refundable_state_gas(ctx.cfg().gas_params());
+        let refund_state_gas = match result.refundable_state_gas_charge() {
+            // Priced through the same hook the charge went through, so the refund cancels it
+            // exactly. A failed lookup surfaces as a fatal external error, like a failed sload.
+            Some(charge) => match ctx.state_gas_charge(charge) {
+                Some(refund) => Some(refund),
+                None => {
+                    take_error::<ERROR, _>(ctx.error())?;
+                    return Err(ERROR::from_string(
+                        "state gas price lookup failed".to_string(),
+                    ));
+                }
+            },
+            None => None,
+        };
 
         // Insert result to the top frame.
         match result {
@@ -713,15 +745,36 @@ pub fn return_create<CTX: ContextTr>(
         //
         // Note: This should be last operation before checkpoint commit as spending state before this messes
         // with refilling of state gas.
-        let state_gas_for_code = gas_params.code_deposit_state_gas(interpreter_result.output.len());
-        if state_gas_for_code > 0 && !interpreter_result.gas.record_state_cost(state_gas_for_code) {
-            journal.checkpoint_revert(checkpoint);
-            interpreter_result.result = InstructionResult::OutOfGas;
-            return;
+        //
+        // The schedule decides whether deposited code costs state gas at all; the per-byte price
+        // comes from the pricing hook, which needs the whole context and so ends the journal
+        // borrow above.
+        let code_len = interpreter_result.output.len();
+        let charges_state_gas = gas_params.code_deposit_state_gas(code_len) > 0;
+        if charges_state_gas {
+            let charge = StateGasCharge::units(
+                GasId::code_deposit_state_gas(),
+                StateGasSite::account(address),
+                code_len as u64,
+            );
+            let state_gas_for_code = context.state_gas_charge(charge);
+            let recorded = state_gas_for_code
+                .is_some_and(|cost| interpreter_result.gas.record_state_cost(cost));
+            if !recorded {
+                context.journal_mut().checkpoint_revert(checkpoint);
+                interpreter_result.result = if state_gas_for_code.is_some() {
+                    InstructionResult::OutOfGas
+                } else {
+                    // The hook recorded the cause; `EthFrame::return_result` surfaces it.
+                    InstructionResult::FatalExternalError
+                };
+                return;
+            }
         }
     }
 
     // If we have enough gas we can commit changes.
+    let journal = context.journal_mut();
     journal.checkpoint_commit();
 
     // Do analysis of bytecode straight away.

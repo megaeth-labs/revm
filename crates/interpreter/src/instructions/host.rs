@@ -3,7 +3,11 @@ use crate::{
     interpreter_types::{InputsTr, InterpreterTypes as ITy, MemoryTr, RuntimeFlag, StackTr},
     Gas, Host, InstructionExecResult as Result, InstructionResult,
 };
-use context_interface::{host::LoadError, journaled_state::AccountInfoLoad};
+use context_interface::{
+    cfg::{GasId, StateGasCharge, StateGasSite},
+    host::LoadError,
+    journaled_state::AccountInfoLoad,
+};
 use core::cmp::min;
 use primitives::{
     hardfork::SpecId::{self, *},
@@ -234,21 +238,33 @@ pub fn sstore<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
 
     // state gas for new slot creation (EIP-8037)
     if context.host.is_amsterdam_eip8037_enabled() {
-        state_gas!(
-            context.interpreter,
-            context.host.gas_params().sstore_state_gas(&state_load.data)
-        );
-
-        // EIP-8037 issue #2: 0→x→0 storage restoration refills the reservoir
-        // directly rather than routing the state gas through the capped refund
-        // counter. The regular-gas portion of the restoration still flows
-        // through `sstore_refund` below.
-        let refill = context
+        // The schedule decides *whether* this write creates or restores a slot; the price of
+        // that one slot comes from the pricing hook, which may scale it per slot.
+        let charges_state_gas = context.host.gas_params().sstore_state_gas(&state_load.data) > 0;
+        let refills_state_gas = context
             .host
             .gas_params()
-            .sstore_state_gas_refill(&state_load.data);
-        if refill > 0 {
-            context.interpreter.gas.refill_reservoir(refill);
+            .sstore_state_gas_refill(&state_load.data)
+            > 0;
+        if charges_state_gas || refills_state_gas {
+            let charge = StateGasCharge::one(
+                GasId::sstore_set_state_gas(),
+                StateGasSite::slot(target, index),
+            );
+            let price = context
+                .host
+                .state_gas_charge(charge)
+                .ok_or(InstructionResult::FatalExternalError)?;
+            if charges_state_gas {
+                state_gas!(context.interpreter, price);
+            }
+            // EIP-8037 issue #2: 0→x→0 storage restoration refills the reservoir
+            // directly rather than routing the state gas through the capped refund
+            // counter. The regular-gas portion of the restoration still flows
+            // through `sstore_refund` below.
+            if refills_state_gas {
+                context.interpreter.gas.refill_reservoir(price);
+            }
         }
     }
 
@@ -358,10 +374,15 @@ pub fn selfdestruct<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Resu
 
     // State gas for new account creation (EIP-8037)
     if context.host.is_amsterdam_eip8037_enabled() && should_charge_topup {
-        state_gas!(
-            context.interpreter,
-            context.host.gas_params().new_account_state_gas()
+        let charge = StateGasCharge::one(
+            GasId::new_account_state_gas(),
+            StateGasSite::account(target),
         );
+        let price = context
+            .host
+            .state_gas_charge(charge)
+            .ok_or(InstructionResult::FatalExternalError)?;
+        state_gas!(context.interpreter, price);
     }
 
     if !res.previously_destroyed {
