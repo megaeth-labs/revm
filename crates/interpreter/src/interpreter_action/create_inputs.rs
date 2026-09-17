@@ -25,6 +25,9 @@ pub struct CreateInputs {
     charged_create_state_gas: bool,
     /// EIP-8037: the account `charged_create_state_gas` was priced for, so the refund re-prices
     /// the same address. Meaningless while `charged_create_state_gas` is `false`.
+    ///
+    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    #[cfg_attr(feature = "serde", serde(default))]
     charged_state_gas_address: Address,
     /// Cached created address. This is computed lazily and cached to avoid
     /// redundant keccak computations when inspectors call `created_address`.

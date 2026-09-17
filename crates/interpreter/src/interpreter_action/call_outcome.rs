@@ -35,6 +35,9 @@ pub struct CallOutcome {
     /// The parent re-prices this address when it refunds the charge, so the refund matches what
     /// was taken even when the price varies per account. Meaningless while
     /// `charged_new_account_state_gas` is `false`.
+    ///
+    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    #[cfg_attr(feature = "serde", serde(default))]
     pub charged_state_gas_address: Address,
 }
 
