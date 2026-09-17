@@ -206,7 +206,10 @@ impl Gas {
         self.tracker.set_history_gas_spent(val);
     }
 
-    /// Adds `delta` to the history gas spent (used when merging a successful child frame).
+    /// Adds `delta` to the history gas spent. See [`GasTracker::add_history_gas_spent`].
+    ///
+    /// A successful child frame is merged with [`GasTracker::add_history_gas_net`] instead, whose
+    /// signed delta carries a child's refill of history gas this frame charged.
     #[inline]
     pub const fn add_history_gas_spent(&mut self, delta: u64) {
         self.tracker.add_history_gas_spent(delta);

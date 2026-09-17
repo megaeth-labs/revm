@@ -1633,7 +1633,8 @@ impl GasId {
     /// bytes in a block, as distinct from the state gas it charges for storing them.
     ///
     /// Zero on every schedule defined here, which is what makes the charge site in
-    /// `return_create` inert. A chain that prices history bytes overrides it.
+    /// `return_create` inert. A chain that prices history bytes overrides it. The charge sits
+    /// beside the EIP-8037 code-deposit state charge, so it is made only where EIP-8037 is enabled.
     pub const fn code_deposit_history_gas() -> GasId {
         Self::new(50)
     }
