@@ -526,8 +526,9 @@ mod tests {
     }
 
     /// A child that refills history its parent charged goes below zero, and merging it into the
-    /// parent on success nets the two out. The merge is the one the state counter gets: read the
-    /// signed figure, add, write it back.
+    /// parent on success nets the two out. The merge follows the handler's order: the signed figure
+    /// is read, added and written back, as the state counter's is, and then the parent absorbs the
+    /// child's reservoir.
     #[test]
     fn test_a_child_refill_of_a_parent_charge_nets_out_on_merge() {
         let mut parent = GasTracker::new(1_000, 1_000, 500);
@@ -537,12 +538,14 @@ mod tests {
         child.refill_history(100);
         assert_eq!(child.history_gas_spent(), -100);
 
-        parent.set_reservoir(child.reservoir());
         parent.set_history_gas_spent(
             parent
                 .history_gas_spent()
                 .saturating_add(child.history_gas_spent()),
         );
+        // The parent's charge came out of the reservoir and spilled nothing, so the child's
+        // reservoir has no spill to pay back and the parent keeps all of it.
+        parent.absorb_returned_reservoir(child.reservoir());
         assert_eq!(parent.history_gas_spent(), 0);
         assert_eq!(parent.reservoir(), 500);
     }
