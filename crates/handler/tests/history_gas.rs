@@ -46,6 +46,8 @@ type TestError = EVMError<DbError>;
 const CONTRACT: Address = address!("0x000000000000000000000000000000000000c0de");
 /// Contract [`CONTRACT`] calls.
 const CHILD: Address = address!("0x000000000000000000000000000000000000c41d");
+/// Contract [`CONTRACT`] calls after [`CHILD`].
+const SIBLING: Address = address!("0x000000000000000000000000000000000000c41e");
 
 /// Books the popped amount as history gas; out of gas if the budget cannot pay it.
 const CHARGE_HISTORY: u8 = 0x0c;
@@ -341,13 +343,18 @@ fn db(contract: Code, child: Code) -> Db {
         AccountInfo::from_balance(U256::from(10u128.pow(21))),
     );
     for (address, code) in [(CONTRACT, contract), (CHILD, child)] {
-        let code = code.build();
-        db.insert_account_info(
-            address,
-            AccountInfo::new(U256::ZERO, 1, code.hash_slow(), code),
-        );
+        insert_code(&mut db, address, code);
     }
     db
+}
+
+/// Puts an account holding `code` at `address`.
+fn insert_code(db: &mut Db, address: Address, code: Code) {
+    let code = code.build();
+    db.insert_account_info(
+        address,
+        AccountInfo::new(U256::ZERO, 1, code.hash_slow(), code),
+    );
 }
 
 fn tx(kind: TxKind, data: Vec<u8>, gas_limit: u64) -> TxEnv {
@@ -361,8 +368,22 @@ fn tx(kind: TxKind, data: Vec<u8>, gas_limit: u64) -> TxEnv {
 
 /// Runs a call to [`CONTRACT`] that starts with [`RESERVOIR`].
 fn call(contract: Code, child: Code) -> Run {
+    call_in(db(contract, child))
+}
+
+/// Runs a call to [`CONTRACT`] that starts with [`RESERVOIR`], with [`CHILD`] and [`SIBLING`]
+/// holding `siblings`.
+fn call_siblings(contract: Code, siblings: [Code; 2]) -> Run {
+    let [child, sibling] = siblings;
+    let mut db = db(contract, child);
+    insert_code(&mut db, SIBLING, sibling);
+    call_in(db)
+}
+
+/// Runs a call to [`CONTRACT`] in `db` that starts with [`RESERVOIR`].
+fn call_in(db: Db) -> Run {
     run(
-        amsterdam(db(contract, child), 0),
+        amsterdam(db, 0),
         tx(TxKind::Call(CONTRACT), Vec::new(), REGULAR_CAP + RESERVOIR),
     )
 }
@@ -872,6 +893,88 @@ fn test_a_child_refill_of_its_callers_charge_nets_out_on_success() {
     assert_eq!(counters(&refilled.settled), (RESERVOIR, 0, 0, 0));
     assert_eq!(refilled.settled.remaining(), baseline.settled.remaining());
     assert_eq!(refilled.total(), baseline.total());
+}
+
+/// A sibling's refill pays back what an earlier sibling's history charge spilled. The caller took
+/// that spill over when the first sibling succeeded, but the second sibling starts with no spill
+/// of its own, so its refill lands in its reservoir. When it returns, the caller moves that
+/// reservoir back to regular gas up to its outstanding spill and keeps the rest as reservoir.
+#[test]
+fn test_a_sibling_refill_pays_back_the_spill_of_an_earlier_siblings_history_charge() {
+    // (the two siblings, the same two charging nothing,
+    //  the siblings' counters and the caller's counters as each returns)
+    let rows = [
+        // The history charge spills 50,000; the second sibling takes the whole charge back.
+        (
+            [
+                Code::default().charge_history(LARGE_HISTORY).op(STOP),
+                Code::default().refill_history(LARGE_HISTORY).op(STOP),
+            ],
+            [
+                Code::default().charge_history(0).op(STOP),
+                Code::default().refill_history(0).op(STOP),
+            ],
+            [
+                (0, 0, LARGE_HISTORY as i64, 50_000),
+                (LARGE_HISTORY, 0, -(LARGE_HISTORY as i64), 0),
+            ],
+            (RESERVOIR, 0, 0, 0),
+        ),
+        // The write leaves 2,080 of the reservoir, and the history charge takes them and spills
+        // 47,920. The second sibling clears the slot in the caller's storage and refills 97,920
+        // state gas: 47,920 pay back the history charge's spill, 50,000 stay reservoir.
+        (
+            [
+                Code::default().sstore(1).charge_history(HISTORY).op(STOP),
+                Code::default().sstore(0).op(STOP),
+            ],
+            [
+                Code::default().sstore(1).charge_history(0).op(STOP),
+                Code::default().sstore(0).op(STOP),
+            ],
+            [
+                (0, SSTORE_SET as i64, HISTORY as i64, 47_920),
+                (SSTORE_SET, -(SSTORE_SET as i64), 0, 0),
+            ],
+            (RESERVOIR - HISTORY, 0, HISTORY as i64, 0),
+        ),
+    ];
+    let caller_code = || {
+        Code::default()
+            .delegatecall(CHILD)
+            .delegatecall(SIBLING)
+            .op(STOP)
+    };
+
+    for (siblings, uncharged_siblings, sibling_gas, caller_gas) in rows {
+        let charged = call_siblings(caller_code(), siblings);
+        let uncharged = call_siblings(caller_code(), uncharged_siblings);
+
+        let [first, second, caller] = charged.returned.as_slice() else {
+            panic!("two siblings and the caller: {:?}", charged.returned);
+        };
+        for (sibling, gas) in [first, second].into_iter().zip(sibling_gas) {
+            assert_eq!(sibling.result, InstructionResult::Stop);
+            assert_eq!(counters(&sibling.gas), gas);
+        }
+
+        assert_eq!(caller.result, InstructionResult::Stop);
+        assert_eq!(counters(&caller.gas), caller_gas);
+        assert_eq!(unwound_reservoir(&caller.gas), RESERVOIR as i64);
+
+        // The spill is paid back: the caller ends with the regular gas of the uncharged run, and
+        // the history net still charged is the only difference in the total.
+        let (reservoir, _, history, _) = caller_gas;
+        assert_eq!(counters(&charged.settled), caller_gas);
+        assert_eq!(charged.settled.remaining(), uncharged.settled.remaining());
+        assert_eq!(unwound_reservoir(&charged.settled), RESERVOIR as i64);
+        assert_eq!(charged.gas().reservoir_remaining(), reservoir);
+        assert_eq!(charged.gas().state_gas_spent_final(), 0);
+        assert_eq!(
+            charged.total(),
+            uncharged.total() + u64::try_from(history).unwrap()
+        );
+    }
 }
 
 /// A child that takes back its caller's history charge and then reverts takes the refill back
