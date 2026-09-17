@@ -146,3 +146,10 @@ fn test_amsterdam_with_switch_off_keeps_dupn_remaining_gas() {
     assert_eq!(interpreter.gas.remaining(), DUPN_REMAINING);
     assert_eq!(interpreter.stack.len(), 18);
 }
+
+/// The EIP-7708 switch is not a Host method, so it cannot activate opcodes.
+/// Osaka with the opcode switch off (the independent case) still rejects DUPN.
+#[test]
+fn test_dupn_not_activated_on_osaka_when_only_eip7708_switch_on() {
+    assert_not_activated(DUPN_VECTOR);
+}

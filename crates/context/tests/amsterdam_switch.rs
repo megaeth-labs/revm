@@ -1,8 +1,8 @@
-//! Amsterdam opcode switch: EIP-7708 transfer logs below `SpecId::AMSTERDAM`.
+//! EIP-7708 transfer-log switch below `SpecId::AMSTERDAM`.
 //!
-//! Default (switch off) keeps the spec-only gate. Switch on at Osaka must emit the same
-//! transfer log as Amsterdam. These switch-on cases fail if the cfg flag is not copied
-//! into the journal.
+//! Independent of the Amsterdam opcode switch. Default (7708 switch off) keeps the
+//! spec-only gate. Switch on at Osaka must emit the same transfer log as Amsterdam.
+//! These switch-on cases fail if the cfg flag is not copied into the journal.
 
 use primitives::{
     address,
@@ -16,8 +16,14 @@ const FROM: Address = address!("0x1000000000000000000000000000000000000001");
 const TO: Address = address!("0x2000000000000000000000000000000000000002");
 const VALUE: U256 = U256::from_limbs([1, 0, 0, 0]);
 
-fn transfer_logs(spec: SpecId, enable_amsterdam_opcodes: bool) -> Vec<Log> {
-    let cfg = CfgEnv::new_with_spec(spec).with_enable_amsterdam_opcodes(enable_amsterdam_opcodes);
+fn transfer_logs(
+    spec: SpecId,
+    enable_amsterdam_opcodes: bool,
+    enable_amsterdam_eip7708: bool,
+) -> Vec<Log> {
+    let cfg = CfgEnv::new_with_spec(spec)
+        .with_enable_amsterdam_opcodes(enable_amsterdam_opcodes)
+        .with_enable_amsterdam_eip7708(enable_amsterdam_eip7708);
     let mut ctx: Context = Context::new(EmptyDB::new(), spec).with_cfg(cfg);
 
     ctx.journaled_state.load_account(FROM).unwrap();
@@ -52,14 +58,14 @@ fn expected_transfer_log() -> Log {
 
 #[test]
 fn test_value_transfer_emits_no_7708_log_on_osaka_when_switch_off() {
-    let logs = transfer_logs(SpecId::OSAKA, false);
+    let logs = transfer_logs(SpecId::OSAKA, false, false);
     assert!(logs.is_empty());
 }
 
 #[test]
 fn test_value_transfer_on_osaka_with_switch_matches_amsterdam() {
-    let with_switch = transfer_logs(SpecId::OSAKA, true);
-    let on_amsterdam = transfer_logs(SpecId::AMSTERDAM, false);
+    let with_switch = transfer_logs(SpecId::OSAKA, false, true);
+    let on_amsterdam = transfer_logs(SpecId::AMSTERDAM, false, false);
 
     assert_eq!(with_switch, on_amsterdam);
     assert_eq!(with_switch, vec![expected_transfer_log()]);
@@ -67,7 +73,19 @@ fn test_value_transfer_on_osaka_with_switch_matches_amsterdam() {
 
 #[test]
 fn test_amsterdam_with_switch_off_emits_one_7708_log() {
-    let logs = transfer_logs(SpecId::AMSTERDAM, false);
+    let logs = transfer_logs(SpecId::AMSTERDAM, false, false);
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0], expected_transfer_log());
+}
+
+#[test]
+fn test_value_transfer_emits_no_7708_log_on_osaka_when_only_opcode_switch_on() {
+    let logs = transfer_logs(SpecId::OSAKA, true, false);
+    assert!(logs.is_empty());
+}
+
+#[test]
+fn test_value_transfer_emits_7708_log_on_osaka_when_only_eip7708_switch_on() {
+    let logs = transfer_logs(SpecId::OSAKA, false, true);
+    assert_eq!(logs, vec![expected_transfer_log()]);
 }
