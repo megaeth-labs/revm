@@ -15,10 +15,13 @@ use context::{
 };
 use context_interface::{
     cfg::{GasId, GasParams, StateGasCharge, StateGasSite},
+    either::Either,
     host::LoadError,
     journaled_state::AccountInfoLoad,
     result::ResultGas,
-    transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
+    transaction::{
+        Authorization, AuthorizationTr, RecoveredAuthority, RecoveredAuthorization, Transaction,
+    },
     Database, Host, OutFrame,
 };
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
@@ -31,10 +34,12 @@ use primitives::{
     Bytes, HashMap, Log, StorageKey, StorageValue, TxKind, B256, U256,
 };
 use revm_handler::{
-    execution, instructions::EthInstructions, EthFrame, EthPrecompiles, ExecuteEvm, FrameResult,
-    ItemOrResult, MainBuilder, MainContext, MainnetContext, MainnetEvm,
+    execution, instructions::EthInstructions, pre_execution::Eip7702AuthFacts, EthFrame,
+    EthPrecompiles, ExecuteEvm, FrameResult, ItemOrResult, MainBuilder, MainContext,
+    MainnetContext, MainnetEvm,
 };
 use state::{AccountInfo, Bytecode};
+use std::cell::Cell;
 
 type Db = CacheDB<EmptyDB>;
 type DbError = <Db as Database>::Error;
@@ -725,6 +730,147 @@ fn test_eip7702_delegation_bytes_lookup_failure_fails_tx() {
         lookups,
         [new_account(AUTHORITY), delegation_bytes(AUTHORITY)]
     );
+}
+
+/// A [`TxEnv`] whose authorizations count how often their authority is recovered.
+struct RecoveryCountingTx {
+    inner: TxEnv,
+    recoveries: Cell<usize>,
+}
+
+/// An authorization of [`RecoveryCountingTx`].
+struct CountedAuthorization<'a> {
+    inner: <TxEnv as Transaction>::Authorization<'a>,
+    recoveries: &'a Cell<usize>,
+}
+
+impl AuthorizationTr for CountedAuthorization<'_> {
+    fn authority(&self) -> Option<Address> {
+        self.recoveries.set(self.recoveries.get() + 1);
+        self.inner.authority()
+    }
+
+    fn chain_id(&self) -> U256 {
+        self.inner.chain_id()
+    }
+
+    fn nonce(&self) -> u64 {
+        self.inner.nonce()
+    }
+
+    fn address(&self) -> Address {
+        self.inner.address()
+    }
+}
+
+impl Transaction for RecoveryCountingTx {
+    type AccessListItem<'a> = <TxEnv as Transaction>::AccessListItem<'a>;
+    type Authorization<'a> = CountedAuthorization<'a>;
+
+    fn tx_type(&self) -> u8 {
+        self.inner.tx_type()
+    }
+
+    fn caller(&self) -> Address {
+        self.inner.caller()
+    }
+
+    fn gas_limit(&self) -> u64 {
+        self.inner.gas_limit()
+    }
+
+    fn value(&self) -> U256 {
+        self.inner.value()
+    }
+
+    fn input(&self) -> &Bytes {
+        self.inner.input()
+    }
+
+    fn nonce(&self) -> u64 {
+        self.inner.nonce()
+    }
+
+    fn kind(&self) -> TxKind {
+        self.inner.kind()
+    }
+
+    fn chain_id(&self) -> Option<u64> {
+        self.inner.chain_id()
+    }
+
+    fn gas_price(&self) -> u128 {
+        self.inner.gas_price()
+    }
+
+    fn access_list(&self) -> Option<impl Iterator<Item = Self::AccessListItem<'_>>> {
+        self.inner.access_list()
+    }
+
+    fn blob_versioned_hashes(&self) -> &[B256] {
+        self.inner.blob_versioned_hashes()
+    }
+
+    fn max_fee_per_blob_gas(&self) -> u128 {
+        self.inner.max_fee_per_blob_gas()
+    }
+
+    fn authorization_list_len(&self) -> usize {
+        self.inner.authorization_list_len()
+    }
+
+    fn authorization_list(&self) -> impl Iterator<Item = Self::Authorization<'_>> {
+        self.inner
+            .authorization_list()
+            .map(|inner| CountedAuthorization {
+                inner,
+                recoveries: &self.recoveries,
+            })
+    }
+
+    fn max_priority_fee_per_gas(&self) -> Option<u128> {
+        self.inner.max_priority_fee_per_gas()
+    }
+}
+
+#[test]
+fn test_eip7702_authorizations_skipped_before_recovery_are_not_recovered() {
+    // The authorization phase skips a wrong-chain and a nonce-max authorization before it
+    // recovers the authority. Lifting the list keeps that order: only the other two are
+    // recovered, and only they are kept.
+    let chain_id = 1;
+    let authorization = |chain_id: u64, nonce: u64| {
+        Either::Right(RecoveredAuthorization::new_unchecked(
+            Authorization {
+                chain_id: U256::from(chain_id),
+                address: DELEGATE,
+                nonce,
+            },
+            RecoveredAuthority::Valid(AUTHORITY),
+        ))
+    };
+    let mut inner = auth_tx();
+    inner.authorization_list = vec![
+        authorization(0, 0),
+        authorization(chain_id + 1, 0),
+        authorization(chain_id, u64::MAX),
+        authorization(chain_id, 1),
+    ];
+    let tx = RecoveryCountingTx {
+        inner,
+        recoveries: Cell::new(0),
+    };
+
+    let facts = Eip7702AuthFacts::collect(&tx, chain_id);
+
+    let kept = |chain_id: u64, nonce: u64| Eip7702AuthFacts {
+        chain_id: U256::from(chain_id),
+        nonce,
+        authority: Some(AUTHORITY),
+        address: DELEGATE,
+    };
+    assert_eq!(tx.recoveries.get(), 2);
+    assert_eq!(facts, [kept(0, 0), kept(chain_id, 1)]);
 }
 
 // Code deposit.

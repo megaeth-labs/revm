@@ -254,7 +254,7 @@ pub fn apply_eip7702_auth_list<
         let params = context.cfg().gas_params();
         let account_write_cost = params.tx_account_write_cost();
         let tx = context.tx();
-        let auth_list = Eip7702AuthFacts::collect(tx);
+        let auth_list = Eip7702AuthFacts::collect(tx, chain_id);
 
         // Accounts this transaction has already written (their `ACCOUNT_WRITE`
         // is already paid): the sender's leaf is written at inclusion (priced

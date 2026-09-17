@@ -22,14 +22,32 @@ pub struct Eip7702AuthFacts {
 }
 
 impl Eip7702AuthFacts {
-    /// Lifts every authorization of `tx` into the scalar form.
-    pub fn collect(tx: &impl Transaction) -> Vec<Self> {
+    /// Lifts the authorizations of `tx` that can apply on `chain_id` into the scalar form.
+    ///
+    /// An authorization bound to another chain, or with nonce `u64::MAX`, is dropped before its
+    /// authority is recovered, at the point where the authorization loop would skip it, so its
+    /// signature is never recovered.
+    ///
+    /// The list is buffered rather than streamed because the loop hands the whole context to the
+    /// pricing hook. Each entry is 88 bytes, and every authorization has already paid at least
+    /// the per-authorization intrinsic gas (7,816 under EIP-2780), so the buffer is proportional
+    /// to gas the sender paid.
+    pub fn collect(tx: &impl Transaction, chain_id: u64) -> Vec<Self> {
+        let chain_id = U256::from(chain_id);
         tx.authorization_list()
-            .map(|authorization| Self {
-                chain_id: authorization.chain_id(),
-                nonce: authorization.nonce(),
-                authority: authorization.authority(),
-                address: authorization.address(),
+            .filter_map(|authorization| {
+                let auth_chain_id = authorization.chain_id();
+                let nonce = authorization.nonce();
+                let wrong_chain = !auth_chain_id.is_zero() && auth_chain_id != chain_id;
+                if wrong_chain || nonce == u64::MAX {
+                    return None;
+                }
+                Some(Self {
+                    chain_id: auth_chain_id,
+                    nonce,
+                    authority: authorization.authority(),
+                    address: authorization.address(),
+                })
             })
             .collect()
     }
