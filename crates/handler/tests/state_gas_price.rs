@@ -6,7 +6,8 @@
 //! failure test checks that the cause the hook recorded is what the transaction returns.
 
 use bytecode::opcode::{
-    CALL, CREATE, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH3, PUSH4, RETURN, REVERT, SSTORE, STOP,
+    CALL, CREATE, CREATE2, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH3, PUSH4, RETURN, REVERT, SSTORE,
+    STOP,
 };
 use context::{
     result::{EVMError, ExecutionResult},
@@ -30,8 +31,8 @@ use interpreter::{
     SelfDestructResult, SharedMemory, StateLoad,
 };
 use primitives::{
-    address, constants::CALL_STACK_LIMIT, eip2780, eip8037, eip8038, hardfork::SpecId, Address,
-    Bytes, HashMap, Log, StorageKey, StorageValue, TxKind, B256, U256,
+    address, constants::CALL_STACK_LIMIT, eip2780, eip8037, eip8038, hardfork::SpecId, keccak256,
+    Address, Bytes, HashMap, Log, StorageKey, StorageValue, TxKind, B256, U256,
 };
 use revm_handler::{
     execution, instructions::EthInstructions, pre_execution::Eip7702AuthFacts, EthFrame,
@@ -424,6 +425,24 @@ fn create_reverting_code() -> Vec<u8> {
         PUSH3, a, b, c, PUSH0, MSTORE, //
         PUSH1, 3, PUSH1, 29, PUSH0, CREATE, STOP,
     ]
+}
+
+/// The salt [`create2_reverting_code`] uses.
+const SALT: u8 = 7;
+
+/// Contract code: `CREATE2(0, 29, 3, SALT)` of [`REVERTING_INITCODE`], then `STOP`.
+fn create2_reverting_code() -> Vec<u8> {
+    let [a, b, c] = REVERTING_INITCODE;
+    vec![
+        // MSTORE(0, initcode): the initcode lands in memory bytes 29..32.
+        PUSH3, a, b, c, PUSH0, MSTORE, //
+        PUSH1, SALT, PUSH1, 3, PUSH1, 29, PUSH0, CREATE2, STOP,
+    ]
+}
+
+/// The address [`create2_reverting_code`] creates.
+fn create2_reverting_address() -> Address {
+    CONTRACT.create2(B256::from(U256::from(SALT)), keccak256(REVERTING_INITCODE))
 }
 
 /// Initcode deploying 32 zero bytes: `RETURN(0, 32)`.
@@ -965,6 +984,33 @@ fn test_reverted_create_refunds_the_created_address_price() {
 fn test_reverted_create_refund_lookup_failure_fails_tx() {
     let created = CONTRACT.create(1);
     let db = db_with_contract(create_reverting_code(), 0);
+    let (outcome, lookups) = transact(
+        poisoned(db, create_charge(created), 1),
+        call_tx(CONTRACT, 0),
+    );
+
+    assert_fails_with_recorded_cause(outcome);
+    assert_eq!(lookups, [create_charge(created), create_charge(created)]);
+}
+
+#[test]
+fn test_reverted_create2_refunds_the_created_address_price() {
+    let created = create2_reverting_address();
+    let db = || db_with_contract(create2_reverting_code(), 0);
+    let tx = call_tx(CONTRACT, 0);
+    let (outcome, lookups) = transact(priced(db(), create_charge(created), PRICE), tx.clone());
+
+    let result = outcome.unwrap();
+    assert!(result.is_success());
+    assert_eq!(result.gas().state_gas_spent_final(), 0);
+    assert_eq!(*result.gas(), flat_gas(db(), tx));
+    assert_eq!(lookups, [create_charge(created), create_charge(created)]);
+}
+
+#[test]
+fn test_reverted_create2_refund_lookup_failure_fails_tx() {
+    let created = create2_reverting_address();
+    let db = db_with_contract(create2_reverting_code(), 0);
     let (outcome, lookups) = transact(
         poisoned(db, create_charge(created), 1),
         call_tx(CONTRACT, 0),
