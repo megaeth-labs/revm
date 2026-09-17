@@ -460,11 +460,18 @@ impl EthFrame<EthInterpreter> {
 
                 let mut create_outcome =
                     CreateOutcome::new(interpreter_result, Some(frame.created_address));
-                create_outcome.charged_create_state_gas = match &self.input {
-                    FrameInput::Create(inputs) => inputs.charged_create_state_gas(),
-                    _ => false,
+                // The charged address comes from the inputs, not `frame.created_address`: the
+                // EIP-2780 runtime phase charges the address the transaction nonce gives, which
+                // differs from the created one when the nonce check is disabled.
+                let (charged_create_state_gas, charged_state_gas_address) = match &self.input {
+                    FrameInput::Create(inputs) => (
+                        inputs.charged_create_state_gas(),
+                        inputs.charged_state_gas_address(),
+                    ),
+                    _ => (false, Address::ZERO),
                 };
-                create_outcome.charged_state_gas_address = frame.created_address;
+                create_outcome.charged_create_state_gas = charged_create_state_gas;
+                create_outcome.charged_state_gas_address = charged_state_gas_address;
                 ItemOrResult::Result(FrameResult::Create(create_outcome))
             }
         };

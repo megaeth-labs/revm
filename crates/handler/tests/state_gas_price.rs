@@ -63,6 +63,8 @@ const FLAT_DELEGATION_BYTES: u64 = eip8037::AUTH_BASE_BYTES * eip8037::CPSB_GLAM
 
 /// A price no flat schedule entry has.
 const PRICE: u64 = 700_000;
+/// A second price no flat schedule entry has, for a site that must not be confused with the first.
+const OTHER_PRICE: u64 = 900_000;
 
 /// What the failing hook records before it returns `None`.
 const POISON_CAUSE: &str = "injected state gas price failure";
@@ -616,6 +618,40 @@ fn test_reverted_creation_tx_refund_lookup_failure_fails_tx() {
 
     assert_fails_with_recorded_cause(outcome);
     assert_eq!(lookups, [create_charge(created), create_charge(created)]);
+}
+
+#[test]
+fn test_nonce_unchecked_reverted_creation_tx_refunds_the_charged_address() {
+    // With the nonce check off, the sender's account nonce (1) differs from the transaction's
+    // (0). The runtime phase charges the address the transaction nonce gives; the frame creates
+    // the one the account nonce gives. The refund prices the address that was charged.
+    let charged = BENCH_CALLER.create(0);
+    let created = BENCH_CALLER.create(1);
+    let ctx = || {
+        let mut db = funded_db();
+        db.insert_account_info(
+            BENCH_CALLER,
+            AccountInfo {
+                nonce: 1,
+                ..AccountInfo::from_balance(U256::from(10u128.pow(21)))
+            },
+        );
+        let mut ctx = PricedContext::new(db);
+        ctx.inner.cfg.disable_nonce_check = true;
+        ctx
+    };
+    let tx = create_tx(&REVERTING_INITCODE);
+    let ctx_priced = ctx()
+        .with_price(create_charge(charged), PRICE)
+        .with_price(create_charge(created), OTHER_PRICE);
+    let (outcome, lookups) = transact(ctx_priced, tx.clone());
+    let (flat, _) = transact(ctx(), tx);
+
+    let result = outcome.unwrap();
+    assert!(!result.is_success() && !result.is_halt(), "{result:?}");
+    assert_eq!(lookups, [create_charge(charged), create_charge(charged)]);
+    assert_eq!(result.gas().state_gas_spent_final(), 0);
+    assert_eq!(*result.gas(), *flat.unwrap().gas());
 }
 
 // EIP-7702 authorizations under EIP-2780.
