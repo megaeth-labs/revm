@@ -44,8 +44,9 @@ It moves only when `mega-reth` moves its revm line.
 3. **Cargo versions never change.**
    The `[patch.crates-io]` mechanism only applies when the patched version satisfies the consumer's requirement, and pre-release suffixes do not satisfy `^40.0.3`.
    Releases are identified by git tags only.
-4. **Commit prefix `mega:`, one commit per topic.**
-   Every fork commit starts with `mega:` so `git log --oneline v112..main` reads as the fork's changelog.
+4. **Conventional commit prefixes, one commit per topic.**
+   Fork commits and pull request titles use the usual prefixes (`feat`, `fix`, `chore`, `docs`, `ci`, `test`) that say what changed; `git log --oneline v112..main` lists only fork commits and reads as the fork's changelog.
+   A cherry-pick is titled `chore: cherry-pick upstream <sha> — <title>`.
    Group by topic (the CI is one commit, a hook family is one commit); PRs are squash-merged so `main` stays linear.
    New logic goes into new files; an upstream file gets at most a `mod` line or a call site, and every such touch point is listed in the "Upstream touch points" section below.
 5. **`no_std` is mandatory.**
@@ -54,7 +55,7 @@ It moves only when `mega-reth` moves its revm line.
 6. **The toolchain is pinned.**
    `rust-toolchain.toml` names the compiler this repository is checked with, locally and in CI.
    Upstream floats on `stable` and fixes each release's new clippy lints in its own code; the fork carries upstream code it does not edit, so a floating toolchain would fail CI on lints in code the fork must not touch.
-   The pin moves with each base-line move, or in a `mega:` commit of its own.
+   The pin moves with each base-line move, or in a commit of its own.
    The MSRV consumers see is still `rust-version` in `Cargo.toml`.
 7. **Consumers pin tagged commits only.**
    `main` is rewritten when the base line moves, so an untagged commit may become unreachable.
@@ -188,7 +189,7 @@ This is the one operation that rewrites `main`, and only an admin runs it.
 ```bash
 git fetch upstream --tags
 git branch release/v40 v40.0.3-mega.N          # keep the old line reachable
-git rebase --onto v113 v112 main               # replay the mega: commits
+git rebase --onto v113 v112 main               # replay the fork commits
 echo v113 > scripts/mega/base.txt              # and update the crate table versions
 # bump the channel in rust-toolchain.toml to the stable upstream's CI used at that tag
 # resolve conflicts, run the CI jobs locally, check a consumer against the result (see Consumer wiring)

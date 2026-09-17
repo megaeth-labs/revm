@@ -14,14 +14,14 @@ It is read by the automated reviewer as well as by people.
    The `touch-points` job checks the rows exist; the reviewer checks the rules are followable.
 4. **`no_std`.** No unguarded `std::`, no new dependency that enables `std` by default, no allocation in a path that did not allocate before.
    The CI checks both riscv targets; the reviewer checks the intent.
-5. **One topic per PR, `mega:` prefix on every commit.** `git log --oneline v112..main` is the fork's changelog and must stay readable.
+5. **One topic per PR, conventional prefix on every commit.** Commit and PR titles start with `feat`, `fix`, `chore`, `docs`, `ci` or `test` and say what changed; `git log --oneline v112..main` is the fork's changelog and must stay readable.
 6. **Tests live next to the hook.** A hook without a test that fails when the hook is removed is not done.
 
 ## By kind of change
 
 | Label | Look for |
 |---|---|
-| `mega:cherry-pick` | The commit message names the upstream commit (`mega: cherry-pick upstream <sha> — <title>`); the diff equals the upstream diff apart from conflicts the message records; nothing MegaETH-specific rides along |
+| `mega:cherry-pick` | The commit message names the upstream commit (`chore: cherry-pick upstream <sha> — <title>`); the diff equals the upstream diff apart from conflicts the message records; nothing MegaETH-specific rides along |
 | `mega:hook` | New logic in new files (`megaeth.rs` modules); upstream files get a `mod` line or a call site only; a default implementation keeps existing behaviour byte for byte; serde-skipped fields keep encodings unchanged |
 | `mega:vendor` | The vendored crate keeps its upstream version number and a note of the upstream commit it was taken from; its own tests run in CI |
 | `mega:ci` | Workflows pin action SHAs; nothing requires a secret the repository does not have; the local equivalent of every job is documented |
