@@ -16,7 +16,6 @@ use context::{
 };
 use context_interface::{
     cfg::{GasId, GasParams, StateGasCharge, StateGasSite},
-    either::Either,
     host::LoadError,
     journaled_state::AccountInfoLoad,
     result::ResultGas,
@@ -53,6 +52,10 @@ const EMPTY: Address = address!("0x00000000000000000000000000000000000e3970");
 const EOA: Address = address!("0x0000000000000000000000000000000000000eea");
 /// An EIP-7702 authority that does not exist before the transaction.
 const AUTHORITY: Address = address!("0x00000000000000000000000000000000000a0707");
+/// An EIP-7702 authority whose authorization is bound to another chain.
+const WRONG_CHAIN_AUTHORITY: Address = address!("0x00000000000000000000000000000000000a0708");
+/// An EIP-7702 authority whose authorization carries nonce `u64::MAX`.
+const NONCE_MAX_AUTHORITY: Address = address!("0x00000000000000000000000000000000000a0709");
 /// What `AUTHORITY` delegates to.
 const DELEGATE: Address = address!("0x00000000000000000000000000000000000de1e9");
 /// The blake2f precompile, which fails on empty input and has no account.
@@ -399,6 +402,18 @@ fn auth_tx() -> TxEnv {
     tx
 }
 
+/// A recovered authorization of `authority` to [`DELEGATE`].
+fn authorization(authority: Address, chain_id: u64, nonce: u64) -> RecoveredAuthorization {
+    RecoveredAuthorization::new_unchecked(
+        Authorization {
+            chain_id: U256::from(chain_id),
+            address: DELEGATE,
+            nonce,
+        },
+        RecoveredAuthority::Valid(authority),
+    )
+}
+
 /// `CALL(100_000, to, 1, 0, 0, 0, 0)`, leaving the success flag on the stack.
 fn value_call(to: Address) -> Vec<u8> {
     let mut code = vec![PUSH0, PUSH0, PUSH0, PUSH0, PUSH1, 1, PUSH20];
@@ -428,21 +443,37 @@ fn create_reverting_code() -> Vec<u8> {
 }
 
 /// The salt [`create2_reverting_code`] uses.
-const SALT: u8 = 7;
+const CREATE2_SALT: u8 = 7;
 
-/// Contract code: `CREATE2(0, 29, 3, SALT)` of [`REVERTING_INITCODE`], then `STOP`.
+/// Contract code: `CREATE2(0, 29, 3, CREATE2_SALT)` of [`REVERTING_INITCODE`], then `STOP`.
 fn create2_reverting_code() -> Vec<u8> {
     let [a, b, c] = REVERTING_INITCODE;
     vec![
         // MSTORE(0, initcode): the initcode lands in memory bytes 29..32.
-        PUSH3, a, b, c, PUSH0, MSTORE, //
-        PUSH1, SALT, PUSH1, 3, PUSH1, 29, PUSH0, CREATE2, STOP,
+        PUSH3,
+        a,
+        b,
+        c,
+        PUSH0,
+        MSTORE, //
+        PUSH1,
+        CREATE2_SALT,
+        PUSH1,
+        3,
+        PUSH1,
+        29,
+        PUSH0,
+        CREATE2,
+        STOP,
     ]
 }
 
 /// The address [`create2_reverting_code`] creates.
 fn create2_reverting_address() -> Address {
-    CONTRACT.create2(B256::from(U256::from(SALT)), keccak256(REVERTING_INITCODE))
+    CONTRACT.create2(
+        B256::from(U256::from(CREATE2_SALT)),
+        keccak256(REVERTING_INITCODE),
+    )
 }
 
 /// Initcode deploying 32 zero bytes: `RETURN(0, 32)`.
@@ -858,23 +889,13 @@ fn test_eip7702_authorizations_skipped_before_recovery_are_not_recovered() {
     // recovers the authority. Lifting the list keeps that order: only the other two are
     // recovered, and only they are kept.
     let chain_id = 1;
-    let authorization = |chain_id: u64, nonce: u64| {
-        Either::Right(RecoveredAuthorization::new_unchecked(
-            Authorization {
-                chain_id: U256::from(chain_id),
-                address: DELEGATE,
-                nonce,
-            },
-            RecoveredAuthority::Valid(AUTHORITY),
-        ))
-    };
     let mut inner = auth_tx();
-    inner.authorization_list = vec![
-        authorization(0, 0),
-        authorization(chain_id + 1, 0),
-        authorization(chain_id, u64::MAX),
-        authorization(chain_id, 1),
-    ];
+    inner.set_recovered_authorization(vec![
+        authorization(AUTHORITY, 0, 0),
+        authorization(AUTHORITY, chain_id + 1, 0),
+        authorization(AUTHORITY, chain_id, u64::MAX),
+        authorization(AUTHORITY, chain_id, 1),
+    ]);
     let tx = RecoveryCountingTx {
         inner,
         recoveries: Cell::new(0),
@@ -890,6 +911,29 @@ fn test_eip7702_authorizations_skipped_before_recovery_are_not_recovered() {
     };
     assert_eq!(tx.recoveries.get(), 2);
     assert_eq!(facts, [kept(0, 0), kept(chain_id, 1)]);
+}
+
+#[test]
+fn test_eip7702_authorizations_for_another_chain_or_at_nonce_max_are_never_priced() {
+    // Only the authorization bound to the configured chain applies, so the phase is handed that
+    // chain id; the other two authorities never reach the hook.
+    let ctx = PricedContext::new(funded_db());
+    let chain_id = ctx.inner.cfg.chain_id;
+    let mut tx = call_tx(EOA, 0);
+    tx.set_recovered_authorization(vec![
+        authorization(WRONG_CHAIN_AUTHORITY, chain_id + 1, 0),
+        authorization(NONCE_MAX_AUTHORITY, chain_id, u64::MAX),
+        authorization(AUTHORITY, chain_id, 0),
+    ]);
+    tx.derive_tx_type().unwrap();
+
+    let (outcome, lookups) = transact(ctx, tx);
+
+    assert!(outcome.unwrap().is_success());
+    assert_eq!(
+        lookups,
+        [new_account(AUTHORITY), delegation_bytes(AUTHORITY)]
+    );
 }
 
 // Code deposit.

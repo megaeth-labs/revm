@@ -41,7 +41,7 @@ where
     assert_eq!(&serde_json::from_value::<T>(old).unwrap(), without_field);
 }
 
-fn interpreter_result() -> InterpreterResult {
+const fn interpreter_result() -> InterpreterResult {
     InterpreterResult::new(
         InstructionResult::Revert,
         Bytes::from_static(b"reverted"),
