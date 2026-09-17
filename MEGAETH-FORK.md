@@ -25,7 +25,7 @@ It moves only when `mega-reth` moves its revm line.
 
 | Ref | Content | Who writes |
 |---|---|---|
-| `main` | Upstream history up to the baseline tag, then MegaETH commits on top, linear. `git log v112..main` is the whole fork diff. | PRs, CI green required |
+| `main` | Upstream history up to the baseline tag, then MegaETH commits on top, linear between base-line moves. `git log v112..main` is the whole fork diff. | PRs, CI green required |
 | `release/v<N>` | Maintenance branch for an old base line, created from its last tag when `main` moves to a new base and a backport is needed. | PRs |
 | `refs/archive/<branch>` | The pre-2026 fork branches and the old bot branches, moved out of the branch list on 2026-09-16 so that only the live branches show. Not fetched by default; `git fetch origin '+refs/archive/*:refs/archive/*'` brings them back. | Nobody |
 | `v40.0.3-mega.N` | Fork releases, always on `main`. The only tags in this repository: upstream tags are not mirrored; `scripts/mega/base.txt` names the upstream tag the fork is based on, and the workflows fetch it from upstream when they need it. | Release workflow |
@@ -48,7 +48,7 @@ It moves only when `mega-reth` moves its revm line.
    A cherry-pick is titled `chore: cherry-pick upstream <sha> — <title>`.
    Group by topic (the CI is one commit, a hook family is one commit); PRs are squash-merged so `main` stays linear.
    New logic goes into new files where practical; an upstream file gets a `mod` line or a call site.
-   `git diff v112..main` is the fork's footprint on upstream; a rebase replays the fork commits and shows the conflicts.
+   `git diff v112..main` is the fork's footprint on upstream.
 5. **`no_std` is mandatory.**
    MegaETH runs the engine inside a zkVM.
    Every crate must keep building for `riscv64imac-unknown-none-elf` with `--no-default-features`.
@@ -58,8 +58,32 @@ It moves only when `mega-reth` moves its revm line.
    The pin moves with each base-line move, or in a commit of its own.
    The MSRV consumers see is still `rust-version` in `Cargo.toml`.
 7. **Consumers pin tagged commits only.**
-   `main` is rewritten when the base line moves, so an untagged commit may become unreachable.
+   A tag is the only identity a fork release has (rule 3), and the release workflow tags only commits whose `ci success` is green.
    Nothing enforces this mechanically; the consumer's `Cargo.lock` is the record of what it built against.
+
+## Tracking upstream
+
+The fork presents the revm version that `mega-reth`'s reth line pins, today `40.0.3`.
+On reth 2.3, `alloy-evm` 0.36, `alloy-op-evm` 0.32 and `revm-inspectors` 0.40 are built against crates.io revm `40.0.3`, and the consumer patches that version to the fork.
+That is why rule 1 measures against `40.0.3`, and why the fork cannot move to a newer upstream tag on its own: those crates would not build against a newer major's API.
+
+Between base-line moves, upstream changes come in as selective cherry-picks.
+Taken: fixes that change consensus-observable gas or state accounting, and soundness fixes (undefined behaviour, a missing out-of-gas check, a panic).
+Not taken: changes that break the public API (they would need `api:exception` and a consumer check), tooling-only changes, feature-gated additions the consumers do not use, and pairs that net to zero.
+A change upstream later reverted but the fork still needs lands as a fork-owned opt-in switch (`mega:hook`) whose default keeps upstream's behaviour, like the system-call state-gas margin.
+A single pick is titled as in rule 4, a batch `chore: cherry-pick upstream fixes #a #b …`; branch commits keep upstream's subject and the `git cherry-pick -x` trailer, and the squash keeps the pull request title.
+
+Every upstream tag gets a full sweep: each commit in `<base>..<tag>` is classified as taken, candidate (with the reason) or not relevant, and the pull request that carries the picks records the classification.
+The nightly digest (see CI) only shows the latest day; the sweep covers the whole window.
+A sweep of one subsystem is not a sweep; a gas-core-only sweep once missed five soundness fixes.
+The EIP-8037 / EIP-2780 gas core, the files pull request #45 made byte-identical to revm `43.0.0`, stays byte-identical to the upstream tag it tracks apart from the fork's hook lines; each sweep re-checks this by diff.
+
+When `mega-reth`'s reth line moves to a newer revm major, the fork merges the matching upstream tag into `main` (`mega:rebase`).
+There is no rebase, because force-push is banned on every branch.
+`main` allows only squash merges, which would flatten upstream's history, so an admin pushes the merge commit once its pull request is green.
+The cherry-picks drop out of `git diff <tag>..main` because the tag already carries them; `scripts/mega/base.txt`, `scripts/mega/crates.txt` and the Baseline table move in the same change.
+Before the next tag, the hooks are re-validated: the CI and nightly jobs, semver against the new tag, and the consumer builds (see Consumer wiring).
+Then `v<revm>-mega.1` is released, and consumers move their pin in one change together with `stateless-core`.
 
 ## Labels
 
@@ -132,31 +156,14 @@ That fork names the commit of this repository it is built against in its `.cargo
 
 ## Repository settings (admin)
 
-- Default branch `main`; branch protection: pull request required, status checks `ci success` and `semver-checks` required, force-push allowed for admins only (the base-line move needs it).
+- Default branch `main`; ruleset: pull request required, squash merges only, status checks `ci success` and `semver-checks` required, admins may bypass (the base-line merge needs it).
+- Ruleset on every branch that bans force-push, with no bypass.
 - Tag ruleset for `v*-mega.*` that restricts update and deletion only, not creation: the release workflow creates those tags with the Actions token, which cannot bypass a creation restriction.
 - Actions enabled; status checks `ci success`, `semver-checks` and `require-labels` required.
 - Repository description points at this file.
 - Secrets and variables the review bots need: repository secret `CLAUDE_CODE_OAUTH_TOKEN`; the organisation secret `MEGA_MAXWELL_PK` and variable `MEGA_MAXWELL_CLIENT_ID` granted to this repository; the `mega-maxwell` GitHub App installed on this repository (it is the identity the PR reviewer resolves threads and the release workflows push under).
 - The Codex reviewer (`chatgpt-codex-connector`) is an organisation-level app; this repository must be added to its repository access in the ChatGPT settings, nothing in the repository configures it.
 - Labels from the table above created with `gh label create`.
-
-## Moving to a new upstream base
-
-Only when `mega-reth` moves its revm line.
-This is the one operation that rewrites `main`, and only an admin runs it.
-
-```bash
-git fetch upstream --tags
-git branch release/v40 v40.0.3-mega.N          # keep the old line reachable
-git rebase --onto v113 v112 main               # replay the fork commits
-echo v113 > scripts/mega/base.txt              # and update the crate table versions
-# bump the channel in rust-toolchain.toml to the stable upstream's CI used at that tag
-# resolve conflicts, run the CI jobs locally, check a consumer against the result (see Consumer wiring)
-git push --force-with-lease origin main release/v40   # upstream tags stay upstream
-```
-
-Then release `v41.0.0-mega.1`.
-Consumers follow together with the `mega-reth` upgrade that triggered the move.
 
 ## CI
 
