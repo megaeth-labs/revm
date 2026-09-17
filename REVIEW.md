@@ -24,7 +24,7 @@ It is read by the automated reviewer as well as by people.
 | `mega:hook` | New logic in new files where practical; upstream files get a `mod` line or a call site; a default implementation keeps existing behaviour byte for byte; a new serialized field carries `serde(default)` so payloads that predate it still decode |
 | `mega:vendor` | The vendored crate keeps its upstream version number and a note of the upstream commit it was taken from; its own tests run in CI |
 | `mega:ci` | Workflows pin action SHAs; nothing requires a secret the repository does not have; the local equivalent of every job is documented |
-| `mega:rebase` | `scripts/mega/base.txt`, `scripts/mega/crates.txt`, `rust-toolchain.toml` and the baseline table move together; the upstream tag comes in as a merge commit, not a rebase; the PR carries `api:exception` for upstream's own API changes |
+| `mega:rebase` | `scripts/mega/base.txt`, `scripts/mega/crates.txt`, `rust-toolchain.toml` and the baseline table move together; the upstream tag comes in as a merge commit, not a rebase; the merged tree is compared with the new tag and carried picks reconciled; the PR carries `api:exception` for upstream's own API changes |
 
 ## What not to ask for
 
