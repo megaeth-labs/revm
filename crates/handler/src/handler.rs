@@ -527,6 +527,10 @@ pub trait Handler {
         // leaf was created, exactly like `EthFrame::return_result` refunds
         // the upfront CALL/CREATE state charges of inner frames.
         if let Some(charge) = frame_result.refundable_state_gas_charge() {
+            // A failure the frame already recorded (a failed code deposit lookup, say) is
+            // returned first, as `EthFrame::return_result` does for inner frames, so a failing
+            // refund lookup cannot overwrite it.
+            take_error::<Self::Error, _>(evm.ctx().error())?;
             // Priced through the same hook the charge went through. A failed lookup surfaces as
             // an external error: the hook recorded the cause.
             let Some(charge) = evm.ctx().state_gas_charge(charge) else {

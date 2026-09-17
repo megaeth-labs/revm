@@ -68,14 +68,17 @@ const OTHER_PRICE: u64 = 900_000;
 
 /// What the failing hook records before it returns `None`.
 const POISON_CAUSE: &str = "injected state gas price failure";
+/// What a second failing lookup records, so the test can tell which failure a transaction returns.
+const OTHER_POISON_CAUSE: &str = "second injected state gas price failure";
 
 /// One state gas price lookup: which price, at which site.
 type Lookup = (GasId, StateGasSite);
 
-/// A lookup that fails once it has been answered `fail_after` times.
+/// A lookup that fails with `cause` once it has been answered `fail_after` times.
 struct Poison {
     lookup: Lookup,
     fail_after: usize,
+    cause: &'static str,
 }
 
 /// [`Context`] with a per-site state gas price table.
@@ -83,7 +86,7 @@ struct PricedContext {
     inner: MainnetContext<Db>,
     /// Unit prices that differ from the flat schedule.
     prices: HashMap<Lookup, u64>,
-    poison: Option<Poison>,
+    poisons: Vec<Poison>,
     /// Every lookup, in order.
     lookups: Vec<Lookup>,
 }
@@ -93,7 +96,7 @@ impl PricedContext {
         Self {
             inner: amsterdam(db),
             prices: HashMap::default(),
-            poison: None,
+            poisons: Vec::new(),
             lookups: Vec::new(),
         }
     }
@@ -103,8 +106,16 @@ impl PricedContext {
         self
     }
 
-    const fn with_poison(mut self, lookup: Lookup, fail_after: usize) -> Self {
-        self.poison = Some(Poison { lookup, fail_after });
+    fn with_poison(self, lookup: Lookup, fail_after: usize) -> Self {
+        self.with_poison_cause(lookup, fail_after, POISON_CAUSE)
+    }
+
+    fn with_poison_cause(mut self, lookup: Lookup, fail_after: usize, cause: &'static str) -> Self {
+        self.poisons.push(Poison {
+            lookup,
+            fail_after,
+            cause,
+        });
         self
     }
 }
@@ -164,10 +175,10 @@ impl Host for PricedContext {
     fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
         let lookup = (id, site);
         self.lookups.push(lookup);
-        if let Some(poison) = &mut self.poison {
+        for poison in &mut self.poisons {
             if poison.lookup == lookup {
                 if poison.fail_after == 0 {
-                    *self.inner.error() = Err(ContextError::Custom(POISON_CAUSE.into()));
+                    *self.inner.error() = Err(ContextError::Custom(poison.cause.into()));
                     return None;
                 }
                 poison.fail_after -= 1;
@@ -747,6 +758,21 @@ fn test_code_deposit_lookup_failure_fails_tx() {
         lookups.starts_with(&[create_charge(created), code_deposit(created)]),
         "{lookups:?}"
     );
+}
+
+#[test]
+fn test_code_deposit_lookup_failure_is_not_replaced_by_a_refund_lookup_failure() {
+    // The failed deposit leaves the first frame's create charge refundable, and pricing that
+    // refund would fail with another cause. The transaction returns the deposit's cause, and the
+    // refund is never priced.
+    let created = BENCH_CALLER.create(0);
+    let ctx = PricedContext::new(funded_db())
+        .with_poison(code_deposit(created), 0)
+        .with_poison_cause(create_charge(created), 1, OTHER_POISON_CAUSE);
+    let (outcome, lookups) = transact(ctx, create_tx(&INITCODE_32_BYTES));
+
+    assert_fails_with_recorded_cause(outcome);
+    assert_eq!(lookups, [create_charge(created), code_deposit(created)]);
 }
 
 // Refunds of the CALL and CREATE opcode charges.
