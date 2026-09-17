@@ -9,13 +9,15 @@ env:
   CARGO_TERM_COLOR: always
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  # Keeps the upstream mirror branch current and reports what changed in the
-  # crates this fork touches; the digest is the run's job summary.
-  mirror:
-    name: mirror upstream
+  # Reports what changed upstream in the crates this fork touches; the digest
+  # is the run's job summary. Upstream is fetched directly: no mirror branch is
+  # kept, because pushing upstream's workflow files needs a token this job
+  # does not have.
+  digest:
+    name: upstream digest
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -27,33 +29,24 @@ jobs:
           git remote add upstream https://github.com/bluealloy/revm.git
           git fetch --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
       - name: Build the digest
-        id: digest
         run: |
           set -euo pipefail
-          # On the first run the mirror branch does not exist yet, so the
-          # digest starts at the upstream tag this fork is based on.
-          if git ls-remote --exit-code --heads origin upstream-main >/dev/null 2>&1; then
-            git fetch --no-tags origin +refs/heads/upstream-main:refs/remotes/origin/upstream-main
-            base=refs/remotes/origin/upstream-main
-          else
-            base_tag=$(tr -d '[:space:]' < scripts/mega/base.txt)
-            git fetch --no-tags upstream "refs/tags/$base_tag:refs/tags/$base_tag"
-            base=refs/tags/$base_tag
-          fi
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-
-          commits=$(git log --oneline "$base..refs/remotes/upstream/main" -- \
+          # Stateless: the job runs daily, so "since the last digest" is the
+          # last 25 hours of upstream main (one hour of overlap, nothing lost
+          # if a run is late). A manual run shows the same window.
+          since="25 hours ago"
+          commits=$(git log --oneline --since="$since" refs/remotes/upstream/main -- \
             crates/interpreter crates/handler crates/context crates/precompile crates/primitives)
 
           # Upstream tags are reported, never mirrored: the fork's own tag list
-          # stays the fork's releases. A tag counts as new when its commit is
-          # reachable from upstream main but not from the last digest base.
+          # stays the fork's releases. A tag counts as new when its commit is on
+          # upstream main and was made inside the window.
           git fetch --no-tags upstream '+refs/tags/v*:refs/upstream-tags/v*'
           : > new-tags.txt
           while read -r tag sha; do
             case "$tag" in v[0-9]*) ;; *) continue ;; esac
             if git merge-base --is-ancestor "$sha" refs/remotes/upstream/main &&
-               ! git merge-base --is-ancestor "$sha" "$base"; then
+               [ -n "$(git log -1 --since="$since" --format=%H "$sha")" ]; then
               echo "$tag" >> new-tags.txt
             fi
           done < <(git for-each-ref refs/upstream-tags --format='%(refname:strip=2) %(objectname)' | sort -V)
@@ -62,38 +55,24 @@ jobs:
           {
             echo "## Upstream digest"
             echo
-            echo "Base \`$base\` at \`$(git rev-parse --short "$base")\`, upstream main at \`$(git rev-parse --short refs/remotes/upstream/main)\`."
+            echo "Upstream main at \`$(git rev-parse --short refs/remotes/upstream/main)\`, window: the last 25 hours."
             echo
             echo "### Commits touching interpreter, handler, context, precompile, primitives"
             echo
             if [ -n "$commits" ]; then
-              printf '```\n%s\n```\n' "$commits"
+              printf '\`\`\`\n%s\n\`\`\`\n' "$commits"
             else
               echo "None."
             fi
             echo
-            echo "### Upstream tags cut since the last digest"
+            echo "### Upstream tags cut in the window"
             echo
             if [ -n "$new_tags" ]; then
-              printf '```\n%s\n```\n' "$new_tags"
+              printf '\`\`\`\n%s\n\`\`\`\n' "$new_tags"
             else
               echo "None."
             fi
-          } > digest.md
-
-          cat digest.md >> "$GITHUB_STEP_SUMMARY"
-
-          if [ -n "$commits" ] || [ -n "$new_tags" ]; then
-            echo "has_content=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_content=false" >> "$GITHUB_OUTPUT"
-          fi
-      # Reporting comes before the mirror moves: if the issue update fails, the
-      # next run digests the same range again instead of losing it.
-      # No force: a mirror branch that cannot fast-forward means upstream
-      # rewrote history and a human has to look at it.
-      - name: Fast-forward the mirror branch
-        run: git push origin refs/remotes/upstream/main:refs/heads/upstream-main
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # The full execution-spec-test suite, including the legacy tests, the
   # debug-assertion `ethtests` profile and the 32-bit target that the pull

@@ -26,7 +26,6 @@ It moves only when `mega-reth` moves its revm line.
 | Ref | Content | Who writes |
 |---|---|---|
 | `main` | Upstream history up to the baseline tag, then MegaETH commits on top, linear. `git log v112..main` is the whole fork diff. | PRs, CI green required |
-| `upstream-main` | Mirror of `bluealloy/revm` `main`. Fast-forwarded by the nightly workflow. Base for rebases and the upstream digest. | Bot only |
 | `release/v<N>` | Maintenance branch for an old base line, created from its last tag when `main` moves to a new base and a backport is needed. | PRs |
 | `refs/archive/<branch>` | The pre-2026 fork branches and the old bot branches, moved out of the branch list on 2026-09-16 so that only the live branches show. Not fetched by default; `git fetch origin '+refs/archive/*:refs/archive/*'` brings them back. | Nobody |
 | `v40.0.3-mega.N` | Fork releases, always on `main`. The only tags in this repository: upstream tags are not mirrored; `scripts/mega/base.txt` names the upstream tag the fork is based on, and the workflows fetch it from upstream when they need it. | Release workflow |
@@ -165,7 +164,7 @@ Consumers follow together with the `mega-reth` upgrade that triggered the move.
 |---|---|---|
 | `ci.yml` | PR, push to `main` | Test matrix (three feature sets) on the pinned toolchain, `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
 | `semver.yml` | PR | `cargo semver-checks` of the twelve crates against the pull request base; a major-level change fails unless the PR carries `api:exception` (and lists the items in its body) |
-| `nightly.yml` | daily | Upstream digest (core-crate commits and upstream tags cut since the last run, in the run's job summary), fast-forward `upstream-main`, full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
+| `nightly.yml` | daily | Upstream digest (core-crate commits and upstream tags of the last 25 hours, in the run's job summary), full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
 | `release.yml` | manual, `main` only | Require green `ci success` for the commit, tag and publish a fork release |
 | `claude.yml` | PR, comments, issues | The shared MegaETH Claude actions: incremental PR review under the `mega-maxwell` identity (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
 | `pr-labels.yml` | PR | Exactly one `mega:` and one `api:` label |
