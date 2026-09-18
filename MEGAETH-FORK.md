@@ -72,8 +72,9 @@ A pick that breaks the public API needs `api:exception`, the deviating items lis
 An upstream change that upstream later reverted but the fork still needs lands as a fork-owned opt-in switch (`mega:hook`) whose default keeps upstream's behaviour; the system-call state-gas margin (#55) is the first.
 Every pick is applied verbatim: `git show -U0 <commit> | git patch-id --stable` gives the same id for the pick and its upstream commit unless the pick's message records a conflict resolution; the pull request body, which becomes the squash message, lists each pick's `(cherry picked from commit <sha>)` line and its conflicts.
 
-For every upstream tag, a maintainer sweeps `<last swept tag>..<tag>` across the whole repository, fixtures, manifests and lockfile included, and records each commit as taken, candidate (with an owner and a disposition) or excluded (with the reason), with both tag SHAs, in the pull request that carries the picks or, when nothing is taken, in a documentation pull request.
-Before a release, every tag since the last recorded sweep is swept and the release notes cite the sweeps.
+For every upstream tag, a maintainer sweeps `<last swept tag>..<tag>` across the whole repository, fixtures, manifests and lockfile included, and records each commit as taken, candidate (with an owner and a disposition) or excluded (with the reason), with both tag SHAs, in the issue titled `Sweep <tag>` that the nightly workflow opens when the tag appears.
+The pull request that carries the picks links that issue; a sweep that takes nothing is closed with its classification in the issue.
+Before a release, every tag since the last recorded sweep is swept and the release notes cite the sweep issues.
 
 When the node moves to a newer revm major, the fork merges the matching upstream tag into `main` in a pull request labelled `mega:rebase` and `api:exception`, whose body itemises upstream's own API changes.
 `scripts/mega/base.txt`, `scripts/mega/crates.txt`, `rust-toolchain.toml` and the Baseline table move in that pull request, and every carried pick and upstream revert is reconciled against the new tag.
@@ -155,7 +156,7 @@ That fork names the commit of this repository it is built against in its `.cargo
 |---|---|---|
 | `ci.yml` | PR, push to `main` | Test matrix (three feature sets) on the pinned toolchain, `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
 | `semver.yml` | PR | `cargo semver-checks` of the twelve crates against the pull request base; a major-level change fails unless the PR carries `api:exception` (and lists the items in its body) |
-| `nightly.yml` | daily | Upstream digest (commits to the twelve published crates and upstream tags of the last 25 hours, in the job summary), full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
+| `nightly.yml` | daily | Upstream digest (commits to the twelve published crates and upstream tags of the last 25 hours) in the job summary and posted to the issue titled `Upstream digest`, a `Sweep <tag>` issue opened for each new upstream tag, full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
 | `release.yml` | manual, `main` only | Require green `ci success` for the commit, tag and publish a fork release |
 | `claude.yml` | PR, comments, issues | Automated PR review (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
 | `pr-labels.yml` | PR | Exactly one `mega:` and one `api:` label |
