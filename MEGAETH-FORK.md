@@ -165,6 +165,6 @@ Consumers follow together with the `mega-reth` upgrade that triggered the move.
 | `ci.yml` | PR, push to `main` | Test matrix (three feature sets) on the pinned toolchain, `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
 | `semver.yml` | PR | `cargo semver-checks` of the twelve crates against the pull request base; a major-level change fails unless the PR carries `api:exception` (and lists the items in its body) |
 | `nightly.yml` | daily | Upstream digest (core-crate commits and upstream tags of the last 25 hours, in the run's job summary), full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
-| `release.yml` | manual, `main` only | Require green `ci success` for the commit, tag and publish a fork release whose notes cite the `Sweep <tag>` issues closed since the previous fork tag |
+| `release.yml` | manual, `main` only | Require green `ci success` for the commit, tag and publish a fork release |
 | `claude.yml` | PR, comments, issues | The shared MegaETH Claude actions: incremental PR review under the `mega-maxwell` identity (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
 | `pr-labels.yml` | PR | Exactly one `mega:` and one `api:` label |
