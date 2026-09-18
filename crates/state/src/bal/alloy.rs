@@ -23,12 +23,12 @@ impl Bal {
     /// length or unsupported version.
     #[inline]
     pub fn try_from_alloy(alloy_bal: AlloyBal) -> Result<Self, BytecodeDecodeError> {
-        let accounts = AddressIndexMap::from_iter(
-            alloy_bal
-                .into_iter()
-                .map(AccountBal::try_from_alloy)
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        let mut accounts =
+            AddressIndexMap::with_capacity_and_hasher(alloy_bal.len(), Default::default());
+        for alloy_account in alloy_bal {
+            let (address, account_bal) = AccountBal::try_from_alloy(alloy_account)?;
+            accounts.insert(address, account_bal);
+        }
 
         Ok(Self { accounts })
     }
@@ -43,12 +43,12 @@ impl Bal {
     /// length or unsupported version.
     #[inline]
     pub fn clone_from_alloy(alloy_bal: &AlloyBal) -> Result<Self, BytecodeDecodeError> {
-        let accounts = AddressIndexMap::from_iter(
-            alloy_bal
-                .iter()
-                .map(AccountBal::clone_from_alloy)
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        let mut accounts =
+            AddressIndexMap::with_capacity_and_hasher(alloy_bal.len(), Default::default());
+        for alloy_account in alloy_bal {
+            let (address, account_bal) = AccountBal::clone_from_alloy(alloy_account)?;
+            accounts.insert(address, account_bal);
+        }
 
         Ok(Self { accounts })
     }
