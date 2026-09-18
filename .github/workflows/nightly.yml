@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the digest and sweep issues instead of writing them"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,14 +25,37 @@ jobs:
     name: upstream digest
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The digest is also the body of the one open issue titled `Upstream
+    # digest`, and every upstream tag past the base gets an issue titled
+    # `Sweep <tag>`. Only this job writes issues; the test jobs run third-party
+    # actions and keep the read-only token.
+    permissions:
+      contents: read
+      issues: write
+    # Issue titles are the only state. A scheduled run and a manual one at the
+    # same time would both miss a title and open the issue twice, so they
+    # queue.
+    concurrency:
+      group: nightly-issues
+      cancel-in-progress: false
+    env:
+      # Without it gh picks the repository from the checkout's remotes and
+      # prefers the one named `upstream`, which is bluealloy/revm.
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      DRY_RUN: ${{ inputs.dry_run == true }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/bluealloy/revm.git
           git fetch --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
+          # Upstream tags land outside refs/tags; the digest and the sweep
+          # issues read them from there.
+          git fetch --no-tags upstream '+refs/tags/v*:refs/upstream-tags/v*'
       - name: Build the digest
         run: |
           set -euo pipefail
@@ -41,7 +69,6 @@ jobs:
           # Upstream tags are reported, never mirrored: the fork's own tag list
           # stays the fork's releases. A tag counts as new when its commit is on
           # upstream main and was made inside the window.
-          git fetch --no-tags upstream '+refs/tags/v*:refs/upstream-tags/v*'
           : > new-tags.txt
           while read -r tag sha; do
             case "$tag" in v[0-9]*) ;; *) continue ;; esac
@@ -60,7 +87,7 @@ jobs:
             echo "### Commits touching interpreter, handler, context, precompile, primitives"
             echo
             if [ -n "$commits" ]; then
-              printf '\`\`\`\n%s\n\`\`\`\n' "$commits"
+              printf "\`\`\`\n%s\n\`\`\`\n" "$commits"
             else
               echo "None."
             fi
@@ -68,9 +95,154 @@ jobs:
             echo "### Upstream tags cut in the window"
             echo
             if [ -n "$new_tags" ]; then
-              printf '\`\`\`\n%s\n\`\`\`\n' "$new_tags"
+              printf "\`\`\`\n%s\n\`\`\`\n" "$new_tags"
             else
               echo "None."
+            fi
+          } > digest.md
+          cat digest.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Update the digest issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="Upstream digest"
+          {
+            cat digest.md
+            echo
+            echo "Upstream \`main\` at \`$(git rev-parse refs/remotes/upstream/main)\`."
+          } > digest-body.md
+          # The run link is the first line and is left out of the comparison
+          # below, so a run that finds the same digest writes nothing.
+          {
+            echo "Written by $RUN_URL. A run that finds a different digest replaces this body; the edit history keeps the earlier ones."
+            cat digest-body.md
+          } > digest-issue.md
+          # The oldest open issue with exactly this title. The listing, not
+          # search: the search index lags behind a just-opened issue.
+          number=$(gh api --paginate "repos/$GH_REPO/issues?state=open&per_page=100" \
+            --jq ".[] | select(.pull_request == null and .title == \"$title\") | .number" | sort -n | sed -n 1p)
+          url=${number:+$GITHUB_SERVER_URL/$GH_REPO/issues/$number}
+          if [ "$DRY_RUN" = true ]; then
+            echo "::group::$title (dry run, not written)"
+            cat digest-issue.md
+            echo "::endgroup::"
+            result="${url:-no open issue}, not written (dry run)"
+          elif [ -z "$number" ]; then
+            result="$(gh issue create --title "$title" --body-file digest-issue.md), opened"
+          elif [ "$(gh api "repos/$GH_REPO/issues/$number" --jq .body | sed 1d)" = "$(cat digest-body.md)" ]; then
+            result="$url, already current"
+          else
+            gh issue edit "$number" --body-file digest-issue.md
+            result="$url, rewritten"
+          fi
+          printf '\nDigest issue: %s.\n' "$result" >> "$GITHUB_STEP_SUMMARY"
+      # A sweep issue lists `<previous tag>..<tag>` for a maintainer to
+      # classify. The issues are the record: a tag whose `Sweep <tag>` issue
+      # exists, open or closed, is skipped, so a rerun or a night without a new
+      # tag opens nothing.
+      - name: Open sweep issues for new upstream tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base=$(tr -d '[:space:]' < scripts/mega/base.txt)
+          git for-each-ref refs/upstream-tags --format='%(refname:strip=2)' | grep -E '^v[0-9]' | sort -V > tags.txt
+          if ! grep -qxF "$base" tags.txt; then
+            echo "::error::base tag $base from scripts/mega/base.txt is not an upstream tag"
+            exit 1
+          fi
+          # Every issue title, open or closed; the listing, as above.
+          gh api --paginate "repos/$GH_REPO/issues?state=all&per_page=100" \
+            --jq '.[] | select(.pull_request == null) | .title' > titles.txt
+          : > sweep-summary.md
+          prev=""
+          past_base=false
+          while read -r tag; do
+            title="Sweep $tag"
+            if [ "$past_base" = true ] && ! grep -qxF "$title" titles.txt; then
+              from=$(git rev-parse "refs/upstream-tags/$prev^{commit}")
+              to=$(git rev-parse "refs/upstream-tags/$tag^{commit}")
+              count=$(git rev-list --count "$from..$to")
+              {
+                echo "Sweep of upstream \`$prev..$tag\` across the whole repository, fixtures, manifests and lockfile included: $count commits, oldest first."
+                echo
+                echo "| Tag | Commit |"
+                echo "|---|---|"
+                echo "| \`$prev\` | \`$from\` |"
+                echo "| \`$tag\` | \`$to\` |"
+                echo
+                echo "Record each commit under one disposition below, then tick it: taken (with the fork pull request), candidate (with an owner and a disposition) or excluded (with the reason)."
+                echo "The pull request that carries the picks links this issue; a sweep that takes nothing is closed with its classification here."
+                echo
+                echo "### Commits"
+                echo
+                if [ "$count" -eq 0 ]; then
+                  echo "None."
+                else
+                  # Subjects go in code spans so upstream's `#123` and `@name`
+                  # stay text: as links they would point at this repository's
+                  # issues and notify people. GitHub refuses a body over 65536
+                  # characters, so a huge range lists what fits and counts the
+                  # rest.
+                  git log --reverse --format='%H %s' "$from..$to" |
+                    awk -v url=https://github.com/bluealloy/revm/commit/ -v range="$prev..$tag" '
+                      {
+                        subject = substr($0, length($1) + 2)
+                        gsub(/`/, "\047", subject)
+                        line = sprintf("- [ ] [`%s`](%s%s) `%s`", substr($1, 1, 10), url, $1, subject)
+                        if (full || size + length(line) > 60000) { full = 1; rest++; next }
+                        size += length(line) + 1
+                        print line
+                      }
+                      END {
+                        if (rest) printf "- [ ] %d more commits did not fit here: `git log --reverse --oneline %s`\n", rest, range
+                      }'
+                fi
+                echo
+                echo "### Taken"
+                echo
+                echo "_Commit and the fork pull request that carries it._"
+                echo
+                echo "### Candidate"
+                echo
+                echo "_Commit, owner and disposition._"
+                echo
+                echo "### Excluded"
+                echo
+                echo "_Commit and reason._"
+                echo
+                echo "Opened by $RUN_URL."
+              } > sweep.md
+              if [ "$DRY_RUN" = true ]; then
+                echo "::group::$title (dry run, not opened)"
+                cat sweep.md
+                echo "::endgroup::"
+                {
+                  echo "<details><summary>$title: $count commits, not opened (dry run)</summary>"
+                  echo
+                  cat sweep.md
+                  echo
+                  echo "</details>"
+                } >> sweep-summary.md
+              else
+                url=$(gh issue create --title "$title" --label mega:cherry-pick --body-file sweep.md < /dev/null)
+                echo "- [$title]($url): $count commits" >> sweep-summary.md
+              fi
+            fi
+            if [ "$tag" = "$base" ]; then
+              past_base=true
+            fi
+            prev=$tag
+          done < tags.txt
+          {
+            echo
+            echo "### Sweep issues"
+            echo
+            if [ -s sweep-summary.md ]; then
+              cat sweep-summary.md
+            else
+              echo "None opened: every upstream tag past \`$base\` has one."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
