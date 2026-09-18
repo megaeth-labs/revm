@@ -1,7 +1,7 @@
 # MegaETH fork of revm
 
 This repository is MegaETH's fork of [bluealloy/revm](https://github.com/bluealloy/revm).
-It is the execution base of the new `mega-evm` engine.
+It is the execution base of the `mega-evm` engine.
 Crate names stay `revm-*`; consumers switch to the fork through a `[patch.crates-io]` block, never through a renamed dependency.
 
 ## Why a fork
@@ -16,19 +16,18 @@ The fork adds those hooks as a thin layer; all MegaETH logic stays in `mega-evm`
 |---|---|
 | Upstream tag | `v112` (commit `bf2ce7197ad072a6f5f7416be07813ac99510b93`) |
 | Crate versions | `revm 40.0.3`, `revm-handler 20.0.3`, `revm-interpreter 37.0.3`, `revm-context 18.0.3`, `revm-context-interface 19.0.3`, `revm-primitives 24.0.1`, `revm-bytecode 11.0.1`, `revm-state 12.0.1`, `revm-database 15.0.2`, `revm-database-interface 12.1.1`, `revm-inspector 21.0.3`, `revm-precompile 36.0.3` |
-| Verified | The `src/` trees of the twelve published crates.io packages are byte-identical to `v112`; every package's `.cargo_vcs_info.json` points at that commit |
 
-The baseline is pinned by `mega-reth`'s `upstream/reth` branch, which locks these exact versions; its default branch `develop` still uses revm 27.
-It moves only when `mega-reth` moves its revm line.
+The baseline moves only when the MegaETH node moves to a newer revm major (see Tracking upstream).
 
 ## Branch model
 
 | Ref | Content | Who writes |
 |---|---|---|
-| `main` | Upstream history up to the baseline tag, then MegaETH commits on top, linear between base-line moves. The log records the fork's history; `git diff <base>..main` shows the current fork footprint (`<base>` is `scripts/mega/base.txt`, today `v112`). | PRs, CI green required |
+| `main` | Upstream history up to the baseline tag, then MegaETH commits on top, linear between base-line moves. The log records the fork's history; `git diff <base>..main` shows the current fork footprint (`<base>` is the tag in `scripts/mega/base.txt`). | Squash-merged PRs with one approval and green CI |
 | `release/v<N>` | Maintenance branch for an old base line, created from its last tag when `main` moves to a new base and a backport is needed. | PRs |
-| `refs/archive/<branch>` | The pre-2026 fork branches and the old bot branches, moved out of the branch list on 2026-09-16 so that only the live branches show. Not fetched by default; `git fetch origin '+refs/archive/*:refs/archive/*'` brings them back. | Nobody |
-| `v<revm>-mega.N` | Fork releases, always on `main`. The only tags in this repository: upstream tags are not mirrored; `scripts/mega/base.txt` names the upstream tag the fork is based on, and the workflows fetch it from upstream when they need it. | Release workflow |
+| `<name>/<type>/<topic>` | Pull request branches; `<type>` is one of `feat`, `fix`, `refactor`, `upgrade`, `doc`, `ci`, `chore`, `spike`. | Contributors |
+| `refs/archive/<branch>` | Retired branches, outside the default fetch. | Nobody |
+| `v<revm>-mega.N` | Fork releases, always on `main`, never moved or deleted. The only tags in this repository: the workflows fetch the upstream tag named in `scripts/mega/base.txt` from upstream. | Release workflow |
 
 ## Rules
 
@@ -44,9 +43,10 @@ It moves only when `mega-reth` moves its revm line.
    The `[patch.crates-io]` mechanism only applies when the patched version satisfies the consumer's requirement, and pre-release suffixes do not satisfy `^40.0.3`.
    Releases are identified by git tags only.
 4. **Conventional commit prefixes, one commit per topic.**
-   Fork-authored commits and pull request titles use the usual prefixes (`feat`, `fix`, `chore`, `docs`, `ci`, `test`) that say what changed; `git log --oneline <base>..main` lists only fork commits and reads as the fork's changelog (`<base>` is `scripts/mega/base.txt`, today `v112`).
+   Fork-authored commits and pull request titles use the usual prefixes (`feat`, `fix`, `chore`, `docs`, `ci`, `test`) that say what changed; `git log --oneline <base>..main` lists only fork commits and reads as the fork's changelog (`<base>` is the tag in `scripts/mega/base.txt`).
    A pull request with one upstream pick is titled `chore: cherry-pick upstream <sha> — <title>`, a batch `chore: cherry-pick upstream fixes #a #b …`; the cherry-picked branch commits keep upstream's subject and the `git cherry-pick -x` trailer.
    Group by topic (the CI is one commit, a hook family is one commit); PRs are squash-merged so `main` stays linear between base-line moves.
+   The squash message carries the pull request body.
    New logic goes into new files where practical; an upstream file gets a `mod` line or a call site.
    `git diff <base>..main` is the fork's footprint on upstream.
 5. **`no_std` is mandatory.**
@@ -63,31 +63,22 @@ It moves only when `mega-reth` moves its revm line.
 
 ## Tracking upstream
 
-The fork keeps its crate versions at the revm version reth pins: `40.0.3` on the reth 2.3 line `mega-reth` is moving to (`upstream/reth`).
-reth 2.3.0 builds `alloy-evm` 0.36.0 and `revm-inspectors` 0.40.1 against crates.io revm `40.0.3`, and the consumer patches that version to the fork; `op-revm` and `alloy-op-evm` come from the OP monorepo, and the consumer redirects `op-revm` to the `op-revm` fork (see Consumer wiring).
-That dependency graph fixes the fork's crate versions and its compatibility contract, which is why rule 1 measures against `40.0.3`.
-A newer upstream tag bumps every crate's major, so its versions would have to be reset at every merge and every item it removes checked against the consumers by hand.
-The fork does neither; until reth moves, it takes single upstream commits.
+The fork keeps its crate versions at the revm version the MegaETH node pins, today `40.0.3`; a newer upstream tag would bump every crate's major, so the fork takes single upstream commits until the node moves.
 
-Taken: changes to the EIP-8037 / EIP-2780 gas core whatever their prefix; fixes that change execution results (gas, state, logs, halt reasons, precompile output, bytecode analysis, serialized formats); correctness and safety fixes relevant to the consumers, including undefined behaviour, missing out-of-gas checks, panics, and dependency or build failures; performance improvements to execution, precompiles and the database that leave execution results unchanged, with upstream's benchmark evidence cited in the pull request body; each with the test-fixture bump that comes with it.
-Not taken: tooling-only changes, feature-gated additions the consumers do not use, and change/revert pairs — after checking that no taken commit depends on them.
-The fork has no benchmark gate; a performance pick is accepted on unchanged results (the crate tests and the EEST run) and on the benchmark numbers upstream published for it; `mega-evm`'s instruction-count CI (CodSpeed) measures the effect.
-A change that breaks the public API needs `api:exception`, an itemised list of the deviating items in the pull request body, and a check of every consumer that uses them.
+Taken: changes to the EIP-8037 / EIP-2780 gas core whatever their prefix; fixes that change execution results (gas, state, logs, halt reasons, precompile output, bytecode analysis, serialized formats); correctness and safety fixes relevant to the consumers, including undefined behaviour, missing out-of-gas checks, panics, and dependency or build failures; performance improvements to execution, precompiles and the database; each with the test-fixture bump that comes with it.
+Not taken: tooling-only changes, feature-gated additions the consumers do not use, and change/revert pairs, after checking that no taken commit depends on them.
+The fork has no benchmark gate: a performance pick must leave execution results unchanged under the crate tests and the EEST run, and cite upstream's benchmark numbers in the pull request body.
+A pick that breaks the public API needs `api:exception`, the deviating items listed in the pull request body, and a check of every consumer that uses them.
 An upstream change that upstream later reverted but the fork still needs lands as a fork-owned opt-in switch (`mega:hook`) whose default keeps upstream's behaviour; the system-call state-gas margin (#55) is the first.
-Every pick is applied verbatim: on the pull request branch, `git show -U0 <commit> | git patch-id --stable` gives the same id for the pick and its upstream commit, unless the pick's message records a conflict resolution.
-The squash discards the branch commits, so the pull request body lists each upstream commit's `(cherry picked from commit <sha>)` line and the recorded conflicts, and the merger carries that body into the squash message.
+Every pick is applied verbatim: `git show -U0 <commit> | git patch-id --stable` gives the same id for the pick and its upstream commit unless the pick's message records a conflict resolution; the pull request body, which becomes the squash message, lists each pick's `(cherry picked from commit <sha>)` line and its conflicts.
 
-For every upstream tag, a maintainer sweeps `<last swept tag>..<tag>` across the whole repository, including the workspace manifests, the lockfile, the toolchain pin and the test fixtures.
-Each commit is recorded as taken, candidate (with an owner and a disposition) or excluded (with the reason), together with both tag SHAs, in the pull request that carries the picks, or in a documentation pull request when nothing is taken.
-Before a release, the maintainer accounts for every tag since the previous recorded sweep and copies the sweep references into the release notes.
-The nightly digest (see CI) shows one day; it does not replace the sweep.
+For every upstream tag, a maintainer sweeps `<last swept tag>..<tag>` across the whole repository, fixtures, manifests and lockfile included, and records each commit as taken, candidate (with an owner and a disposition) or excluded (with the reason), with both tag SHAs, in the pull request that carries the picks or, when nothing is taken, in a documentation pull request.
+Before a release, every tag since the last recorded sweep is swept and the release notes cite the sweeps.
 
-When `mega-reth`'s reth line moves to a newer revm major, the fork merges the matching upstream tag into `main`.
-The merge pull request carries `mega:rebase` (the label keeps its name; there is no rebase) and `api:exception`, because `Semver` compares against the pull request base and reports upstream's own major changes.
-`scripts/mega/base.txt`, `scripts/mega/crates.txt`, `rust-toolchain.toml` and the Baseline table move in the same change; the merged tree is compared with the new tag and every carried pick and upstream revert is reconciled; the pick commits stay in the log.
-Before the tag, the merge pull request records a green `ci success` and a passing nightly run on the final merge commit, the semver result against the new upstream tag with every exception itemised, and the consumer build and hook-regression results (see Consumer wiring).
-Once the pull request is green and before anything else merges, an admin pushes its head commit, the merge commit, to `main` (the main ruleset's admin bypass; force-push has no bypass, so the push must be a fast-forward), and GitHub marks the pull request merged.
-Then `v<revm>-mega.1` is released, and `mega-reth` and the stateless validator it depends on (`stateless-core`) move their pins in one change.
+When the node moves to a newer revm major, the fork merges the matching upstream tag into `main` in a pull request labelled `mega:rebase` and `api:exception`, whose body itemises upstream's own API changes.
+`scripts/mega/base.txt`, `scripts/mega/crates.txt`, `rust-toolchain.toml` and the Baseline table move in that pull request, and every carried pick and upstream revert is reconciled against the new tag.
+The pull request records a green `ci success`, a passing nightly run and a consumer build (see Consumer wiring) on the final merge commit; then, before anything else merges, an admin pushes that merge commit to `main` as a fast-forward, since force-push is refused on every branch.
+`v<revm>-mega.1` is released, and the node and its stateless validator move their pins in one change.
 
 ## Labels
 
@@ -129,7 +120,7 @@ revm-inspector          = { git = "https://github.com/megaeth-labs/revm", rev = 
 
 Patch all twelve crates together.
 Patching only `revm` pulls the fork's `revm-interpreter` through its path dependency while other consumers still resolve the crates.io one, and the build ends up with two copies.
-The block only affects `^40` requirements; a `revm 27` line in the same workspace is untouched.
+The block only affects `^40` requirements; an older revm major in the same workspace is untouched.
 
 To check a consumer checkout against a local fork checkout without editing its manifest, pass the patch entries on the command line.
 Both paths must be absolute, and the helper's exit status must be checked, otherwise a failed helper leaves `cargo` silently building against crates.io:
@@ -145,7 +136,7 @@ A consumer that uses `op-revm` takes the MegaETH fork of it as well, pinned to a
 
 ```toml
 [patch."https://github.com/ethereum-optimism/optimism"]
-# mega-reth declares op-revm from the OP monorepo
+# the source the workspace declares op-revm from
 op-revm = { git = "https://github.com/megaeth-labs/op-revm", tag = "v20.0.0-mega.1" }
 ```
 
@@ -158,26 +149,13 @@ That fork names the commit of this repository it is built against in its `.cargo
    It checks the tag format, tags the commit and publishes a GitHub release with the fork changelog (`git log v<base>..HEAD`).
 3. Consumers bump `rev` in their patch block.
 
-## Repository settings (admin)
-
-- Default branch `main`; ruleset `main protection`: pull request with one approving review, squash merges only, status checks `ci success`, `semver-checks` and `require-labels` required, no deletion, no force-push; repository admins may always bypass it (the base-line merge needs it).
-- Set the squash-message default to the pull request body (`squash_merge_commit_message = PR_BODY`; today it is `BLANK`); until that is applied, the merger copies the pull request body, with the upstream trailers and recorded conflicts, into the squash message.
-- Ruleset `ban force push` on every branch: no non-fast-forward push, with no bypass.
-- Ruleset `develop branches`: every branch except `main`, `release/*`, `upstream-main` and `archive/*` is named `<name>/(feat|fix|refactor|upgrade|doc|ci|chore|spike)/<topic>`, with no bypass.
-- Tag ruleset for `v*-mega.*` that restricts update and deletion only, not creation: the release workflow creates those tags with the Actions token, which cannot bypass a creation restriction; admins may bypass it.
-- Actions enabled.
-- Repository description points at this file.
-- Secrets and variables the review bots need: repository secret `CLAUDE_CODE_OAUTH_TOKEN`; the organisation secret `MEGA_MAXWELL_PK` and variable `MEGA_MAXWELL_CLIENT_ID` granted to this repository; the `mega-maxwell` GitHub App installed on this repository (it is the identity the PR reviewer resolves threads and the release workflows push under).
-- The Codex reviewer (`chatgpt-codex-connector`) is an organisation-level app; this repository must be added to its repository access in the ChatGPT settings, nothing in the repository configures it.
-- Labels from the table above created with `gh label create`.
-
 ## CI
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
 | `ci.yml` | PR, push to `main` | Test matrix (three feature sets) on the pinned toolchain, `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
 | `semver.yml` | PR | `cargo semver-checks` of the twelve crates against the pull request base; a major-level change fails unless the PR carries `api:exception` (and lists the items in its body) |
-| `nightly.yml` | daily | Upstream digest (one day, all crates: commits to the twelve published crates and upstream tags of the last 25 hours, in the run's job summary), full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
+| `nightly.yml` | daily | Upstream digest (commits to the twelve published crates and upstream tags of the last 25 hours, in the job summary), full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
 | `release.yml` | manual, `main` only | Require green `ci success` for the commit, tag and publish a fork release |
-| `claude.yml` | PR, comments, issues | The shared MegaETH Claude actions: incremental PR review under the `mega-maxwell` identity (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
+| `claude.yml` | PR, comments, issues | Automated PR review (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
 | `pr-labels.yml` | PR | Exactly one `mega:` and one `api:` label |
