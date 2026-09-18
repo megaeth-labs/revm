@@ -157,6 +157,6 @@ That fork names the commit of this repository it is built against in its `.cargo
 | `ci.yml` | PR, push to `main` | Test matrix (three feature sets) on the pinned toolchain, `no_std` targets, feature checks, clippy, docs, doctest, fmt, deny, EEST release on x86_64 |
 | `semver.yml` | PR | `cargo semver-checks` of the twelve crates against the pull request base; a major-level change fails unless the PR carries `api:exception` (and lists the items in its body) |
 | `nightly.yml` | daily | Upstream digest (commits to the twelve published crates and upstream tags of the last 25 hours) in the job summary and posted to the issue titled `Upstream digest`, a `Sweep <tag>` issue opened for each new upstream tag, full EEST including legacy tests, the `ethtests` profile and i686, `cargo deny` advisories |
-| `release.yml` | manual, `main` only | Require green `ci success` for the commit, tag and publish a fork release |
+| `release.yml` | manual, `main` only | Require green `ci success` for the commit, tag and publish a fork release whose notes cite the `Sweep <tag>` issues closed since the previous fork tag |
 | `claude.yml` | PR, comments, issues | Automated PR review (reads this file and `REVIEW.md`), label check, issue triage, `@claude` interactive handler |
 | `pr-labels.yml` | PR | Exactly one `mega:` and one `api:` label |
