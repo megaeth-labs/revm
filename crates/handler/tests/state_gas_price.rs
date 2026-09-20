@@ -10,7 +10,7 @@ use bytecode::opcode::{
     STOP,
 };
 use context::{
-    result::{EVMError, ExecutionResult},
+    result::{EVMError, ExecutionResult, HaltReason},
     BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, Evm, Journal, LocalContext,
     TxEnv,
 };
@@ -749,6 +749,42 @@ fn test_nonce_unchecked_reverted_creation_tx_refunds_the_deployed_address() {
     assert_eq!(lookups, [create_charge(deployed), create_charge(deployed)]);
     assert_eq!(result.gas().state_gas_spent_final(), 0);
     assert_eq!(*result.gas(), *flat.unwrap().gas());
+}
+
+#[test]
+fn test_nonce_unchecked_colliding_creation_tx_is_never_priced() {
+    // An occupied deployment address is not empty, so the runtime phase charges nothing and the
+    // frame halts on the collision. The envelope-nonce address is empty, so deriving the target
+    // from the transaction nonce would charge it and then refund it; the hook sees neither
+    // address.
+    let deployed = BENCH_CALLER.create(SENDER_ACCOUNT_NONCE);
+    let envelope = BENCH_CALLER.create(0);
+    let mut ctx = nonce_unchecked_ctx()
+        .with_price(create_charge(deployed), PRICE)
+        .with_price(create_charge(envelope), OTHER_PRICE);
+    ctx.inner.journaled_state.database.insert_account_info(
+        deployed,
+        AccountInfo {
+            nonce: 1,
+            ..Default::default()
+        },
+    );
+
+    let (outcome, lookups) = transact(ctx, create_tx(&[]));
+
+    let result = outcome.unwrap();
+    assert!(
+        matches!(
+            result,
+            ExecutionResult::Halt {
+                reason: HaltReason::CreateCollision,
+                ..
+            }
+        ),
+        "{result:?}"
+    );
+    assert!(lookups.is_empty(), "{lookups:?}");
+    assert_eq!(result.gas().state_gas_spent_final(), 0);
 }
 
 #[test]
