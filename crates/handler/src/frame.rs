@@ -460,11 +460,10 @@ impl EthFrame<EthInterpreter> {
 
                 let mut create_outcome =
                     CreateOutcome::new(interpreter_result, Some(frame.created_address));
-                // The charged address comes from the inputs, not `frame.created_address`. Both
-                // charge sites — the CREATE opcode and the EIP-2780 runtime phase — derive it
-                // from the caller's account nonce, so here it is `frame.created_address`; the
-                // field is what carries it on the early-fail paths, which never derive an
-                // address, and the outcome is what the refund reads.
+                // The charged address comes from the inputs, not `frame.created_address`: the
+                // inputs carry the address the charge site recorded, which is the one the
+                // refund must use. An uncharged creation leaves it zero, so the field is
+                // meaningful only when `charged_create_state_gas` is set.
                 let (charged_create_state_gas, charged_state_gas_address) = match &self.input {
                     FrameInput::Create(inputs) => (
                         inputs.charged_create_state_gas(),

@@ -142,10 +142,11 @@ pub fn create_init_frame<CTX: ContextTr>(
                 // the value the frame will read as `old_nonce`: a create
                 // transaction bumps the nonce at frame creation, after this
                 // point, and pre-execution bumps it only for a call. The
-                // transaction nonce is not that value whenever the nonce check
-                // is disabled, so deriving the target from it would charge an
-                // address the transaction never deploys at. The caller was
-                // loaded at pre-execution, so this read is warm and free.
+                // transaction nonce may differ from that value when the nonce
+                // check is disabled, and deriving the target from it would then
+                // charge an address the transaction never deploys at. Standard
+                // transaction processing, deposits included, has already loaded
+                // the caller, so this read is warm there.
                 let caller_nonce = journal.load_account(tx.caller())?.info.nonce;
                 let created_address = tx.caller().create(caller_nonce);
                 let target_is_empty = journal.load_account(created_address)?.info.is_empty();
