@@ -138,10 +138,16 @@ pub fn create_init_frame<CTX: ContextTr>(
             let mut charged_create_state_gas = false;
             let mut charged_state_gas_address = Address::ZERO;
             if is_eip2780 {
-                // The tx nonce was validated against the caller's nonce, which
-                // a create transaction bumps only at frame creation — after
-                // this point.
-                let created_address = tx.caller().create(tx.nonce());
+                // The deployment target comes from the caller's account nonce,
+                // the value the frame will read as `old_nonce`: a create
+                // transaction bumps the nonce at frame creation, after this
+                // point, and pre-execution bumps it only for a call. The
+                // transaction nonce is not that value whenever the nonce check
+                // is disabled, so deriving the target from it would charge an
+                // address the transaction never deploys at. The caller was
+                // loaded at pre-execution, so this read is warm and free.
+                let caller_nonce = journal.load_account(tx.caller())?.info.nonce;
+                let created_address = tx.caller().create(caller_nonce);
                 let target_is_empty = journal.load_account(created_address)?.info.is_empty();
                 if target_is_empty {
                     let charge = StateGasCharge::one(

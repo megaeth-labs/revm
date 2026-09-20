@@ -358,6 +358,26 @@ fn funded_db() -> Db {
     db
 }
 
+/// The sender's account nonce in the tests that separate it from the transaction's own nonce,
+/// which the helpers leave at zero.
+const SENDER_ACCOUNT_NONCE: u64 = 5;
+
+/// A context whose sender sits at [`SENDER_ACCOUNT_NONCE`] and whose nonce check is off, so a
+/// transaction of any nonce runs against it.
+fn nonce_unchecked_ctx() -> PricedContext {
+    let mut db = funded_db();
+    db.insert_account_info(
+        BENCH_CALLER,
+        AccountInfo {
+            nonce: SENDER_ACCOUNT_NONCE,
+            ..AccountInfo::from_balance(U256::from(10u128.pow(21)))
+        },
+    );
+    let mut ctx = PricedContext::new(db);
+    ctx.inner.cfg.disable_nonce_check = true;
+    ctx
+}
+
 /// A funded database where [`CONTRACT`] holds `code` and `balance`.
 fn db_with_contract(code: Vec<u8>, balance: u64) -> Db {
     let mut db = funded_db();
@@ -687,37 +707,67 @@ fn test_reverted_creation_tx_refund_lookup_failure_fails_tx() {
 }
 
 #[test]
-fn test_nonce_unchecked_reverted_creation_tx_refunds_the_charged_address() {
-    // With the nonce check off, the sender's account nonce (1) differs from the transaction's
-    // (0). The runtime phase charges the address the transaction nonce gives; the frame creates
-    // the one the account nonce gives. The refund prices the address that was charged.
-    let charged = BENCH_CALLER.create(0);
-    let created = BENCH_CALLER.create(1);
-    let ctx = || {
-        let mut db = funded_db();
-        db.insert_account_info(
-            BENCH_CALLER,
-            AccountInfo {
-                nonce: 1,
-                ..AccountInfo::from_balance(U256::from(10u128.pow(21)))
-            },
-        );
-        let mut ctx = PricedContext::new(db);
-        ctx.inner.cfg.disable_nonce_check = true;
-        ctx
-    };
+fn test_nonce_unchecked_creation_tx_is_priced_at_the_deployed_address() {
+    // With the nonce check off, the transaction's nonce (0) is not the sender's account nonce
+    // (SENDER_ACCOUNT_NONCE), and the deployment follows the account nonce. The runtime phase
+    // must price that address: the envelope-nonce address is deployed at by nothing and priced
+    // by nobody, so the hook is never asked for it.
+    let deployed = BENCH_CALLER.create(SENDER_ACCOUNT_NONCE);
+    let envelope = BENCH_CALLER.create(0);
+    let ctx = nonce_unchecked_ctx()
+        .with_price(create_charge(deployed), PRICE)
+        .with_price(create_charge(envelope), OTHER_PRICE);
+
+    let (outcome, lookups) = transact(ctx, create_tx(&[]));
+
+    let result = outcome.unwrap();
+    assert!(result.is_success());
+    assert_eq!(result.created_address(), Some(deployed));
+    assert_eq!(lookups, [create_charge(deployed)]);
+    assert_eq!(result.gas().state_gas_spent_final(), PRICE);
+    assert_eq!(
+        result.gas().total_gas_spent(),
+        eip2780::TX_BASE_COST + eip8038::CREATE_ACCESS + PRICE
+    );
+}
+
+#[test]
+fn test_nonce_unchecked_reverted_creation_tx_refunds_the_deployed_address() {
+    // The refund re-prices the address the charge was made at, which is the address the frame
+    // would have deployed at, not the one the transaction nonce gives.
+    let deployed = BENCH_CALLER.create(SENDER_ACCOUNT_NONCE);
+    let envelope = BENCH_CALLER.create(0);
     let tx = create_tx(&REVERTING_INITCODE);
-    let ctx_priced = ctx()
-        .with_price(create_charge(charged), PRICE)
-        .with_price(create_charge(created), OTHER_PRICE);
-    let (outcome, lookups) = transact(ctx_priced, tx.clone());
-    let (flat, _) = transact(ctx(), tx);
+    let ctx = nonce_unchecked_ctx()
+        .with_price(create_charge(deployed), PRICE)
+        .with_price(create_charge(envelope), OTHER_PRICE);
+    let (outcome, lookups) = transact(ctx, tx.clone());
+    let (flat, _) = transact(nonce_unchecked_ctx(), tx);
 
     let result = outcome.unwrap();
     assert!(!result.is_success() && !result.is_halt(), "{result:?}");
-    assert_eq!(lookups, [create_charge(charged), create_charge(charged)]);
+    assert_eq!(lookups, [create_charge(deployed), create_charge(deployed)]);
     assert_eq!(result.gas().state_gas_spent_final(), 0);
     assert_eq!(*result.gas(), *flat.unwrap().gas());
+}
+
+#[test]
+fn test_nonce_checked_creation_tx_is_priced_at_the_deployed_address() {
+    // The control: with the nonce check on, the two nonces agree by validation, and a sender
+    // past its first transaction is priced and deployed at the same address as before.
+    let deployed = BENCH_CALLER.create(SENDER_ACCOUNT_NONCE);
+    let mut ctx = nonce_unchecked_ctx().with_price(create_charge(deployed), PRICE);
+    ctx.inner.cfg.disable_nonce_check = false;
+    let mut tx = create_tx(&[]);
+    tx.nonce = SENDER_ACCOUNT_NONCE;
+
+    let (outcome, lookups) = transact(ctx, tx);
+
+    let result = outcome.unwrap();
+    assert!(result.is_success());
+    assert_eq!(result.created_address(), Some(deployed));
+    assert_eq!(lookups, [create_charge(deployed)]);
+    assert_eq!(result.gas().state_gas_spent_final(), PRICE);
 }
 
 // EIP-7702 authorizations under EIP-2780.
