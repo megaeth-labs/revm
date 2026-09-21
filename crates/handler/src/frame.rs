@@ -461,8 +461,9 @@ impl EthFrame<EthInterpreter> {
                 let mut create_outcome =
                     CreateOutcome::new(interpreter_result, Some(frame.created_address));
                 // The charged address comes from the inputs, not `frame.created_address`: the
-                // EIP-2780 runtime phase charges the address the transaction nonce gives, which
-                // differs from the created one when the nonce check is disabled.
+                // inputs carry the address the charge site recorded, which is the one the
+                // refund must use. An uncharged creation leaves it zero, so the field is
+                // meaningful only when `charged_create_state_gas` is set.
                 let (charged_create_state_gas, charged_state_gas_address) = match &self.input {
                     FrameInput::Create(inputs) => (
                         inputs.charged_create_state_gas(),
