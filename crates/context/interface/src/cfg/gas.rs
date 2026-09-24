@@ -31,7 +31,7 @@ pub use withheld::WithheldCrossing;
 /// ([`refill_reservoir`](Self::refill_reservoir), [`refill_history`](Self::refill_history)). One
 /// of them lands inside a frame rather than at a frame boundary: `SSTORE`'s refill when it
 /// restores a slot to its original zero (0→x→0). A consumer that holds the spendable part at an
-/// allowance limits it again after each credit: at a frame's start, when a child returns, and
+/// allowance limits it at a frame's start and again after each credit: when a child returns, and
 /// after `SSTORE`.
 ///
 /// Releasing the withheld part ([`release_withheld`](Self::release_withheld)) is not needed to
