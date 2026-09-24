@@ -263,7 +263,7 @@ fn push_address(code: &mut Vec<u8>, address: Address) {
 
 /// `GAS` pushes the total, the figure it pushes with nothing withheld.
 #[test]
-fn gas_pushes_the_total() {
+fn test_gas_pushes_the_total() {
     let code = [GAS, STOP];
 
     let (plain, _) = run_warm(&code, 10_000, 0);
@@ -296,7 +296,7 @@ fn forwarded(action: &InterpreterAction, interpreter: &Interpreter<EthInterprete
 
 /// `CALL` with all gas forwards 63/64 of the total, drawing the withheld part first.
 #[test]
-fn call_forwards_63_64_of_the_total() {
+fn test_call_forwards_63_64_of_the_total() {
     let code = call(U256::MAX);
 
     let (plain, plain_action) = run_warm(&code, 100_000, 0);
@@ -317,7 +317,7 @@ fn call_forwards_63_64_of_the_total() {
 
 /// An explicit `CALL` gas argument is clamped against the total, not the spendable part.
 #[test]
-fn call_clamps_an_explicit_gas_argument_against_the_total() {
+fn test_call_clamps_an_explicit_gas_argument_against_the_total() {
     let code = call(U256::from(50_000));
 
     let (plain, plain_action) = run_warm(&code, 100_000, 0);
@@ -334,7 +334,7 @@ fn call_clamps_an_explicit_gas_argument_against_the_total() {
 
 /// `CREATE` forwards 63/64 of the total after its own charge, which the spendable part pays.
 #[test]
-fn create_forwards_63_64_of_the_total() {
+fn test_create_forwards_63_64_of_the_total() {
     let code = [PUSH0, PUSH0, PUSH0, CREATE];
 
     let (plain, plain_action) = run_warm(&code, 100_000, 0);
@@ -353,7 +353,7 @@ fn create_forwards_63_64_of_the_total() {
 /// The `SSTORE` stipend sentry compares the total with the stipend: it lets a write through when
 /// only the spendable part is at or below 2,300.
 #[test]
-fn sstore_sentry_reads_the_total() {
+fn test_sstore_sentry_reads_the_total() {
     let code = [PUSH0, PUSH0, SSTORE, STOP];
 
     // The sentry fires on a frame whose total is at the stipend...
@@ -370,7 +370,7 @@ fn sstore_sentry_reads_the_total() {
 /// The `SLOAD` skip-cold check compares the total with the cold cost: the slot is loaded when
 /// only the spendable part is short of it, and the cold charge then fails as a crossing.
 #[test]
-fn sload_skip_cold_check_reads_the_total() {
+fn test_sload_skip_cold_check_reads_the_total() {
     let code = [PUSH0, SLOAD, STOP];
 
     // With nothing withheld a frame short of the cold cost skips the load.
@@ -398,7 +398,7 @@ fn sload_skip_cold_check_reads_the_total() {
 
 /// The account skip-cold check (`BALANCE` here) behaves the same way.
 #[test]
-fn balance_skip_cold_check_reads_the_total() {
+fn test_balance_skip_cold_check_reads_the_total() {
     let mut code = Vec::new();
     push_address(&mut code, CALLEE);
     code.extend_from_slice(&[BALANCE, STOP]);
@@ -419,7 +419,7 @@ fn balance_skip_cold_check_reads_the_total() {
 /// A memory expansion the total could pay but the spendable part cannot halts `MemoryOOG` and
 /// leaves a crossing.
 #[test]
-fn mload_expansion_within_the_withheld_part_records_a_crossing() {
+fn test_mload_expansion_within_the_withheld_part_records_a_crossing() {
     // PUSH0 (2) and MLOAD (3) leave 2 spendable against the 3 one word of memory costs.
     let (_, action) = run_warm(&[PUSH0, MLOAD, STOP], 100, 93);
 
@@ -435,7 +435,7 @@ fn mload_expansion_within_the_withheld_part_records_a_crossing() {
 
 /// A memory expansion beyond the total halts `MemoryOOG` without a crossing.
 #[test]
-fn mload_expansion_beyond_the_total_records_nothing() {
+fn test_mload_expansion_beyond_the_total_records_nothing() {
     let (_, action) = run_warm(&[PUSH4, 0x00, 0x10, 0x00, 0x00, MLOAD, STOP], 100, 50);
 
     let (result, gas) = returned(&action);
@@ -445,7 +445,7 @@ fn mload_expansion_beyond_the_total_records_nothing() {
 
 /// An offset above `usize` fails before any charge is attempted, so there is nothing to record.
 #[test]
-fn mload_operand_above_usize_records_nothing() {
+fn test_mload_operand_above_usize_records_nothing() {
     let mut code = vec![PUSH32];
     code.extend_from_slice(&[0xff; 32]);
     code.extend_from_slice(&[MLOAD, STOP]);
@@ -460,7 +460,7 @@ fn mload_operand_above_usize_records_nothing() {
 /// The step loop's static-gas charge records a crossing when it fails within the withheld part,
 /// and nothing when it fails beyond the total.
 #[test]
-fn static_gas_failure_within_the_withheld_part_records_a_crossing() {
+fn test_static_gas_failure_within_the_withheld_part_records_a_crossing() {
     let (_, action) = run_warm(&[PUSH0, STOP], 100, 99);
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::OutOfGas);
