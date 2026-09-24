@@ -357,6 +357,20 @@ mod tests {
         assert_eq!(tracker.withheld_crossing(), None);
     }
 
+    /// Of two failures within the withheld part, the record holds the later one.
+    #[test]
+    fn test_a_second_crossing_replaces_the_first() {
+        let mut tracker = withheld_600();
+        assert!(!tracker.record_regular_cost(500));
+        assert_eq!(recorded(&tracker), Some(600));
+
+        // A forward draws the withheld part down before the second failure.
+        assert!(tracker.record_withheld_first_cost(100));
+        assert!(!tracker.record_regular_cost(500));
+
+        assert_eq!(recorded(&tracker), Some(500));
+    }
+
     /// With nothing withheld no failure is ever a crossing.
     #[test]
     fn test_nothing_withheld_records_nothing() {
