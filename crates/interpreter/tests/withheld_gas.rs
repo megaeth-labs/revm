@@ -416,6 +416,79 @@ fn test_balance_skip_cold_check_reads_the_total() {
     assert_eq!(crossing(&gas), Some(9_000));
 }
 
+/// The `CALL` target's skip-cold check compares the total with the cold cost: the account is
+/// loaded when only the spendable part is short of it, and the cold charge then fails as a
+/// crossing.
+#[test]
+fn test_call_skip_cold_check_reads_the_total() {
+    let code = call(U256::MAX);
+    let cold = GasParams::new_spec(SPEC).cold_account_additional_cost();
+
+    // The pushes and `CALL`'s warm cost take 116 of the 2,000, leaving less than the cold cost.
+    let mut host = ColdHost::new();
+    let (_, action) = run(&code, 2_000, 0, &mut host);
+    let (result, gas) = returned(&action);
+    assert!(2_000 - 116 < cold);
+    assert_eq!(result, InstructionResult::OutOfGas);
+    assert_eq!((host.loaded, host.skipped), (0, 1));
+    assert_eq!(crossing(&gas), None);
+
+    // With the same spendable part and enough withheld to pay, the account is loaded.
+    let mut host = ColdHost::new();
+    let (_, action) = run(&code, 100_000, 98_000, &mut host);
+    let (result, gas) = returned(&action);
+    assert_eq!(result, InstructionResult::OutOfGas);
+    assert_eq!((host.loaded, host.skipped), (1, 0));
+    assert_eq!(crossing(&gas), Some(98_000));
+}
+
+/// The `SSTORE` skip-cold check compares the total with the cold cost: the slot is loaded when
+/// only the spendable part is short of it, and the dynamic charge, which the total could pay,
+/// then fails as a crossing. With nothing withheld a frame this short never reaches the check:
+/// the stipend sentry stops it first.
+#[test]
+fn test_sstore_skip_cold_check_reads_the_total() {
+    let code = [PUSH0, PUSH0, SSTORE, STOP];
+    let cold = GasParams::new_spec(SPEC).cold_storage_cost();
+
+    let mut host = ColdHost::new();
+    let (_, action) = run(&code, 30_000, 29_000, &mut host);
+
+    let (result, gas) = returned(&action);
+    assert!(1_000 < cold, "the spendable part is short of the cold cost");
+    assert_eq!(result, InstructionResult::OutOfGas);
+    assert_eq!((host.loaded, host.skipped), (1, 0));
+    assert_eq!(crossing(&gas), Some(29_000));
+}
+
+/// The `SELFDESTRUCT` skip-cold check compares the total with the cold cost: the beneficiary is
+/// loaded when only the spendable part is short of it, and the cold charge then fails as a
+/// crossing.
+#[test]
+fn test_selfdestruct_skip_cold_check_reads_the_total() {
+    let mut code = Vec::new();
+    push_address(&mut code, CALLEE);
+    code.push(SELFDESTRUCT);
+    let cold = GasParams::new_spec(SPEC).selfdestruct_cold_cost();
+
+    // The push and `SELFDESTRUCT`'s 5,000 take 5,003 of the 7,000, leaving less than the cold
+    // cost.
+    let mut host = ColdHost::new();
+    let (_, action) = run(&code, 7_000, 0, &mut host);
+    let (result, gas) = returned(&action);
+    assert!(7_000 - 5_003 < cold);
+    assert_eq!(result, InstructionResult::OutOfGas);
+    assert_eq!((host.loaded, host.skipped), (0, 1));
+    assert_eq!(crossing(&gas), None);
+
+    let mut host = ColdHost::new();
+    let (_, action) = run(&code, 100_000, 93_000, &mut host);
+    let (result, gas) = returned(&action);
+    assert_eq!(result, InstructionResult::OutOfGas);
+    assert_eq!((host.loaded, host.skipped), (1, 0));
+    assert_eq!(crossing(&gas), Some(93_000));
+}
+
 /// A memory expansion the total could pay but the spendable part cannot halts `MemoryOOG` and
 /// leaves a crossing.
 #[test]
