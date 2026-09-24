@@ -23,13 +23,22 @@ impl Gas {
         self.tracker.withheld()
     }
 
-    /// Moves `min(amount, spendable)` from the spendable part to the withheld part, leaving
-    /// [`remaining`](Self::remaining) unchanged.
+    /// Moves `min(amount, spendable)` from the spendable part to the withheld part, adding it to
+    /// what is already withheld and leaving [`remaining`](Self::remaining) unchanged.
     ///
     /// See [`GasTracker::withhold`](super::GasTracker::withhold).
     #[inline]
     pub const fn withhold(&mut self, amount: u64) {
         self.tracker.withhold(amount);
+    }
+
+    /// Makes the spendable part `min(allowance, remaining())` and withholds the rest, leaving
+    /// [`remaining`](Self::remaining) unchanged. What a consumer aiming at an allowance calls.
+    ///
+    /// See [`GasTracker::limit_spendable`](super::GasTracker::limit_spendable).
+    #[inline]
+    pub const fn limit_spendable(&mut self, allowance: u64) {
+        self.tracker.limit_spendable(allowance);
     }
 
     /// Moves the whole withheld part back to the spendable part, leaving
@@ -125,6 +134,24 @@ mod tests {
 
         gas.clear_withheld_crossing();
         assert_eq!(gas.withheld_crossing(), None);
+    }
+
+    /// A frame limited to an allowance, then forwarding part of its withheld gas, keeps the
+    /// allowance when limited again: the next regular charge succeeds.
+    #[test]
+    fn test_limit_spendable_keeps_the_allowance_across_a_forward() {
+        let mut gas = Gas::new(100_000);
+        gas.limit_spendable(10_000);
+        assert_eq!((gas.spendable(), gas.withheld()), (10_000, 90_000));
+
+        assert!(gas.record_withheld_first_cost(50_000));
+        assert_eq!((gas.spendable(), gas.withheld()), (10_000, 40_000));
+        gas.limit_spendable(10_000);
+        assert_eq!((gas.spendable(), gas.withheld()), (10_000, 40_000));
+
+        assert!(gas.record_regular_cost(3));
+        assert_eq!(gas.withheld_crossing(), None);
+        assert_eq!((gas.spendable(), gas.withheld()), (9_997, 40_000));
     }
 
     /// Releasing and forwarding go through to the tracker.

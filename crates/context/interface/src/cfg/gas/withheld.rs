@@ -62,9 +62,13 @@ impl GasTracker {
         self.withheld
     }
 
-    /// Moves `min(amount, spendable)` from the spendable part to the withheld part.
+    /// Moves `min(amount, spendable)` from the spendable part to the withheld part, adding it to
+    /// what is already withheld.
     ///
     /// [`remaining`](Self::remaining) is unchanged: only regular charges see the difference.
+    /// `amount` is a change, not a target: once gas is withheld, `withhold(remaining() - allowance)`
+    /// leaves less than `allowance` spendable. A consumer aiming at an allowance calls
+    /// [`limit_spendable`](Self::limit_spendable) instead.
     #[inline]
     pub const fn withhold(&mut self, amount: u64) {
         let amount = if amount < self.remaining {
@@ -74,6 +78,21 @@ impl GasTracker {
         };
         self.remaining -= amount;
         self.withheld += amount;
+    }
+
+    /// Makes the spendable part `min(allowance, remaining())` and withholds the rest.
+    ///
+    /// This is what a consumer aiming at an allowance calls. The outcome depends only on the total
+    /// and `allowance`, not on what was withheld before: gas withheld below the allowance is
+    /// released and gas spendable above it is withheld, so it can be called again after any
+    /// deduction or credit, and a second call with the same allowance changes nothing.
+    /// [`remaining`](Self::remaining) is unchanged.
+    #[inline]
+    pub const fn limit_spendable(&mut self, allowance: u64) {
+        let total = self.remaining();
+        let spendable = if allowance < total { allowance } else { total };
+        self.remaining = spendable;
+        self.withheld = total - spendable;
     }
 
     /// Moves the whole withheld part back to the spendable part.
@@ -203,6 +222,68 @@ mod tests {
 
         tracker.withhold(1);
         assert_eq!(parts(&tracker), (0, 1_000, 1_000));
+    }
+
+    /// Limiting the spendable part after a forward drew part of the withheld part restores the
+    /// allowance, where withholding the difference from the total would not.
+    #[test]
+    fn test_limit_spendable_after_a_partial_forward() {
+        let mut tracker = withheld_600();
+        assert!(tracker.record_withheld_first_cost(500));
+        assert_eq!(parts(&tracker), (400, 100, 500));
+
+        let mut delta = tracker;
+        delta.withhold(delta.remaining() - 200);
+        assert_eq!(
+            parts(&delta),
+            (100, 400, 500),
+            "withhold adds to what is withheld"
+        );
+
+        tracker.limit_spendable(200);
+        assert_eq!(parts(&tracker), (200, 300, 500));
+    }
+
+    /// Limiting the spendable part after a credit withholds what the credit made spendable.
+    #[test]
+    fn test_limit_spendable_after_a_credit() {
+        let mut tracker = withheld_600();
+        assert!(tracker.record_withheld_first_cost(700));
+        tracker.erase_cost(700);
+        assert_eq!(parts(&tracker), (1_000, 0, 1_000));
+
+        tracker.limit_spendable(400);
+
+        assert_eq!(parts(&tracker), (400, 600, 1_000));
+    }
+
+    /// An allowance at or above the total releases everything withheld.
+    #[test]
+    fn test_limit_spendable_above_the_total_releases_it_all() {
+        let mut tracker = withheld_600();
+
+        tracker.limit_spendable(5_000);
+        assert_eq!(parts(&tracker), (1_000, 0, 1_000));
+
+        let mut tracker = withheld_600();
+        tracker.limit_spendable(1_000);
+        assert_eq!(parts(&tracker), (1_000, 0, 1_000));
+    }
+
+    /// Limiting twice to the same allowance is limiting once, whether the first call withheld
+    /// more or released some.
+    #[test]
+    fn test_limit_spendable_is_idempotent() {
+        for allowance in [0, 250, 400, 700, 1_000] {
+            let mut tracker = withheld_600();
+
+            tracker.limit_spendable(allowance);
+            let once = parts(&tracker);
+            tracker.limit_spendable(allowance);
+
+            assert_eq!(parts(&tracker), once, "allowance {allowance}");
+            assert_eq!(once, (allowance, 1_000 - allowance, 1_000));
+        }
     }
 
     /// Releasing moves everything back, and releasing again changes nothing.
