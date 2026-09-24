@@ -2,6 +2,8 @@
 
 pub use context_interface::cfg::gas::*;
 
+mod withheld;
+
 /// Represents the state of gas during execution.
 ///
 /// Implements the EIP-8037 reservoir model for dual-limit gas accounting:
@@ -351,7 +353,9 @@ impl Gas {
     /// Records a regular gas cost: deducts from the spendable part of `remaining` only.
     /// Does not affect the reservoir.
     ///
-    /// See [`GasTracker::record_regular_cost`].
+    /// Gas forwarded to a child frame is not a regular charge and goes through
+    /// [`record_withheld_first_cost`](Self::record_withheld_first_cost) instead. See
+    /// [`GasTracker::record_regular_cost`].
     #[inline]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_regular_cost(&mut self, cost: u64) -> bool {

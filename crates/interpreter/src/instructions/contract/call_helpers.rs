@@ -11,6 +11,7 @@ use context_interface::{
 use core::{cmp::min, ops::Range};
 use primitives::{
     hardfork::SpecId::{self, *},
+    hints_util::cold_path,
     Address, B256, U256,
 };
 use state::Bytecode;
@@ -102,7 +103,11 @@ pub fn load_acc_and_calc_gas<H: Host + ?Sized>(
     } else {
         stack_gas_limit
     };
-    gas!(interpreter, gas_limit);
+    // The forward is the child's gas limit, not a charge for this instruction.
+    if !interpreter.gas.record_withheld_first_cost(gas_limit) {
+        cold_path();
+        return Err(InstructionResult::OutOfGas);
+    }
 
     // Add call stipend if there is value to be transferred.
     if transfers_value {

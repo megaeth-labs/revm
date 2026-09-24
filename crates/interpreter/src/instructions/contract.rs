@@ -18,7 +18,9 @@ use context_interface::{
     cfg::{GasId, StateGasCharge, StateGasSite},
     CreateScheme,
 };
-use primitives::{constants::CALL_STACK_LIMIT, hardfork::SpecId, Bytes, U256};
+use primitives::{
+    constants::CALL_STACK_LIMIT, hardfork::SpecId, hints_util::cold_path, Bytes, U256,
+};
 use std::boxed::Box;
 
 use crate::InstructionContext as Ictx;
@@ -158,7 +160,15 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
         // Take remaining gas and deduce l64 part of it.
         gas_limit = context.host.gas_params().call_stipend_reduction(gas_limit);
     }
-    gas!(context.interpreter, gas_limit);
+    // The forward is the child's gas limit, not a charge for this instruction.
+    if !context
+        .interpreter
+        .gas
+        .record_withheld_first_cost(gas_limit)
+    {
+        cold_path();
+        return Err(InstructionResult::OutOfGas);
+    }
 
     create_inputs.set_gas_limit(gas_limit);
     create_inputs.set_reservoir(context.interpreter.gas.reservoir());
