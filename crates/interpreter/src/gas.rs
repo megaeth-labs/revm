@@ -140,7 +140,9 @@ impl Gas {
             .saturating_sub(self.tracker.refunded() as u64)
     }
 
-    /// Returns the amount of gas remaining.
+    /// Returns the amount of gas remaining: the spendable part plus the withheld part.
+    ///
+    /// See [`GasTracker::remaining`].
     #[inline]
     pub const fn remaining(&self) -> u64 {
         self.tracker.remaining()
@@ -242,7 +244,8 @@ impl Gas {
     /// On exceptional halt, the remaining gas must be zeroed
     /// to prevent state operations from succeeding via remaining gas.
     ///
-    /// Note that this does not affect the reservoir.
+    /// Note that this does not affect the reservoir. Both the spendable and the withheld part
+    /// are zeroed; a recorded [`WithheldCrossing`] is kept.
     #[inline]
     pub const fn spend_all(&mut self) {
         self.tracker.spend_all();
@@ -277,6 +280,9 @@ impl Gas {
     }
 
     /// Set a remaining value. This overrides the current remaining value.
+    ///
+    /// Sets the total; the withheld part is kept as far as it fits. See
+    /// [`GasTracker::set_remaining`].
     #[inline]
     pub const fn set_remaining(&mut self, remaining: u64) {
         self.tracker.set_remaining(remaining);
@@ -308,13 +314,12 @@ impl Gas {
     /// Returns `true` if the gas limit is exceeded. Values wrap on underflow.
     /// Only the regular gas check is meaningful here; total remaining can underflow
     /// without consequence if the caller handles it.
+    ///
+    /// Draws the spendable part only. See [`GasTracker::record_cost_unsafe`].
     #[inline(always)]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_cost_unsafe(&mut self, cost: u64) -> bool {
-        let remaining = self.tracker.remaining();
-        let oog = remaining < cost;
-        self.tracker.set_remaining(remaining.wrapping_sub(cost));
-        oog
+        self.tracker.record_cost_unsafe(cost)
     }
 
     /// Records a state gas cost (EIP-8037 reservoir model).
@@ -343,9 +348,10 @@ impl Gas {
         self.tracker.record_history_cost(cost)
     }
 
-    /// Deducts from `remaining` only (used for child frame gas forwarding).
-    /// Does not affect reservoir or regular gas budget.
-    /// Used for forwarding gas to child frames.
+    /// Records a regular gas cost: deducts from the spendable part of `remaining` only.
+    /// Does not affect the reservoir.
+    ///
+    /// See [`GasTracker::record_regular_cost`].
     #[inline]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_regular_cost(&mut self, cost: u64) -> bool {
