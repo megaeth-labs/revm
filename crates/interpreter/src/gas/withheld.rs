@@ -41,8 +41,9 @@ impl Gas {
         self.tracker.release_withheld();
     }
 
-    /// Returns the last failed regular charge the withheld part would have paid, since the
-    /// record was last cleared. It survives [`spend_all`](Self::spend_all).
+    /// Returns the record of the last failed regular charge the withheld part would have paid,
+    /// since the record was last cleared: the withheld part at that charge. It survives
+    /// [`spend_all`](Self::spend_all).
     ///
     /// See [`GasTracker::withheld_crossing`](super::GasTracker::withheld_crossing).
     #[inline]
@@ -120,7 +121,7 @@ mod tests {
             (0, 0, 0)
         );
         let crossing = gas.withheld_crossing().expect("a crossing");
-        assert_eq!((crossing.cost(), crossing.spendable()), (11, 10));
+        assert_eq!(crossing.withheld(), 90, "the withheld part the halt zeroed");
 
         gas.clear_withheld_crossing();
         assert_eq!(gas.withheld_crossing(), None);

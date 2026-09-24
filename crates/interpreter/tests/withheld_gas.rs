@@ -251,9 +251,9 @@ fn new_frame(action: &InterpreterAction) -> &FrameInput {
     }
 }
 
-/// `(cost, spendable)` of the frame's crossing record, if any.
-fn crossing(gas: &Gas) -> Option<(u64, u64)> {
-    gas.withheld_crossing().map(|c| (c.cost(), c.spendable()))
+/// The withheld part the frame's crossing record holds, if any.
+fn crossing(gas: &Gas) -> Option<u64> {
+    gas.withheld_crossing().map(|crossing| crossing.withheld())
 }
 
 fn push_address(code: &mut Vec<u8>, address: Address) {
@@ -372,7 +372,6 @@ fn sstore_sentry_reads_the_total() {
 #[test]
 fn sload_skip_cold_check_reads_the_total() {
     let code = [PUSH0, SLOAD, STOP];
-    let cold = GasParams::new_spec(SPEC).cold_storage_additional_cost();
 
     // With nothing withheld a frame short of the cold cost skips the load.
     let mut host = ColdHost::new();
@@ -388,8 +387,8 @@ fn sload_skip_cold_check_reads_the_total() {
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::OutOfGas);
     assert_eq!((host.loaded, host.skipped), (1, 0));
-    // PUSH0 and SLOAD's warm cost came out of the 1,000 spendable before the cold charge.
-    assert_eq!(crossing(&gas), Some((cold, 1_000 - 2 - 100)));
+    // The record holds the withheld part the halt zeroed.
+    assert_eq!(crossing(&gas), Some(9_000));
     assert_eq!(
         (gas.spendable(), gas.withheld()),
         (0, 0),
@@ -403,7 +402,6 @@ fn balance_skip_cold_check_reads_the_total() {
     let mut code = Vec::new();
     push_address(&mut code, CALLEE);
     code.extend_from_slice(&[BALANCE, STOP]);
-    let cold = GasParams::new_spec(SPEC).cold_account_additional_cost();
 
     let mut host = ColdHost::new();
     let (_, action) = run(&code, 1_000, 0, &mut host);
@@ -415,7 +413,7 @@ fn balance_skip_cold_check_reads_the_total() {
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::OutOfGas);
     assert_eq!((host.loaded, host.skipped), (1, 0));
-    assert_eq!(crossing(&gas), Some((cold, 1_000 - 3 - 100)));
+    assert_eq!(crossing(&gas), Some(9_000));
 }
 
 /// A memory expansion the total could pay but the spendable part cannot halts `MemoryOOG` and
@@ -427,7 +425,7 @@ fn mload_expansion_within_the_withheld_part_records_a_crossing() {
 
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::MemoryOOG);
-    assert_eq!(crossing(&gas), Some((3, 2)));
+    assert_eq!(crossing(&gas), Some(93));
     assert_eq!(
         (gas.spendable(), gas.withheld()),
         (2, 93),
@@ -466,7 +464,8 @@ fn static_gas_failure_within_the_withheld_part_records_a_crossing() {
     let (_, action) = run_warm(&[PUSH0, STOP], 100, 99);
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::OutOfGas);
-    assert_eq!(crossing(&gas), Some((2, 1)));
+    // The halt zeroed the withheld part; the record still holds it.
+    assert_eq!(crossing(&gas), Some(99));
     assert_eq!(
         (gas.spendable(), gas.withheld()),
         (0, 0),

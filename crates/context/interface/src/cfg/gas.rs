@@ -21,8 +21,9 @@ pub use withheld::WithheldCrossing;
 /// ([`record_withheld_first_cost`](Self::record_withheld_first_cost)); credits of regular gas land
 /// on the spendable part, and a consumer that wants to keep gas held back withholds again after
 /// them. A regular charge the withheld part would have paid fails as it would with nothing
-/// withheld, and leaves a [`WithheldCrossing`] behind. With nothing withheld, which is the
-/// default, every method behaves as it did before the withheld part existed.
+/// withheld, and leaves behind a [`WithheldCrossing`] that holds the withheld part at the charge.
+/// With nothing withheld, which is the default, every method behaves as it did before the
+/// withheld part existed.
 ///
 /// The net counters (`state_gas_spent`, `history_gas_spent`) are `i64`, while charges and refills
 /// take `u64` amounts and convert them with saturation. The tracker assumes that the transaction
@@ -93,8 +94,9 @@ pub struct GasTracker {
     /// Encodings made before this field existed decode it as zero.
     #[cfg_attr(feature = "serde", serde(default))]
     withheld: u64,
-    /// The last failed regular charge the withheld part would have paid
-    /// ([`withheld_crossing`](Self::withheld_crossing)).
+    /// The record of the last failed regular charge the withheld part would have paid
+    /// ([`withheld_crossing`](Self::withheld_crossing)): the withheld part at that charge. One
+    /// word, since the withheld part in a crossing is never zero.
     ///
     /// Encodings made before this field existed decode it as `None`.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -465,7 +467,8 @@ impl GasTracker {
 
     /// Spends all remaining gas excluding the reservoir: the spendable and the withheld part.
     ///
-    /// A recorded [`WithheldCrossing`] is kept, so it can be read after the halt.
+    /// A recorded [`WithheldCrossing`] is kept, so it can be read after the halt, and with it
+    /// the withheld part this zeroes.
     #[inline]
     pub const fn spend_all(&mut self) {
         self.remaining = 0;

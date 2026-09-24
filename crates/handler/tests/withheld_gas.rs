@@ -263,8 +263,9 @@ fn test_a_child_returns_its_withheld_gas_like_unspent_gas() {
 }
 
 /// A child whose regular charge fails within its withheld gas halts, like any out-of-gas, and
-/// its frame result carries the crossing to the handler. Its caller loses the forward, exactly
-/// as it does when the child halts with nothing withheld.
+/// its frame result carries the crossing to the handler, holding the withheld part at the failed
+/// charge. Its caller loses the forward, exactly as it does when the child halts with nothing
+/// withheld.
 #[test]
 fn test_a_crossing_halt_reaches_the_handler() {
     // One word of memory at an offset whose expansion costs more than the child keeps spendable
@@ -280,8 +281,9 @@ fn test_a_crossing_halt_reaches_the_handler() {
     let crossing = gas
         .withheld_crossing()
         .expect("the crossing reaches the handler");
-    assert!(crossing.spendable() < crossing.cost());
-    assert!(crossing.cost() - crossing.spendable() <= CHILD_GAS - 10_000);
+    assert_eq!(crossing.withheld(), CHILD_GAS - 10_000);
+    // A memory expansion that fails leaves the child's gas as it was.
+    assert_eq!(gas.withheld(), crossing.withheld());
     assert_eq!(
         unwithheld.child().0,
         InstructionResult::Stop,
@@ -290,6 +292,33 @@ fn test_a_crossing_halt_reaches_the_handler() {
 
     assert_eq!(crossed.contract_gas(), halted.contract_gas());
     // The caller does not take over the child's record.
+    assert_eq!(crossed.returned[1].1.withheld_crossing(), None);
+}
+
+/// An `OutOfGas` crossing zeroes the child's gas before its result reaches the handler, withheld
+/// part included. The record still holds the withheld part, so the handler can read from the
+/// frame result alone what the child had withheld.
+#[test]
+fn test_an_out_of_gas_crossing_keeps_the_withheld_part_on_its_record() {
+    // After the `PUSH4` of `WITHHOLD` the child has `CHILD_GAS - 3` left; withholding all but one
+    // of it leaves the `PUSH0` that follows, which costs two, short by one.
+    let withheld = CHILD_GAS - 4;
+    let crossed = child_withholds(withheld, Code::default().op(PUSH0).op(STOP));
+    let halted = child_withholds(withheld, Code::default().op(INVALID));
+
+    let (result, gas) = crossed.child();
+    assert_eq!(result, InstructionResult::OutOfGas);
+    assert_eq!(
+        (gas.spendable(), gas.withheld(), gas.remaining()),
+        (0, 0, 0),
+        "the halt spent all"
+    );
+    let crossing = gas
+        .withheld_crossing()
+        .expect("the crossing reaches the handler");
+    assert_eq!(crossing.withheld(), withheld);
+
+    assert_eq!(crossed.contract_gas(), halted.contract_gas());
     assert_eq!(crossed.returned[1].1.withheld_crossing(), None);
 }
 

@@ -247,7 +247,7 @@ impl Gas {
     /// to prevent state operations from succeeding via remaining gas.
     ///
     /// Note that this does not affect the reservoir. Both the spendable and the withheld part
-    /// are zeroed; a recorded [`WithheldCrossing`] is kept.
+    /// are zeroed; a recorded [`WithheldCrossing`] is kept, and with it the withheld part.
     #[inline]
     pub const fn spend_all(&mut self) {
         self.tracker.spend_all();
