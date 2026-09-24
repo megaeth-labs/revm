@@ -68,6 +68,16 @@ impl Gas {
         self.tracker.clear_withheld_crossing();
     }
 
+    /// Sets the record returned by [`withheld_crossing`](Self::withheld_crossing), or clears it
+    /// with `None`. A consumer marks a result it produced itself, such as a precompile's, as a
+    /// crossing, and a classifier then treats it as one a failed charge recorded.
+    ///
+    /// See [`GasTracker::set_withheld_crossing`](super::GasTracker::set_withheld_crossing).
+    #[inline]
+    pub const fn set_withheld_crossing(&mut self, crossing: Option<WithheldCrossing>) {
+        self.tracker.set_withheld_crossing(crossing);
+    }
+
     /// Records a deduction that is not the frame's own regular work, such as the gas forwarded to
     /// a child frame: draws the withheld part first, then the spendable part, and fails only when
     /// [`remaining`](Self::remaining) cannot pay.
@@ -82,7 +92,12 @@ impl Gas {
 
 #[cfg(test)]
 mod tests {
-    use super::Gas;
+    use super::{Gas, WithheldCrossing};
+    use core::num::NonZeroU64;
+
+    fn parts(gas: &Gas) -> (u64, u64, u64) {
+        (gas.spendable(), gas.withheld(), gas.remaining())
+    }
 
     /// Withheld gas is not spent: every figure derived from the remaining gas is the one the
     /// frame shows with nothing withheld.
@@ -134,6 +149,43 @@ mod tests {
 
         gas.clear_withheld_crossing();
         assert_eq!(gas.withheld_crossing(), None);
+    }
+
+    /// A record a consumer sets reads back as the record a failed charge leaves with the same
+    /// withheld part, leaves both parts alone, and is cleared by setting `None`.
+    #[test]
+    fn test_set_withheld_crossing_sets_reads_and_clears() {
+        let mut charged = Gas::new(100);
+        charged.withhold(90);
+        assert!(!charged.record_regular_cost(11));
+
+        let mut marked = Gas::new(100);
+        marked.withhold(90);
+        let crossing = WithheldCrossing::new(NonZeroU64::new(90).unwrap());
+
+        marked.set_withheld_crossing(Some(crossing));
+
+        assert_eq!(marked.withheld_crossing(), Some(crossing));
+        assert_eq!(marked.withheld_crossing(), charged.withheld_crossing());
+        assert_eq!(parts(&marked), (10, 90, 100), "the parts are untouched");
+
+        marked.set_withheld_crossing(None);
+        assert_eq!(marked.withheld_crossing(), None);
+        assert_eq!(parts(&marked), (10, 90, 100));
+    }
+
+    /// A record a consumer sets survives `spend_all`, as a recorded one does.
+    #[test]
+    fn test_a_set_crossing_survives_spend_all() {
+        let mut gas = Gas::new(100);
+        gas.withhold(90);
+        let crossing = WithheldCrossing::new(NonZeroU64::new(90).unwrap());
+        gas.set_withheld_crossing(Some(crossing));
+
+        gas.spend_all();
+
+        assert_eq!(parts(&gas), (0, 0, 0));
+        assert_eq!(gas.withheld_crossing(), Some(crossing));
     }
 
     /// A frame limited to an allowance, then forwarding part of its withheld gas, keeps the

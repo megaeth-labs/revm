@@ -32,7 +32,8 @@ impl WithheldCrossing {
     /// have paid.
     ///
     /// The tracker makes its own records. This is for a consumer that marks a result it produced
-    /// outside the tracker, such as a precompile's, as a charge that needed withheld gas.
+    /// outside the tracker, such as a precompile's, as a charge that needed withheld gas, and puts
+    /// the record on the tracker with [`GasTracker::set_withheld_crossing`].
     #[inline]
     pub const fn new(withheld: NonZeroU64) -> Self {
         Self { withheld }
@@ -108,7 +109,9 @@ impl GasTracker {
     }
 
     /// Returns the record of the last failed regular charge the withheld part would have paid,
-    /// since the record was last cleared: the withheld part at that charge.
+    /// since the record was last cleared: the withheld part at that charge. A record a consumer
+    /// sets with [`set_withheld_crossing`](Self::set_withheld_crossing) is read here the same
+    /// way, and whichever was written last is the one returned.
     ///
     /// A later plain out-of-gas leaves the record as it is, and so does
     /// [`spend_all`](Self::spend_all), so it can be read after the halt the failed charge caused,
@@ -123,6 +126,21 @@ impl GasTracker {
     #[inline]
     pub const fn clear_withheld_crossing(&mut self) {
         self.withheld_crossing = None;
+    }
+
+    /// Sets the record returned by [`withheld_crossing`](Self::withheld_crossing), replacing any
+    /// record already there. `None` clears it. The spendable and withheld parts are left as they
+    /// are.
+    ///
+    /// The tracker records a crossing itself when a regular charge fails. This is for a consumer
+    /// that marks a result it produced itself as a crossing: a precompile's result or an
+    /// interceptor's answer that needed more regular gas than the consumer allowed. A classifier
+    /// reading [`withheld_crossing`](Self::withheld_crossing) then treats that result the same
+    /// way as one a failed charge recorded. Like a recorded crossing, the record survives
+    /// [`spend_all`](Self::spend_all).
+    #[inline]
+    pub const fn set_withheld_crossing(&mut self, crossing: Option<WithheldCrossing>) {
+        self.withheld_crossing = crossing;
     }
 
     /// Records a deduction that is not the frame's own regular work, such as the gas forwarded to
