@@ -13,17 +13,33 @@ pub use withheld::WithheldCrossing;
 ///
 /// Regular gas is held in two parts: the spendable part ([`spendable`](Self::spendable)), the
 /// only part a regular charge draws, and the withheld part ([`withheld`](Self::withheld)), which
-/// a consumer can hold back from regular charges with [`withhold`](Self::withhold).
-/// [`remaining`](Self::remaining) is their sum, and it is what every other reader of the frame's
-/// gas sees: `GAS`, the gas forwarded to a child frame, the `SSTORE` stipend sentry, the
-/// skip-cold-load checks, the gas a child returns to its parent and the post-execution
-/// reimbursement. Deductions that are not regular charges draw the withheld part first
-/// ([`record_withheld_first_cost`](Self::record_withheld_first_cost)); credits of regular gas land
-/// on the spendable part, and a consumer that wants to keep gas held back withholds again after
-/// them. A regular charge the withheld part would have paid fails as it would with nothing
-/// withheld, and leaves behind a [`WithheldCrossing`] that holds the withheld part at the charge.
-/// With nothing withheld, which is the default, every method behaves as it did before the
-/// withheld part existed.
+/// a consumer can hold back from regular charges ([`limit_spendable`](Self::limit_spendable),
+/// [`withhold`](Self::withhold)). [`remaining`](Self::remaining) is their sum, and it is what
+/// every other reader of the frame's gas sees: `GAS`, the gas forwarded to a child frame, the
+/// `SSTORE` stipend sentry, the skip-cold-load checks, the gas a child returns to its parent and
+/// the post-execution reimbursement. Deductions that are not the frame's own regular work draw
+/// the withheld part first ([`record_withheld_first_cost`](Self::record_withheld_first_cost)). A
+/// regular charge the withheld part would have paid fails as it would with nothing withheld, and
+/// leaves behind a [`WithheldCrossing`] that holds the withheld part at the charge. With nothing
+/// withheld, which is the default, every method behaves as it did before the withheld part
+/// existed.
+///
+/// Credits of regular gas land on the spendable part, so they can lift it above what a consumer
+/// allows. They are the gas a child returns ([`erase_cost`](Self::erase_cost)), the reservoir a
+/// child returns ([`absorb_returned_reservoir`](Self::absorb_returned_reservoir)), a rolled-back
+/// spill ([`rollback_state_gas`](Self::rollback_state_gas)) and the refills of a spill
+/// ([`refill_reservoir`](Self::refill_reservoir), [`refill_history`](Self::refill_history)). One
+/// of them lands inside a frame rather than at a frame boundary: `SSTORE`'s refill when it
+/// restores a slot to its original zero (0→x→0). A consumer that holds the spendable part at an
+/// allowance limits it again after each credit: at a frame's start, when a child returns, and
+/// after `SSTORE`.
+///
+/// Releasing the withheld part ([`release_withheld`](Self::release_withheld)) is not needed to
+/// conserve gas: the gas a child returns is its [`remaining`](Self::remaining), withheld part
+/// included, and the parent's [`erase_cost`](Self::erase_cost) credits all of it. The
+/// code-deposit and code-hash charges of `return_create` are regular charges and draw the
+/// spendable part, so a consumer that caps a creating frame must not release before
+/// `return_create`, or those charges escape the cap.
 ///
 /// The net counters (`state_gas_spent`, `history_gas_spent`) are `i64`, while charges and refills
 /// take `u64` amounts and convert them with saturation. The tracker assumes that the transaction
@@ -42,6 +58,10 @@ pub struct GasTracker {
     ///
     /// This is the spendable part: gas withheld from regular charges is tracked separately in
     /// `withheld`, and [`remaining`](Self::remaining) reports the sum of the two.
+    ///
+    /// Serialized, the field keeps its name and holds the spendable part alone, with the withheld
+    /// part beside it as `withheld`. A decoder that predates `withheld` reads the spendable part
+    /// as the whole remaining gas.
     remaining: u64,
     /// State gas reservoir (gas exceeding TX_MAX_GAS_LIMIT). Starts as `execution_gas - min(execution_gas, regular_gas_budget)`.
     /// When 0, all remaining gas is regular gas with hard cap at `TX_MAX_GAS_LIMIT`.
@@ -86,9 +106,9 @@ pub struct GasTracker {
     refunded: i64,
     /// Regular gas withheld from regular charges ([`withhold`](Self::withhold)).
     ///
-    /// Counted by [`remaining`](Self::remaining) and drawn first by deductions that are not
-    /// regular charges ([`record_withheld_first_cost`](Self::record_withheld_first_cost)), but
-    /// never by a regular charge. Zero unless a consumer withholds gas; while it is zero, every
+    /// Counted by [`remaining`](Self::remaining) and drawn first by deductions that are not the
+    /// frame's own regular work ([`record_withheld_first_cost`](Self::record_withheld_first_cost)),
+    /// but never by a regular charge. Zero unless a consumer withholds gas; while it is zero, every
     /// method behaves as it did before this field existed.
     ///
     /// Encodings made before this field existed decode it as zero.

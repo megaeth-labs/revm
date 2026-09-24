@@ -68,8 +68,8 @@ impl Gas {
         self.tracker.clear_withheld_crossing();
     }
 
-    /// Records a deduction that is not a regular charge, such as the gas forwarded to a child
-    /// frame: draws the withheld part first, then the spendable part, and fails only when
+    /// Records a deduction that is not the frame's own regular work, such as the gas forwarded to
+    /// a child frame: draws the withheld part first, then the spendable part, and fails only when
     /// [`remaining`](Self::remaining) cannot pay.
     ///
     /// See [`GasTracker::record_withheld_first_cost`](super::GasTracker::record_withheld_first_cost).

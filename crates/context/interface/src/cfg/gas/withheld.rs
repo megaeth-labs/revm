@@ -98,7 +98,9 @@ impl GasTracker {
     /// Moves the whole withheld part back to the spendable part.
     ///
     /// [`remaining`](Self::remaining) is unchanged, and [`spendable`](Self::spendable) then
-    /// equals it.
+    /// equals it. Releasing is not needed to conserve gas, since a child's withheld part returns
+    /// to its parent with the rest of its gas. A consumer that caps a creating frame releases only
+    /// after `return_create`, whose code-deposit and code-hash charges draw the spendable part.
     #[inline]
     pub const fn release_withheld(&mut self) {
         self.remaining = self.remaining.wrapping_add(self.withheld);
@@ -123,8 +125,8 @@ impl GasTracker {
         self.withheld_crossing = None;
     }
 
-    /// Records a deduction that is not a charge for executing an instruction: the gas forwarded
-    /// to a child frame, or the part of a state- or history-gas charge that spills past the
+    /// Records a deduction that is not the frame's own regular work, such as the gas forwarded to
+    /// a child frame, or the part of a state- or history-gas charge that spills past the
     /// reservoir.
     ///
     /// Draws the withheld part first and the spendable part after it, so it fails only when
