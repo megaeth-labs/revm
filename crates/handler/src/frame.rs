@@ -28,6 +28,8 @@ use primitives::{
 use state::Bytecode;
 use std::{borrow::ToOwned, boxed::Box, string::ToString, vec::Vec};
 
+mod code_deposit;
+
 /// Frame implementation for Ethereum.
 #[derive_where(Clone, Debug; IW,
     <IW as InterpreterTypes>::Stack,
@@ -678,6 +680,12 @@ pub const fn handle_reservoir_remaining_gas(
 /// refunded to the parent in `return_result`. The child frame is NOT allowed to
 /// borrow the upfront charge to pay for code deposit: it must cover code deposit
 /// state gas from its own reservoir and remaining gas.
+///
+/// Once the code passed every check and every deposit charge is recorded, and before the
+/// checkpoint is committed, the context is asked to admit the deposit
+/// ([`ContextTr::admit_code_deposit`]). A refused deposit reverts the checkpoint, puts the
+/// frame's gas back to what it was before the deposit charges and ends the creation as a
+/// `Revert` with the output the context named.
 pub fn return_create<CTX: ContextTr>(
     context: &mut CTX,
     checkpoint: JournalCheckpoint,
@@ -720,6 +728,9 @@ pub fn return_create<CTX: ContextTr>(
         interpreter_result.result = InstructionResult::CreateContractStartingWithEF;
         return;
     }
+
+    // The frame's gas before the deposit charges, which a refused deposit gets back.
+    let gas_before_deposit = interpreter_result.gas;
 
     // regular gas for code deposit. It is zero in EIP-8037.
     let gas_for_code = gas_params.code_deposit_cost(interpreter_result.output.len());
@@ -798,6 +809,16 @@ pub fn return_create<CTX: ContextTr>(
             interpreter_result.result = InstructionResult::OutOfGas;
             return;
         }
+    }
+
+    if !code_deposit::admit_code_deposit(
+        context,
+        checkpoint,
+        interpreter_result,
+        &gas_before_deposit,
+        address,
+    ) {
+        return;
     }
 
     // If we have enough gas we can commit changes.

@@ -61,6 +61,29 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
    A tag is the only identity a fork release has (rule 3), and the release workflow tags only commits whose `ci success` is green.
    Consumer tag pinning is not enforced mechanically; each consumer's `Cargo.lock` records the commit it built against.
 
+## Hooks
+
+Each entry names the API a consumer uses and what the fork guarantees about it.
+A hook's default keeps upstream's behaviour: a consumer that does not use it sees the same results.
+Each entry's **Default** says what the hook costs a consumer that does not use it.
+
+### Code-deposit admission
+
+- **API.** `ContextTr::admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes>`, whose default admits.
+  `CodeDeposit` carries `address`, `code`, `gas_before` and `gas_after`; `regular_gas`, `state_gas` and `history_gas` read the deposit's charges off the two trackers.
+  It is `#[non_exhaustive]` and built with `CodeDeposit::new`, so a later field is not a breaking change.
+- **Contract.** `return_create` calls it once for every creation it deploys, on the plain and the inspected path: after the code passed every check and every deposit charge is recorded, before the journal checkpoint is committed.
+  A creation `return_create` fails itself, out of gas on a deposit charge included, is never offered.
+  Before Homestead a deposit the frame cannot pay does not fail: `return_create` deploys empty code instead, and offers that deposit with empty code and no charge.
+  If the failed charge was a crossing of the frame's withheld gas, `gas_after` carries its crossing record and `gas_before` does not, so an admitted deposit keeps the record and a refusal discards it.
+  `Err(output)` refuses: the checkpoint is reverted, the frame's gas is put back to `gas_before`, and the creation ends as a `Revert` with `output`, settling as a creation whose init code reverted.
+  A hook that fails fatally records the cause in the context error and refuses; the transaction returns the error.
+  The deposit's charges, and with them its state-gas price lookup through `Host::state_gas_price`, are made before it is offered, so that lookup is made whether or not the deposit is admitted; a refusal does not undo what the lookup recorded.
+- **Reach.** The hook is on the context `return_create` is called with, so a consumer that wraps `EthFrame`, runs `process_next_action` from its own `frame_run`, or customises `Handler` reaches it by implementing `ContextTr` for its context.
+  A context that wraps another and implements `ContextTr` by hand must forward the method, or it gets the admitting default.
+- **Default.** `return_create` compiles to the same code, on its own and inlined into the handler on the plain and the inspected path.
+  Inlined into a consumer's own function, the admitting default may shift its block layout; where measured, that cost one unconditional branch on one out-of-gas path and changed no success path.
+
 ## Tracking upstream
 
 The fork keeps its crate versions at the revm version the MegaETH node pins, today `40.0.3`; a newer upstream tag would bump every crate's major, so the fork takes single upstream commits until the node moves.
