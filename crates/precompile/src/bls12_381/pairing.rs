@@ -21,7 +21,8 @@ pub const PRECOMPILE: Precompile = Precompile::new(
     PrecompileId::Bls12Pairing,
     PAIRING_ADDRESS,
     pairing_precompile,
-);
+)
+.with_required_gas(crate::required_gas::bls12_pairing);
 
 /// Pairing call expects 384*k (k being a positive integer) bytes as an inputs
 /// that is interpreted as byte concatenation of k slices. Each slice has the

@@ -15,7 +15,8 @@ pub const PRECOMPILE: Precompile = Precompile::new(
     PrecompileId::Bls12MapFp2ToGp2,
     MAP_FP2_TO_G2_ADDRESS,
     map_fp2_to_g2_precompile,
-);
+)
+.with_required_gas(crate::required_gas::bls12_map_fp2_to_g2);
 
 /// Field-to-curve call expects 128 bytes as an input that is interpreted as
 /// an element of Fp2. Output of this call is 256 bytes and is an encoded G2

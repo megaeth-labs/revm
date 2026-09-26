@@ -88,6 +88,26 @@ Each entry's **Default** says what the hook costs a consumer that does not use i
 - **Default.** With nothing withheld every method behaves as upstream's.
   The tracker is 72 bytes and the record one word; a crossing is recorded in a cold, out-of-line function on the failure side of a regular charge, so a charge that succeeds runs upstream's code.
 
+### Precompile price
+
+- **API.** `Precompile::required_gas(&self, input: &[u8]) -> Option<u64>`; `Precompile::with_required_gas(self, PrecompileGasFn) -> Self`; `PrecompileGasFn = fn(&[u8]) -> u64`; the built-in price functions in `revm_precompile::required_gas`.
+- **Contract.** `Some(price)` guarantees, for every gas limit `g`: the run halts `OutOfGas` if and only if `g < price`, and with `g >= price` its result is the same for every `g`, a success or a revert using exactly `price`.
+  A malformed input keeps the contract: refused by a check made before any gas check, it prices at `0`; refused after a gas check, it prices at what that gas check asks for; `MODEXP` header sizes refused between its two gas checks price at the first check's minimum.
+  The price does not tell whether a call with enough gas succeeds.
+- **Price what is dispatched.** The price belongs to the `Precompile` value a consumer dispatches, and holds only for that value's run.
+  A table that type-erases its entries cannot be priced through: alloy-evm's `PrecompilesMap` is one once it holds dynamic precompiles.
+  An address a node replaced must not be priced from the built-in set, whose value still answers for it.
+  The fork cannot see what a consumer dispatches; this is the consumer's to keep.
+- **A held call.** A call a consumer holds to an allowance below its forward crosses the allowance exactly when `allowance < price <= forward`.
+  A price above the forward is a plain out-of-gas, although a run on the allowance runs out of gas too; only the price tells the two apart.
+  Charging the price on a `GasTracker` that holds the forward, limited to the allowance with `limit_spendable`, records a crossing (`withheld_crossing`) in exactly that case, so the tracker can build the record.
+- **Coverage.** Every precompile the crate defines carries its price function, so every precompile of every set `Precompiles::new` returns answers.
+  A precompile built with `Precompile::new` carries none and answers `None`.
+  A precompile that wraps a built-in must price itself from the price function of the run it wraps, and price its own refusals at `0`; `with_required_gas`'s documentation shows the pattern, and such a wrapper needs a differential test against its own run.
+  Outstanding: the port to the op-revm fork. At `v20.0.0-mega.2` its nine size-limited wrappers (the BN254 pairing and the BLS12-381 G1 MSM, G2 MSM and pairing, across its hardforks) are built with `Precompile::new` and answer `None`.
+- **Guard.** `ecrecover`, `sha256`, `ripemd160` and `blake2f` repeat literals their runs keep private; the differential test `required_gas_matches_every_builtin_run`, run under every backend, fails when a run's gas changes and its price does not.
+- **Default.** Nothing on the execution path calls it; `Precompile` is one word larger.
+
 ## Tracking upstream
 
 The fork keeps its crate versions at the revm version the MegaETH node pins, today `40.0.3`; a newer upstream tag would bump every crate's major, so the fork takes single upstream commits until the node moves.

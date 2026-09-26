@@ -13,7 +13,8 @@ pub const PRECOMPILE: Precompile = Precompile::new(
     PrecompileId::Bls12MapFpToGp1,
     MAP_FP_TO_G1_ADDRESS,
     map_fp_to_g1_precompile,
-);
+)
+.with_required_gas(crate::required_gas::bls12_map_fp_to_g1);
 
 /// Field-to-curve call expects 64 bytes as an input that is interpreted as an
 /// element of Fp. Output of this call is 128 bytes and is an encoded G1 point.
