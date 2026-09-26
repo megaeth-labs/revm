@@ -13,36 +13,63 @@ use core::num::NonZeroU64;
 /// `spendable < cost <= spendable + withheld`. A charge larger than the whole regular gas records
 /// nothing: it would have failed with nothing withheld too.
 ///
-/// The record holds the withheld part at the failed charge ([`withheld`](Self::withheld)). An
-/// `OutOfGas` halt zeroes the frame's regular gas, withheld part included, before its result
-/// reaches the handler; the record keeps the amount, so a crossing can be settled from the record
-/// alone whatever the halt did to the frame's gas.
+/// The record holds the regular gas left before the failed charge ([`remaining`](Self::remaining)):
+/// the tracker's [`remaining`](GasTracker::remaining) at the charge, spendable and withheld parts
+/// together. The failed charge took nothing, so this is the whole regular gas the frame had. The
+/// record keeps the amount whatever the halt then does to the frame's gas, so a consumer can put
+/// the frame's regular gas back exactly ([`GasTracker::set_remaining`]). That puts back the
+/// amount; whether the split comes back with it depends on what the halt did:
 ///
-/// A crossing implies `1 <= cost - spendable <= withheld`, so the withheld part is never zero and
-/// `Option<WithheldCrossing>` takes no more room than a `u64`.
+/// - An `OutOfGas` halt of the interpreter zeroes both parts before the frame's result reaches
+///   the handler. Nothing is withheld then, so the whole amount comes back spendable.
+/// - `return_create`'s own `OutOfGas`, when its code-deposit or code-hash charge crossed, zeroes
+///   nothing: the frame's result reaches the handler with both parts as they were. Since
+///   `set_remaining` keeps the withheld part as far as the total allows, the split comes back as
+///   it was.
+///
+/// A frame whose regular charge fails halts, with one exception: before Homestead,
+/// `return_create` deploys empty code when the frame cannot pay the code deposit, so a crossing on
+/// that charge leaves the record on a creation that returns successfully.
+///
+/// A crossing implies `cost <= spendable + withheld` with `cost > spendable`, so the regular gas
+/// left is never zero and `Option<WithheldCrossing>` takes no more room than a `u64`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WithheldCrossing {
-    /// The withheld part when the charge failed.
-    withheld: NonZeroU64,
+    /// The regular gas left, spendable and withheld parts together, before the failed charge.
+    remaining: NonZeroU64,
 }
 
 impl WithheldCrossing {
-    /// Creates a record of a failed charge that `withheld`, the withheld part at the time, would
-    /// have paid.
+    /// Creates a record of a failed charge made with `remaining` regular gas left, spendable and
+    /// withheld parts together.
     ///
     /// The tracker makes its own records. This is for a consumer that marks a result it produced
     /// outside the tracker, such as a precompile's, as a charge that needed withheld gas, and puts
-    /// the record on the tracker with [`GasTracker::set_withheld_crossing`].
+    /// the record on the tracker with [`GasTracker::set_withheld_crossing`]. `remaining` is the
+    /// regular gas the frame had before the charge that crossed.
+    ///
+    /// A call the consumer holds to an `allowance` below the `forward` its caller gave it, and
+    /// answers without running, follows the tracker's rule for the gas `cost` the call needs (for
+    /// a precompile, the price `Precompile::required_gas` answers): it crossed exactly when
+    /// `allowance < cost <= forward`, and its record is then `with_remaining(forward)`, since the
+    /// call spent nothing of its forward. A cost above the forward is a plain out-of-gas, with no
+    /// record, as it is with nothing withheld. Charging `cost` on a tracker that holds `forward`,
+    /// limited to `allowance` with [`limit_spendable`](GasTracker::limit_spendable), makes exactly
+    /// that record, or none.
+    ///
+    /// The name says what the argument is. The record used to hold the withheld part alone, and
+    /// its constructor `new` took that; it is gone, so a caller written for it does not compile.
     #[inline]
-    pub const fn new(withheld: NonZeroU64) -> Self {
-        Self { withheld }
+    pub const fn with_remaining(remaining: NonZeroU64) -> Self {
+        Self { remaining }
     }
 
-    /// Returns the withheld part when the charge failed. Never zero.
+    /// Returns the regular gas left before the failed charge, spendable and withheld parts
+    /// together. Never zero.
     #[inline]
-    pub const fn withheld(&self) -> u64 {
-        self.withheld.get()
+    pub const fn remaining(&self) -> u64 {
+        self.remaining.get()
     }
 }
 
@@ -109,14 +136,23 @@ impl GasTracker {
     }
 
     /// Returns the record of the last failed regular charge the withheld part would have paid,
-    /// since the record was last cleared: the withheld part at that charge. A record a consumer
-    /// sets with [`set_withheld_crossing`](Self::set_withheld_crossing) is read here the same
-    /// way, and whichever was written last is the one returned.
+    /// since the record was last cleared: the regular gas left before that charge, spendable and
+    /// withheld parts together. A record a consumer sets with
+    /// [`set_withheld_crossing`](Self::set_withheld_crossing) is read here the same way, and
+    /// whichever was written last is the one returned.
     ///
     /// A later plain out-of-gas leaves the record as it is, and so does
     /// [`spend_all`](Self::spend_all), so it can be read after the halt the failed charge caused,
-    /// although the halt zeroes the withheld part itself. A child frame starts with no record,
-    /// and a parent does not take over its child's.
+    /// even when the halt zeroed the regular gas itself. A consumer that settles the crossing
+    /// without forfeiting anything puts the frame's regular gas back to the record's
+    /// [`remaining`](WithheldCrossing::remaining) with [`set_remaining`](Self::set_remaining).
+    /// That restores the amount, and the split only as far as the halt left it: after an
+    /// `OutOfGas` halt of the interpreter nothing is withheld, so the whole amount comes back
+    /// spendable, and a consumer that lets the frame charge again limits it again with
+    /// [`limit_spendable`](Self::limit_spendable); after `return_create`'s own `OutOfGas` on a
+    /// code-deposit or code-hash charge, both parts are still as they were, and so is the split
+    /// after the restore. A child frame starts with no record, and a parent does not take over its
+    /// child's.
     #[inline]
     pub const fn withheld_crossing(&self) -> Option<WithheldCrossing> {
         self.withheld_crossing
@@ -168,17 +204,20 @@ impl GasTracker {
     }
 
     /// Records a failed regular charge of `cost` against `spendable` as a [`WithheldCrossing`]
-    /// holding the withheld part, when the withheld part would have paid it.
+    /// holding the regular gas left, `spendable` plus the withheld part, when the withheld part
+    /// would have paid it.
     ///
     /// Only called on the failure path of a regular charge, where `cost > spendable`, so the
-    /// charge's success path does not pay for the check.
+    /// charge's success path does not pay for the check. `spendable` is the spendable part before
+    /// the charge: [`record_cost_unsafe`](Self::record_cost_unsafe) has already wrapped it.
     #[cold]
     #[inline(never)]
     pub(super) const fn regular_charge_failed(&mut self, cost: u64, spendable: u64) {
-        // `cost > spendable`, so a withheld part that covers the difference is never zero.
+        // `cost > spendable`, so a withheld part that covers the difference is never zero, and
+        // neither is the regular gas left.
         if cost - spendable <= self.withheld {
-            if let Some(withheld) = NonZeroU64::new(self.withheld) {
-                self.withheld_crossing = Some(WithheldCrossing::new(withheld));
+            if let Some(remaining) = NonZeroU64::new(spendable.saturating_add(self.withheld)) {
+                self.withheld_crossing = Some(WithheldCrossing::with_remaining(remaining));
             }
         }
     }
@@ -201,11 +240,11 @@ mod tests {
         (tracker.spendable(), tracker.withheld(), tracker.remaining())
     }
 
-    /// The withheld part the tracker's crossing record holds, if any.
+    /// The regular gas left the tracker's crossing record holds, if any.
     fn recorded(tracker: &GasTracker) -> Option<u64> {
         tracker
             .withheld_crossing()
-            .map(|crossing| crossing.withheld())
+            .map(|crossing| crossing.remaining())
     }
 
     /// The record is one word, and an absent record takes no more.
@@ -330,7 +369,7 @@ mod tests {
     }
 
     /// A regular charge above the spendable part fails even though the total could pay it, and
-    /// says so: the withheld part it could not draw is recorded.
+    /// says so: the regular gas left before the charge, both parts together, is recorded.
     #[test]
     fn test_record_regular_cost_records_a_failure_within_the_withheld_part() {
         let mut tracker = withheld_600();
@@ -338,18 +377,63 @@ mod tests {
         assert!(!tracker.record_regular_cost(1_000));
 
         assert_eq!(parts(&tracker), (400, 600, 1_000), "nothing is spent");
-        assert_eq!(recorded(&tracker), Some(600));
+        assert_eq!(recorded(&tracker), Some(1_000));
     }
 
-    /// A record a consumer makes for a withheld part is the one the tracker makes for it.
+    /// The record is the whole regular gas left, not either part of it: after a charge that
+    /// succeeded, the spendable part (250), the withheld part (600) and the total (850) differ,
+    /// and the record holds the total.
+    #[test]
+    fn test_the_record_holds_both_parts_of_the_regular_gas_left() {
+        let mut tracker = withheld_600();
+        assert!(tracker.record_regular_cost(150));
+        assert_eq!(parts(&tracker), (250, 600, 850));
+
+        assert!(!tracker.record_regular_cost(300));
+
+        assert_eq!(recorded(&tracker), Some(850));
+    }
+
+    /// Putting the regular gas back to the record after the halt restores the frame exactly: the
+    /// halt zeroed both parts, and the total comes back to what it was before the failed charge,
+    /// with nothing forfeited.
+    #[test]
+    fn test_the_record_restores_the_regular_gas_left_exactly() {
+        for unchecked in [false, true] {
+            let mut tracker = withheld_600();
+            assert!(tracker.record_regular_cost(150));
+            let before = tracker.remaining();
+
+            if unchecked {
+                assert!(tracker.record_cost_unsafe(300));
+            } else {
+                assert!(!tracker.record_regular_cost(300));
+            }
+            tracker.spend_all();
+            assert_eq!(parts(&tracker), (0, 0, 0));
+
+            let crossing = tracker.withheld_crossing().expect("a crossing");
+            tracker.set_remaining(crossing.remaining());
+
+            assert_eq!(tracker.remaining(), before, "unchecked: {unchecked}");
+            // The amount comes back, not the split: all of it is spendable.
+            assert_eq!(
+                parts(&tracker),
+                (before, 0, before),
+                "unchecked: {unchecked}"
+            );
+        }
+    }
+
+    /// A record a consumer makes for the regular gas left is the one the tracker makes for it.
     #[test]
     fn test_a_constructed_crossing_is_a_recorded_one() {
         let mut tracker = withheld_600();
         assert!(!tracker.record_regular_cost(401));
 
-        let constructed = WithheldCrossing::new(NonZeroU64::new(600).unwrap());
+        let constructed = WithheldCrossing::with_remaining(NonZeroU64::new(1_000).unwrap());
 
-        assert_eq!(constructed.withheld(), 600);
+        assert_eq!(constructed.remaining(), 1_000);
         assert_eq!(tracker.withheld_crossing(), Some(constructed));
     }
 
@@ -371,7 +455,7 @@ mod tests {
         assert!(!tracker.record_regular_cost(500));
 
         assert!(!tracker.record_regular_cost(5_000));
-        assert_eq!(recorded(&tracker), Some(600), "the crossing stays");
+        assert_eq!(recorded(&tracker), Some(1_000), "the crossing stays");
 
         tracker.clear_withheld_crossing();
         assert_eq!(tracker.withheld_crossing(), None);
@@ -382,13 +466,13 @@ mod tests {
     fn test_a_second_crossing_replaces_the_first() {
         let mut tracker = withheld_600();
         assert!(!tracker.record_regular_cost(500));
-        assert_eq!(recorded(&tracker), Some(600));
+        assert_eq!(recorded(&tracker), Some(1_000));
 
         // A forward draws the withheld part down before the second failure.
         assert!(tracker.record_withheld_first_cost(100));
         assert!(!tracker.record_regular_cost(500));
 
-        assert_eq!(recorded(&tracker), Some(500));
+        assert_eq!(recorded(&tracker), Some(900));
     }
 
     /// With nothing withheld no failure is ever a crossing.
@@ -421,7 +505,11 @@ mod tests {
 
         assert!(tracker.record_cost_unsafe(401));
 
-        assert_eq!(recorded(&tracker), Some(600));
+        assert_eq!(
+            recorded(&tracker),
+            Some(1_000),
+            "the regular gas left before the wrap"
+        );
         // The spendable part wraps, as it always did; the total reads the charge taken from it.
         assert_eq!(tracker.remaining(), 599);
 
@@ -429,7 +517,7 @@ mod tests {
         assert_eq!(parts(&tracker), (0, 0, 0));
         assert_eq!(
             recorded(&tracker),
-            Some(600),
+            Some(1_000),
             "the record keeps what the halt zeroed"
         );
     }
@@ -544,8 +632,8 @@ mod tests {
         assert_eq!(parts(&tracker), (1_000, 0, 1_000));
     }
 
-    /// Spending all gas zeroes both parts and keeps the crossing record, so the withheld part
-    /// the halt zeroed can still be read from it.
+    /// Spending all gas zeroes both parts and keeps the crossing record, so the regular gas the
+    /// halt zeroed can still be read from it.
     #[test]
     fn test_spend_all_zeroes_both_parts_and_keeps_the_record() {
         let mut tracker = withheld_600();
@@ -555,7 +643,7 @@ mod tests {
 
         assert_eq!(parts(&tracker), (0, 0, 0));
         assert_eq!(tracker.reservoir(), 300);
-        assert_eq!(recorded(&tracker), Some(600), "the record survives");
+        assert_eq!(recorded(&tracker), Some(1_000), "the record survives");
     }
 
     /// `set_remaining` sets the total. The withheld part is kept as far as the total allows.
@@ -585,12 +673,40 @@ mod tests {
             tracker
         );
 
-        let mut older = encoded;
+        let mut older = encoded.clone();
         let fields = older.as_object_mut().unwrap();
         fields.remove("withheld");
         fields.remove("withheld_crossing");
         let decoded = serde_json::from_value::<GasTracker>(older).unwrap();
         assert_eq!(parts(&decoded), (400, 0, 400));
         assert_eq!(decoded.withheld_crossing(), None);
+
+        // A record encoded while it held the withheld part meant something else; it is refused,
+        // not read as the regular gas left.
+        let mut withheld_record = encoded;
+        withheld_record["withheld_crossing"] = serde_json::json!({ "withheld": 600 });
+        assert!(serde_json::from_value::<GasTracker>(withheld_record).is_err());
+    }
+
+    /// A format that encodes a struct by position carries no field names, so it cannot refuse a
+    /// record encoded while it held the withheld part: it reads the old value as the regular gas
+    /// left. Such a record must not cross an upgrade. The deserializer here hands the fields over
+    /// in order, as bincode does.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_a_positional_format_reads_an_old_record_as_the_regular_gas_left() {
+        use serde::{
+            de::value::{Error, SeqDeserializer},
+            Deserialize,
+        };
+
+        // The record of a crossing with 600 withheld, as the old record encoded it: its one field.
+        let old = SeqDeserializer::<_, Error>::new([600u64].into_iter());
+
+        let decoded = WithheldCrossing::deserialize(old).unwrap();
+        assert_eq!(
+            decoded,
+            WithheldCrossing::with_remaining(NonZeroU64::new(600).unwrap())
+        );
     }
 }

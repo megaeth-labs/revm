@@ -67,6 +67,27 @@ Each entry names the API a consumer uses and what the fork guarantees about it.
 A hook's default keeps upstream's behaviour: a consumer that does not use it sees the same results.
 Each entry's **Default** says what the hook costs a consumer that does not use it.
 
+### Withheld regular gas and the crossing record
+
+- **API.** On `GasTracker`, forwarded on `Gas`: `spendable`, `withheld`, `limit_spendable`, `withhold`, `release_withheld`, `record_withheld_first_cost`, `withheld_crossing`, `clear_withheld_crossing`, `set_withheld_crossing`.
+  The type `WithheldCrossing` (`with_remaining`, `remaining`), re-exported from `revm_interpreter::gas`.
+- **Two parts.** A frame's regular gas is a spendable part and a withheld part; `remaining()` is their sum, and every reader of the frame's gas sees the sum: `GAS`, the `CALL` and `CREATE` forward, the `SSTORE` stipend sentry, the skip-cold-load checks, the gas a child returns, the reimbursement.
+- **Charges.** A regular charge draws the spendable part only.
+  A deduction that is not the frame's own regular work (the gas forwarded to a child, a state or history charge spilling past the reservoir) draws the withheld part first and fails only when the sum cannot pay.
+  Credits land on the spendable part.
+- **Crossing.** A regular charge with `spendable < cost <= spendable + withheld` fails as it would with nothing withheld, and leaves a `WithheldCrossing` holding the regular gas left before the charge: `remaining()`, both parts together.
+  `set_remaining(crossing.remaining())` puts the frame's regular gas back to what it had before the failed charge, whatever the halt did to it.
+  It puts back the amount; the split comes back only as far as the halt left it.
+  An `OutOfGas` halt of the interpreter zeroes both parts, so after it the whole amount comes back spendable.
+  `return_create`'s own `OutOfGas`, on a code-deposit or code-hash charge that crossed, zeroes nothing, so there the split comes back as it was.
+  A charge beyond the sum records nothing, and neither does an operand refused before any charge.
+  The record is the last crossing since it was cleared, survives `spend_all`, starts empty in every child, and is not taken over by a parent.
+  A consumer marks a result it produced itself as a crossing with `set_withheld_crossing`, passing `with_remaining` the regular gas the frame had before the charge that crossed.
+  A call it holds to an allowance below its forward and answers without running crossed exactly when `allowance < cost <= forward` for the gas `cost` the call needs (for a precompile, the price `Precompile::required_gas` answers); its record is then `with_remaining(forward)`, and a cost above the forward is a plain out-of-gas with no record.
+  A frame whose regular charge fails halts, except before Homestead, where `return_create` deploys empty code when the frame cannot pay the code deposit: a crossing on that charge leaves the record on a creation that returns successfully.
+- **Default.** With nothing withheld every method behaves as upstream's.
+  The tracker is 72 bytes and the record one word; a crossing is recorded in a cold, out-of-line function on the failure side of a regular charge, so a charge that succeeds runs upstream's code.
+
 ### Precompile price
 
 - **API.** `Precompile::required_gas(&self, input: &[u8]) -> Option<u64>`; `Precompile::with_required_gas(self, PrecompileGasFn) -> Self`; `PrecompileGasFn = fn(&[u8]) -> u64`; the built-in price functions in `revm_precompile::required_gas`.
