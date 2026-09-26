@@ -81,7 +81,8 @@ pub const FUN: Precompile = Precompile::new(
     PrecompileId::Blake2F,
     crate::u64_to_address(9),
     blake2_precompile,
-);
+)
+.with_required_gas(crate::required_gas::blake2f);
 
 /// reference: <https://eips.ethereum.org/EIPS/eip-152>
 /// input format:

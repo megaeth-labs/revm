@@ -14,14 +14,16 @@ pub const SHA256: Precompile = Precompile::new(
     PrecompileId::Sha256,
     crate::u64_to_address(2),
     sha256_precompile,
-);
+)
+.with_required_gas(crate::required_gas::sha256);
 
 /// RIPEMD-160 precompile
 pub const RIPEMD160: Precompile = Precompile::new(
     PrecompileId::Ripemd160,
     crate::u64_to_address(3),
     ripemd160_precompile,
-);
+)
+.with_required_gas(crate::required_gas::ripemd160);
 
 /// Computes the SHA-256 hash of the input data
 ///

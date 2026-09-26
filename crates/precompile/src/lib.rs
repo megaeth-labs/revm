@@ -26,6 +26,7 @@ pub mod identity;
 pub mod interface;
 pub mod kzg_point_evaluation;
 pub mod modexp;
+pub mod required_gas;
 pub mod secp256k1;
 pub mod secp256r1;
 pub mod utilities;
@@ -34,6 +35,7 @@ pub use primitives;
 
 pub use id::PrecompileId;
 pub use interface::*;
+pub use required_gas::PrecompileGasFn;
 
 use core::fmt::{self, Debug};
 
@@ -337,6 +339,9 @@ pub struct Precompile {
     address: Address,
     /// Precompile function.
     fn_: PrecompileFn,
+    /// Price function, answering [`required_gas`](Self::required_gas). `None` unless set with
+    /// [`with_required_gas`](Self::with_required_gas).
+    required_gas: Option<PrecompileGasFn>,
 }
 
 impl Debug for Precompile {
@@ -351,7 +356,7 @@ impl Debug for Precompile {
 
 impl From<(PrecompileId, Address, PrecompileFn)> for Precompile {
     fn from((id, address, fn_): (PrecompileId, Address, PrecompileFn)) -> Self {
-        Precompile { id, address, fn_ }
+        Self::new(id, address, fn_)
     }
 }
 
@@ -363,8 +368,16 @@ impl From<Precompile> for (PrecompileId, Address) {
 
 impl Precompile {
     /// Create new precompile.
+    ///
+    /// It has no price function, so [`required_gas`](Self::required_gas) answers `None` until one
+    /// is set with [`with_required_gas`](Self::with_required_gas).
     pub const fn new(id: PrecompileId, address: Address, fn_: PrecompileFn) -> Self {
-        Self { id, address, fn_ }
+        Self {
+            id,
+            address,
+            fn_,
+            required_gas: None,
+        }
     }
 
     /// Returns reference to precompile identifier.

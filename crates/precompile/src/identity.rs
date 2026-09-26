@@ -13,7 +13,8 @@ pub const FUN: Precompile = Precompile::new(
     PrecompileId::Identity,
     crate::u64_to_address(4),
     identity_precompile,
-);
+)
+.with_required_gas(crate::required_gas::identity);
 
 /// The base cost of the operation
 pub const IDENTITY_BASE: u64 = 15;

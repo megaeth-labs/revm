@@ -17,7 +17,8 @@ eth_precompile_fn!(g1_msm_precompile, g1_msm);
 
 /// [EIP-2537](https://eips.ethereum.org/EIPS/eip-2537#specification) BLS12_G1MSM precompile.
 pub const PRECOMPILE: Precompile =
-    Precompile::new(PrecompileId::Bls12G1Msm, G1_MSM_ADDRESS, g1_msm_precompile);
+    Precompile::new(PrecompileId::Bls12G1Msm, G1_MSM_ADDRESS, g1_msm_precompile)
+        .with_required_gas(crate::required_gas::bls12_g1_msm);
 
 /// Implements EIP-2537 G1MSM precompile.
 /// G1 multi-scalar-multiplication call expects `160*k` bytes as an input that is interpreted

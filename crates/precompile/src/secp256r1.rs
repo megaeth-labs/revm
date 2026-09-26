@@ -34,14 +34,16 @@ pub const P256VERIFY: Precompile = Precompile::new(
     PrecompileId::P256Verify,
     u64_to_address(P256VERIFY_ADDRESS),
     p256verify_precompile,
-);
+)
+.with_required_gas(crate::required_gas::p256verify);
 
 /// [RIP-7212](https://github.com/ethereum/RIPs/blob/master/RIPS/rip-7212.md#specification) secp256r1 precompile.
 pub const P256VERIFY_OSAKA: Precompile = Precompile::new(
     PrecompileId::P256Verify,
     u64_to_address(P256VERIFY_ADDRESS),
     p256verify_osaka_precompile,
-);
+)
+.with_required_gas(crate::required_gas::p256verify_osaka);
 
 /// secp256r1 precompile logic. It takes the input bytes sent to the precompile
 /// and the gas limit. The output represents the result of verifying the

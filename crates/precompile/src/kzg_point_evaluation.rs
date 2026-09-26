@@ -15,7 +15,8 @@ eth_precompile_fn!(kzg_precompile, run);
 
 /// KZG point evaluation precompile, containing address and function to run.
 pub const POINT_EVALUATION: Precompile =
-    Precompile::new(PrecompileId::KzgPointEvaluation, ADDRESS, kzg_precompile);
+    Precompile::new(PrecompileId::KzgPointEvaluation, ADDRESS, kzg_precompile)
+        .with_required_gas(crate::required_gas::kzg_point_evaluation);
 
 /// Address of the KZG point evaluation precompile.
 pub const ADDRESS: Address = crate::u64_to_address(0x0A);
