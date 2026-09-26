@@ -251,9 +251,10 @@ fn new_frame(action: &InterpreterAction) -> &FrameInput {
     }
 }
 
-/// The withheld part the frame's crossing record holds, if any.
+/// The regular gas left, spendable and withheld parts together, that the frame's crossing record
+/// holds, if any.
 fn crossing(gas: &Gas) -> Option<u64> {
-    gas.withheld_crossing().map(|crossing| crossing.withheld())
+    gas.withheld_crossing().map(|crossing| crossing.remaining())
 }
 
 fn push_address(code: &mut Vec<u8>, address: Address) {
@@ -387,8 +388,9 @@ fn test_sload_skip_cold_check_reads_the_total() {
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::OutOfGas);
     assert_eq!((host.loaded, host.skipped), (1, 0));
-    // The record holds the withheld part the halt zeroed.
-    assert_eq!(crossing(&gas), Some(9_000));
+    // The record holds the regular gas the halt zeroed, as it was before the cold charge:
+    // `PUSH0` (2) and `SLOAD`'s warm cost (100) spent, the rest left.
+    assert_eq!(crossing(&gas), Some(10_000 - 2 - 100));
     assert_eq!(
         (gas.spendable(), gas.withheld()),
         (0, 0),
@@ -413,7 +415,8 @@ fn test_balance_skip_cold_check_reads_the_total() {
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::OutOfGas);
     assert_eq!((host.loaded, host.skipped), (1, 0));
-    assert_eq!(crossing(&gas), Some(9_000));
+    // `PUSH20` (3) and `BALANCE`'s warm cost (100) were spent before the cold charge.
+    assert_eq!(crossing(&gas), Some(10_000 - 3 - 100));
 }
 
 /// The `CALL` target's skip-cold check compares the total with the cold cost: the account is
@@ -439,7 +442,7 @@ fn test_call_skip_cold_check_reads_the_total() {
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::OutOfGas);
     assert_eq!((host.loaded, host.skipped), (1, 0));
-    assert_eq!(crossing(&gas), Some(98_000));
+    assert_eq!(crossing(&gas), Some(100_000 - 116));
 }
 
 /// The `SSTORE` skip-cold check compares the total with the cold cost: the slot is loaded when
@@ -458,7 +461,8 @@ fn test_sstore_skip_cold_check_reads_the_total() {
     assert!(1_000 < cold, "the spendable part is short of the cold cost");
     assert_eq!(result, InstructionResult::OutOfGas);
     assert_eq!((host.loaded, host.skipped), (1, 0));
-    assert_eq!(crossing(&gas), Some(29_000));
+    // Two `PUSH0`s (4) and `SSTORE`'s warm cost (100) were spent before the dynamic charge.
+    assert_eq!(crossing(&gas), Some(30_000 - 4 - 100));
 }
 
 /// The `SELFDESTRUCT` skip-cold check compares the total with the cold cost: the beneficiary is
@@ -486,7 +490,7 @@ fn test_selfdestruct_skip_cold_check_reads_the_total() {
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::OutOfGas);
     assert_eq!((host.loaded, host.skipped), (1, 0));
-    assert_eq!(crossing(&gas), Some(93_000));
+    assert_eq!(crossing(&gas), Some(100_000 - 5_003));
 }
 
 /// A memory expansion the total could pay but the spendable part cannot halts `MemoryOOG` and
@@ -498,7 +502,8 @@ fn test_mload_expansion_within_the_withheld_part_records_a_crossing() {
 
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::MemoryOOG);
-    assert_eq!(crossing(&gas), Some(93));
+    // The record holds both parts: the 2 spendable and the 93 withheld.
+    assert_eq!(crossing(&gas), Some(2 + 93));
     assert_eq!(
         (gas.spendable(), gas.withheld()),
         (2, 93),
@@ -537,8 +542,9 @@ fn test_static_gas_failure_within_the_withheld_part_records_a_crossing() {
     let (_, action) = run_warm(&[PUSH0, STOP], 100, 99);
     let (result, gas) = returned(&action);
     assert_eq!(result, InstructionResult::OutOfGas);
-    // The halt zeroed the withheld part; the record still holds it.
-    assert_eq!(crossing(&gas), Some(99));
+    // The halt zeroed the regular gas; the record still holds all of it, since `PUSH0` was the
+    // first charge.
+    assert_eq!(crossing(&gas), Some(100));
     assert_eq!(
         (gas.spendable(), gas.withheld()),
         (0, 0),

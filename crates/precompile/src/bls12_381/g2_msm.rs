@@ -14,7 +14,8 @@ eth_precompile_fn!(g2_msm_precompile, g2_msm);
 
 /// [EIP-2537](https://eips.ethereum.org/EIPS/eip-2537#specification) BLS12_G2MSM precompile.
 pub const PRECOMPILE: Precompile =
-    Precompile::new(PrecompileId::Bls12G2Msm, G2_MSM_ADDRESS, g2_msm_precompile);
+    Precompile::new(PrecompileId::Bls12G2Msm, G2_MSM_ADDRESS, g2_msm_precompile)
+        .with_required_gas(crate::required_gas::bls12_g2_msm);
 
 /// Implements EIP-2537 G2MSM precompile.
 /// G2 multi-scalar-multiplication call expects `288*k` bytes as an input that is interpreted

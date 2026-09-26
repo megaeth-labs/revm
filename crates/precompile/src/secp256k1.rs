@@ -29,7 +29,8 @@ pub const ECRECOVER: Precompile = Precompile::new(
     PrecompileId::EcRec,
     crate::u64_to_address(1),
     ecrecover_precompile,
-);
+)
+.with_required_gas(crate::required_gas::ecrecover);
 
 /// `ecrecover` precompile function. Read more about input and output format in [this module docs](self).
 pub fn ec_recover_run(input: &[u8], gas_limit: u64) -> EthPrecompileResult {

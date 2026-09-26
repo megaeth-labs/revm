@@ -20,8 +20,8 @@ pub use withheld::WithheldCrossing;
 /// the post-execution reimbursement. Deductions that are not the frame's own regular work draw
 /// the withheld part first ([`record_withheld_first_cost`](Self::record_withheld_first_cost)). A
 /// regular charge the withheld part would have paid fails as it would with nothing withheld, and
-/// leaves behind a [`WithheldCrossing`] that holds the withheld part at the charge. With nothing
-/// withheld, which is the default, every method behaves as it did before the withheld part
+/// leaves behind a [`WithheldCrossing`] that holds the regular gas left before the charge. With
+/// nothing withheld, which is the default, every method behaves as it did before the withheld part
 /// existed.
 ///
 /// Credits of regular gas land on the spendable part, so they can lift it above what a consumer
@@ -115,10 +115,16 @@ pub struct GasTracker {
     #[cfg_attr(feature = "serde", serde(default))]
     withheld: u64,
     /// The record of the last failed regular charge the withheld part would have paid
-    /// ([`withheld_crossing`](Self::withheld_crossing)): the withheld part at that charge. One
-    /// word, since the withheld part in a crossing is never zero.
+    /// ([`withheld_crossing`](Self::withheld_crossing)): the regular gas left before that
+    /// charge. One word, since the regular gas left at a crossing is never zero.
     ///
-    /// Encodings made before this field existed decode it as `None`.
+    /// In a format that carries field names, such as JSON, encodings made before this field
+    /// existed decode it as `None`, and a record encoded while it held the withheld part, under
+    /// the field name `withheld`, does not decode: the value meant something else, so it is
+    /// refused rather than read as the regular gas left. A format that encodes a struct by
+    /// position, such as bincode, cannot tell the two records apart and reads the old one as the
+    /// regular gas left, so a record persisted in such a format must not cross an upgrade of this
+    /// crate.
     #[cfg_attr(feature = "serde", serde(default))]
     withheld_crossing: Option<WithheldCrossing>,
 }
