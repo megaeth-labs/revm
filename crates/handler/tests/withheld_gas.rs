@@ -2,13 +2,14 @@
 //!
 //! The interpreter here gets one extra opcode, `WITHHOLD`, that does what a consumer capping a
 //! frame's regular gas does: it moves the popped amount from the frame's spendable gas to its
-//! withheld gas ([`Gas::withhold`]). Every test runs a transaction twice, once withholding and once
-//! withholding nothing at the same cost, and compares what the caller of the withholding frame
-//! sees: withheld gas is regular gas held back from regular charges, not gas spent, so it goes
-//! back to the caller wherever unspent gas does.
+//! withheld gas ([`Gas::withhold`]). Every transaction test runs a transaction twice, once
+//! withholding and once withholding nothing at the same cost, and compares what the caller of the
+//! withholding frame sees: withheld gas is regular gas held back from regular charges, not gas
+//! spent, so it goes back to the caller wherever unspent gas does.
 //!
 //! The handler is the mainnet one, observed through an override that leaves its behaviour alone:
-//! each frame's gas is recorded as the frame returns, before its caller settles it.
+//! each frame's gas is recorded as the frame returns, before its caller settles it. One test calls
+//! `return_create` directly instead, for the result it hands to the handler.
 //!
 //! [`Gas::withhold`]: interpreter::Gas::withhold
 
@@ -19,16 +20,16 @@ use context::{
     result::{EVMError, ExecutionResult, HaltReason, Output},
     Context, ContextSetters, Evm, TxEnv,
 };
-use context_interface::Database;
+use context_interface::{ContextTr, Database, JournalTr};
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use interpreter::{
-    interpreter::EthInterpreter, interpreter_action::FrameInit, GasTracker, Instruction,
-    InstructionContext, InstructionExecResult, InstructionResult,
+    interpreter::EthInterpreter, interpreter_action::FrameInit, Gas, GasTracker, Instruction,
+    InstructionContext, InstructionExecResult, InstructionResult, InterpreterResult,
 };
 use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
 use revm_handler::{
-    instructions::EthInstructions, EthPrecompiles, EvmTr, FrameResult, Handler, ItemOrResult,
-    MainContext, MainnetContext, MainnetEvm,
+    instructions::EthInstructions, return_create, EthPrecompiles, EvmTr, FrameResult, Handler,
+    ItemOrResult, MainContext, MainnetContext, MainnetEvm,
 };
 use state::{AccountInfo, Bytecode};
 
@@ -263,9 +264,9 @@ fn test_a_child_returns_its_withheld_gas_like_unspent_gas() {
 }
 
 /// A child whose regular charge fails within its withheld gas halts, like any out-of-gas, and
-/// its frame result carries the crossing to the handler, holding the withheld part at the failed
-/// charge. Its caller loses the forward, exactly as it does when the child halts with nothing
-/// withheld.
+/// its frame result carries the crossing to the handler, holding the regular gas left before the
+/// failed charge. Its caller loses the forward, exactly as it does when the child halts with
+/// nothing withheld.
 #[test]
 fn test_a_crossing_halt_reaches_the_handler() {
     // One word of memory at an offset whose expansion costs more than the child keeps spendable
@@ -281,9 +282,11 @@ fn test_a_crossing_halt_reaches_the_handler() {
     let crossing = gas
         .withheld_crossing()
         .expect("the crossing reaches the handler");
-    assert_eq!(crossing.withheld(), CHILD_GAS - 10_000);
-    // A memory expansion that fails leaves the child's gas as it was.
-    assert_eq!(gas.withheld(), crossing.withheld());
+    // A memory expansion that fails leaves the child's gas as it was, so the record is the
+    // child's gas in the result: both parts of it, not the withheld part alone.
+    assert_eq!(gas.withheld(), CHILD_GAS - 10_000);
+    assert_eq!(crossing.remaining(), gas.remaining());
+    assert!(crossing.remaining() > gas.withheld());
     assert_eq!(
         unwithheld.child().0,
         InstructionResult::Stop,
@@ -296,10 +299,10 @@ fn test_a_crossing_halt_reaches_the_handler() {
 }
 
 /// An `OutOfGas` crossing zeroes the child's gas before its result reaches the handler, withheld
-/// part included. The record still holds the withheld part, so the handler can read from the
-/// frame result alone what the child had withheld.
+/// part included. The record still holds the regular gas left before the failed charge, so the
+/// handler can read from the frame result alone what the child had, and put it back.
 #[test]
-fn test_an_out_of_gas_crossing_keeps_the_withheld_part_on_its_record() {
+fn test_an_out_of_gas_crossing_keeps_the_regular_gas_left_on_its_record() {
     // After the `PUSH4` of `WITHHOLD` the child has `CHILD_GAS - 3` left; withholding all but one
     // of it leaves the `PUSH0` that follows, which costs two, short by one.
     let withheld = CHILD_GAS - 4;
@@ -316,10 +319,55 @@ fn test_an_out_of_gas_crossing_keeps_the_withheld_part_on_its_record() {
     let crossing = gas
         .withheld_crossing()
         .expect("the crossing reaches the handler");
-    assert_eq!(crossing.withheld(), withheld);
+    // The one spendable gas and the withheld part: `CHILD_GAS - 3`, all the child had left.
+    assert_eq!(crossing.remaining(), 1 + withheld);
+    assert_eq!(crossing.remaining(), CHILD_GAS - 3);
 
     assert_eq!(crossed.contract_gas(), halted.contract_gas());
     assert_eq!(crossed.returned[1].1.withheld_crossing(), None);
+}
+
+/// `return_create`'s own `OutOfGas`, on a code-deposit or code-hash charge that crossed, zeroes
+/// nothing, unlike an `OutOfGas` halt of the interpreter: the frame result it hands to the handler
+/// keeps both parts and the record, so putting the regular gas back from the record keeps the
+/// split as well.
+#[test]
+fn test_return_create_out_of_gas_on_a_crossing_keeps_both_parts() {
+    let parts = |gas: &Gas| (gas.spendable(), gas.withheld(), gas.remaining());
+    // Homestead charges 200 to deposit one byte; Amsterdam charges nothing for the deposit and 6
+    // to hash the code. With everything withheld, the first of them crosses.
+    for spec in [SpecId::HOMESTEAD, SpecId::AMSTERDAM] {
+        let mut ctx: TestContext = Context::mainnet()
+            .with_db(Db::default())
+            .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(spec));
+        ctx.journal_mut().load_account(CONTRACT).unwrap();
+        let checkpoint = ctx.journal_mut().checkpoint();
+        let mut gas = Gas::new(1_000);
+        gas.withhold(1_000);
+        let mut result =
+            InterpreterResult::new(InstructionResult::Return, Bytes::from_static(&[0]), gas);
+
+        return_create(&mut ctx, checkpoint, &mut result, CONTRACT);
+
+        assert_eq!(result.result, InstructionResult::OutOfGas, "{spec:?}");
+        assert_eq!(
+            parts(&result.gas),
+            (0, 1_000, 1_000),
+            "{spec:?}: nothing zeroed"
+        );
+        let crossing = result
+            .gas
+            .withheld_crossing()
+            .expect("the deposit's charge crossed");
+        assert_eq!(crossing.remaining(), 1_000, "{spec:?}");
+
+        result.gas.set_remaining(crossing.remaining());
+        assert_eq!(
+            parts(&result.gas),
+            (0, 1_000, 1_000),
+            "{spec:?}: the split comes back as it was"
+        );
+    }
 }
 
 /// Gas a caller withholds is forwarded like the rest: the child's gas limit is 63/64 of the
