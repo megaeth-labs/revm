@@ -51,8 +51,8 @@ impl Gas {
     }
 
     /// Returns the record of the last failed regular charge the withheld part would have paid,
-    /// since the record was last cleared: the withheld part at that charge. It survives
-    /// [`spend_all`](Self::spend_all).
+    /// since the record was last cleared: the regular gas left before that charge, spendable and
+    /// withheld parts together. It survives [`spend_all`](Self::spend_all).
     ///
     /// See [`GasTracker::withheld_crossing`](super::GasTracker::withheld_crossing).
     #[inline]
@@ -145,14 +145,17 @@ mod tests {
             (0, 0, 0)
         );
         let crossing = gas.withheld_crossing().expect("a crossing");
-        assert_eq!(crossing.withheld(), 90, "the withheld part the halt zeroed");
+        assert_eq!(crossing.remaining(), 100, "the regular gas the halt zeroed");
+
+        gas.set_remaining(crossing.remaining());
+        assert_eq!(gas.remaining(), 100, "put back exactly");
 
         gas.clear_withheld_crossing();
         assert_eq!(gas.withheld_crossing(), None);
     }
 
     /// A record a consumer sets reads back as the record a failed charge leaves with the same
-    /// withheld part, leaves both parts alone, and is cleared by setting `None`.
+    /// regular gas left, leaves both parts alone, and is cleared by setting `None`.
     #[test]
     fn test_set_withheld_crossing_sets_reads_and_clears() {
         let mut charged = Gas::new(100);
@@ -161,7 +164,7 @@ mod tests {
 
         let mut marked = Gas::new(100);
         marked.withhold(90);
-        let crossing = WithheldCrossing::new(NonZeroU64::new(90).unwrap());
+        let crossing = WithheldCrossing::with_remaining(NonZeroU64::new(100).unwrap());
 
         marked.set_withheld_crossing(Some(crossing));
 
@@ -179,7 +182,7 @@ mod tests {
     fn test_a_set_crossing_survives_spend_all() {
         let mut gas = Gas::new(100);
         gas.withhold(90);
-        let crossing = WithheldCrossing::new(NonZeroU64::new(90).unwrap());
+        let crossing = WithheldCrossing::with_remaining(NonZeroU64::new(100).unwrap());
         gas.set_withheld_crossing(Some(crossing));
 
         gas.spend_all();
