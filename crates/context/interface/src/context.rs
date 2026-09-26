@@ -5,8 +5,12 @@ use crate::{
     result::FromStringError, Block, Cfg, Database, Host, JournalTr, LocalContextTr, Transaction,
 };
 use auto_impl::auto_impl;
-use primitives::StorageValue;
+use primitives::{Bytes, StorageValue};
 use std::string::String;
+
+mod code_deposit;
+
+pub use code_deposit::CodeDeposit;
 
 /// Trait that defines the context of the EVM execution.
 ///
@@ -158,6 +162,46 @@ pub trait ContextTr: Host {
     fn cfg_journal_mut(&mut self) -> (&Self::Cfg, &mut Self::Journal) {
         let (_, _, cfg, journal, _, _) = self.all_mut();
         (cfg, journal)
+    }
+
+    /// Admits or refuses the code deposit `return_create` is about to commit.
+    ///
+    /// Called once for every creation `return_create` deploys, on the plain and the inspected
+    /// path alike, after it validated the code and recorded every charge of the deposit on the
+    /// creating frame's gas, and before it commits the frame's journal checkpoint
+    /// ([`CodeDeposit`]). A creation `return_create` fails itself, out of gas on a deposit
+    /// charge included, fails as before and is never offered.
+    ///
+    /// Before Homestead a frame that cannot pay the code-deposit cost does not fail:
+    /// `return_create` deploys empty code instead, and offers that deposit, with empty code and no
+    /// charge. If the failed charge was a crossing of the frame's withheld gas,
+    /// [`gas_after`](CodeDeposit::gas_after) carries its record
+    /// ([`GasTracker::withheld_crossing`](crate::cfg::gas::GasTracker::withheld_crossing)) and
+    /// [`gas_before`](CodeDeposit::gas_before) does not: an admitted deposit returns with the
+    /// record, and a refused one, put back to `gas_before`, discards it.
+    ///
+    /// - `Ok(())` admits it: the checkpoint is committed and the code is written, as without this
+    ///   hook.
+    /// - `Err(output)` refuses it: the checkpoint is reverted, so no state change of the creation
+    ///   is kept and no code is written; the frame's gas is put back to
+    ///   [`gas_before`](CodeDeposit::gas_before), so none of the deposit's charges is paid; and the
+    ///   creation ends as a `Revert` with `output` as its revert data. From there it settles as a
+    ///   creation whose init code reverted: its caller gets its unspent gas back, a zero address
+    ///   and `output` as return data.
+    ///
+    /// The deposit's charges are made before it is offered, and with them the lookup of its state
+    /// gas price through [`Host::state_gas_price`]. So that lookup is made whether or not the
+    /// deposit is admitted: a refusal puts the gas back, and leaves whatever the lookup recorded.
+    ///
+    /// A hook that fails fatally records the cause in [`error`](Self::error), as a failed
+    /// [`Host::state_gas_price`] lookup does, and refuses; the transaction then returns the
+    /// error.
+    ///
+    /// The default admits every deposit.
+    #[inline]
+    fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+        let _ = deposit;
+        Ok(())
     }
 }
 
