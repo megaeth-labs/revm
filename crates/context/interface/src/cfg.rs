@@ -168,3 +168,112 @@ pub enum CreateScheme {
         address: Address,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A configuration that implements only the trait's required methods, so every switch with
+    /// a default body is read through that default.
+    struct RequiredOnly(GasParams);
+
+    impl Cfg for RequiredOnly {
+        type Spec = SpecId;
+
+        fn chain_id(&self) -> u64 {
+            1
+        }
+
+        fn tx_chain_id_check(&self) -> bool {
+            true
+        }
+
+        fn tx_gas_limit_cap(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn spec(&self) -> SpecId {
+            SpecId::default()
+        }
+
+        fn max_blobs_per_tx(&self) -> Option<u64> {
+            None
+        }
+
+        fn max_code_size(&self) -> usize {
+            0x6000
+        }
+
+        fn max_initcode_size(&self) -> usize {
+            0xC000
+        }
+
+        fn is_eip3607_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_eip3541_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_eip7623_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_balance_check_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_block_gas_limit_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_nonce_check_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_base_fee_check_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_priority_fee_check_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_fee_charge_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_eip7708_disabled(&self) -> bool {
+            false
+        }
+
+        fn is_eip8246_delayed_clear_disabled(&self) -> bool {
+            false
+        }
+
+        fn memory_limit(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn gas_params(&self) -> &GasParams {
+            &self.0
+        }
+
+        fn is_amsterdam_eip8037_enabled(&self) -> bool {
+            false
+        }
+
+        fn is_amsterdam_eip2780_enabled(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_the_trait_defaults_leave_every_switch_off() {
+        let cfg = RequiredOnly(GasParams::default());
+        assert!(!cfg.legacy_journal_semantics());
+        assert!(!cfg.enable_amsterdam_eip7708());
+        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
+    }
+}
