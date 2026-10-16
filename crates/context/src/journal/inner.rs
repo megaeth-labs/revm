@@ -358,6 +358,14 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         self.warm_addresses.legacy_journal_semantics()
     }
 
+    /// Whether EIP-7708 transfer logs are enabled independently of the spec id
+    /// (`JournalTr::set_amsterdam_eip7708_enabled`): the journal's own copy of the switch, the
+    /// one [`Self::eip7708_transfer_log`] reads.
+    #[inline]
+    pub const fn amsterdam_eip7708_enabled(&self) -> bool {
+        self.warm_addresses.amsterdam_eip7708_enabled()
+    }
+
     /// Whether EIP-7708 transfer logs should be emitted.
     ///
     /// True when the spec is Amsterdam or later, or when the EIP-7708 switch is on,
