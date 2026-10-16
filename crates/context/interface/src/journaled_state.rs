@@ -163,6 +163,18 @@ pub trait JournalTr {
         let _ = enabled;
     }
 
+    /// Runs the journal with revm 40.0.3's journal semantics at the two places this fork
+    /// changed them: a storage slot warmed while cold for the current transaction re-baselines
+    /// its EIP-2200 `original_value` (not only on a transaction id mismatch), and a `CodeChange`
+    /// entry reverts to `KECCAK_EMPTY` / no code rather than to the previous code.
+    ///
+    /// Default is a no-op so existing `JournalTr` implementors keep compiling. The journal
+    /// learns the value through the context's cfg sync, like
+    /// [`Self::set_amsterdam_eip7708_enabled`].
+    fn set_legacy_journal_semantics(&mut self, enabled: bool) {
+        let _ = enabled;
+    }
+
     /// Touches the account.
     fn touch_account(&mut self, address: Address);
 

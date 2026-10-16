@@ -622,6 +622,26 @@ impl EvmStorageSlot {
         self.is_cold = false;
         is_cold
     }
+
+    /// Marks the storage slot as warm as revm 40.0.3 did: `original_value` is re-baselined to
+    /// `present_value` whenever the slot is cold for `transaction_id` (transaction id mismatch
+    /// or the cold flag), not only on a transaction id mismatch.
+    ///
+    /// Returns the same cold flag as [`Self::mark_warm_with_transaction_id`]. Used by a journal
+    /// running with legacy journal semantics (`JournalTr::set_legacy_journal_semantics`).
+    #[inline]
+    pub const fn mark_warm_with_transaction_id_rebaselining_cold(
+        &mut self,
+        transaction_id: TransactionId,
+    ) -> bool {
+        let is_cold = self.is_cold_transaction_id(transaction_id);
+        if is_cold {
+            self.original_value = self.present_value;
+        }
+        self.transaction_id = transaction_id;
+        self.is_cold = false;
+        is_cold
+    }
 }
 
 #[cfg(test)]
@@ -845,6 +865,34 @@ mod tests {
         slot.transaction_id = tx_one;
         // Only if transaction id is same and is_cold is false, return false.
         assert!(!slot.mark_warm_with_transaction_id(tx_one));
+    }
+
+    #[test]
+    fn test_storage_slot_mark_warm_rebaselining_cold() {
+        let tx = TransactionId::ZERO;
+        // Cold-flagged, same transaction id, present != original: only the legacy warm
+        // re-baselines.
+        let mut slot = EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), tx);
+        slot.mark_cold();
+        let mut fork_slot = slot.clone();
+        assert!(fork_slot.mark_warm_with_transaction_id(tx));
+        assert_eq!(fork_slot.original_value, U256::ZERO);
+        assert!(slot.mark_warm_with_transaction_id_rebaselining_cold(tx));
+        assert_eq!(slot.original_value, U256::from(42));
+        assert!(!slot.is_cold);
+        // A warm slot with the same id is re-baselined by neither.
+        let mut warm = EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), tx);
+        assert!(!warm.mark_warm_with_transaction_id_rebaselining_cold(tx));
+        assert_eq!(warm.original_value, U256::ZERO);
+        // An id mismatch is re-baselined by both.
+        let mut next = tx;
+        next.increment();
+        let mut other = EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), tx);
+        assert!(other.mark_warm_with_transaction_id_rebaselining_cold(next));
+        assert_eq!(other.original_value, U256::from(42));
+        let mut other_fork = EvmStorageSlot::new_changed(U256::ZERO, U256::from(42), tx);
+        assert!(other_fork.mark_warm_with_transaction_id(next));
+        assert_eq!(other_fork.original_value, U256::from(42));
     }
 
     #[test]

@@ -345,6 +345,19 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         self.warm_addresses.set_amsterdam_eip7708_enabled(enabled);
     }
 
+    /// Runs the journal with revm 40.0.3's journal semantics; see
+    /// `JournalTr::set_legacy_journal_semantics`.
+    #[inline]
+    pub const fn set_legacy_journal_semantics(&mut self, enabled: bool) {
+        self.warm_addresses.set_legacy_journal_semantics(enabled);
+    }
+
+    /// Whether the journal runs with revm 40.0.3's journal semantics.
+    #[inline]
+    pub const fn legacy_journal_semantics(&self) -> bool {
+        self.warm_addresses.legacy_journal_semantics()
+    }
+
     /// Whether EIP-7708 transfer logs should be emitted.
     ///
     /// True when the spec is Amsterdam or later, or when the EIP-7708 switch is on,
@@ -396,8 +409,12 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         let account = self.state.get_mut(&address).unwrap();
         Self::touch_account(&mut self.journal, address, account);
 
-        let had_code_hash = account.info.code_hash;
-        let had_code = account.info.code.take();
+        let (had_code_hash, had_code) = if self.warm_addresses.legacy_journal_semantics() {
+            // revm 40.0.3 reverted a code change to an empty account's code.
+            (KECCAK_EMPTY, None)
+        } else {
+            (account.info.code_hash, account.info.code.take())
+        };
         self.journal
             .push(ENTRY::code_changed(address, had_code_hash, had_code));
 
@@ -917,15 +934,19 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     where
         'db: 'a,
     {
+        let legacy_journal_semantics = self.warm_addresses.legacy_journal_semantics();
         let account = self.state.get_mut(&address)?;
-        Some(JournaledAccount::new(
-            address,
-            account,
-            &mut self.journal,
-            db,
-            self.warm_addresses.access_list(),
-            self.transaction_id,
-        ))
+        Some(
+            JournaledAccount::new(
+                address,
+                account,
+                &mut self.journal,
+                db,
+                self.warm_addresses.access_list(),
+                self.transaction_id,
+            )
+            .with_legacy_journal_semantics(legacy_journal_semantics),
+        )
     }
 
     /// Loads account. If account is already loaded it will be marked as warm.
@@ -1002,7 +1023,8 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
                 db,
                 self.warm_addresses.access_list(),
                 self.transaction_id,
-            ),
+            )
+            .with_legacy_journal_semantics(self.warm_addresses.legacy_journal_semantics()),
             is_cold,
         ))
     }

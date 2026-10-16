@@ -37,6 +37,11 @@ pub struct WarmAddresses {
     /// constructible, so a new field would be a major API break.
     #[cfg_attr(feature = "serde", serde(default))]
     enable_amsterdam_eip7708: bool,
+    /// revm 40.0.3 journal semantics (`JournalTr::set_legacy_journal_semantics`).
+    ///
+    /// Stored here for the same reason as `enable_amsterdam_eip7708`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    legacy_journal_semantics: bool,
 }
 
 impl Default for WarmAddresses {
@@ -56,7 +61,20 @@ impl WarmAddresses {
             coinbase: None,
             access_list: AddressMap::default(),
             enable_amsterdam_eip7708: false,
+            legacy_journal_semantics: false,
         }
+    }
+
+    /// Sets whether the journal runs with revm 40.0.3's journal semantics.
+    #[inline]
+    pub(crate) const fn set_legacy_journal_semantics(&mut self, enabled: bool) {
+        self.legacy_journal_semantics = enabled;
+    }
+
+    /// Returns whether the journal runs with revm 40.0.3's journal semantics.
+    #[inline]
+    pub(crate) const fn legacy_journal_semantics(&self) -> bool {
+        self.legacy_journal_semantics
     }
 
     /// Enables EIP-7708 transfer logs independently of the spec id.

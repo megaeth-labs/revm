@@ -118,6 +118,13 @@ pub trait Cfg {
         false
     }
 
+    /// Returns whether the journal runs with revm 40.0.3's journal semantics
+    /// (`JournalTr::set_legacy_journal_semantics`). Default is `false`.
+    #[inline]
+    fn legacy_journal_semantics(&self) -> bool {
+        false
+    }
+
     /// Returns whether a system call places its EIP-8037 state-gas margin in the reservoir.
     ///
     /// When `true` and EIP-8037 is enabled, a system call runs on at most the base 30M regular
