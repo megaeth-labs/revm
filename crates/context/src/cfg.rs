@@ -160,15 +160,6 @@ pub struct CfgEnv<SPEC = SpecId> {
     /// default no-op emits no logs below Amsterdam.
     #[cfg_attr(feature = "serde", serde(default))]
     pub enable_amsterdam_eip7708: bool,
-    /// Runs the journal with revm 40.0.3's journal semantics: a storage slot warmed while cold
-    /// for the current transaction re-baselines its EIP-2200 `original_value`, and a
-    /// `CodeChange` entry reverts to `KECCAK_EMPTY` / no code. For an engine that must
-    /// reproduce revm 40.0.3 exactly; new code leaves it `false`.
-    ///
-    /// The journal learns this value through the context's cfg sync, as
-    /// [`CfgEnv::enable_amsterdam_eip7708`] does.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub legacy_journal_semantics: bool,
     /// Disables EIP-7708 (ETH transfers emit logs).
     ///
     /// By default, it is set to `false`.
@@ -195,6 +186,15 @@ pub struct CfgEnv<SPEC = SpecId> {
     /// By default, it is set to `false`: the whole system call gas limit is regular gas.
     #[cfg_attr(feature = "serde", serde(default))]
     pub system_call_state_gas_margin_in_reservoir: bool,
+    /// Runs the journal with revm 40.0.3's journal semantics: a storage slot warmed while cold
+    /// for the current transaction re-baselines its EIP-2200 `original_value`, and a
+    /// `CodeChange` entry reverts to `KECCAK_EMPTY` / no code. For an engine that must
+    /// reproduce revm 40.0.3 exactly; new code leaves it `false`.
+    ///
+    /// The journal learns this value through the context's cfg sync, as
+    /// [`CfgEnv::enable_amsterdam_eip7708`] does.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub legacy_journal_semantics: bool,
 }
 
 impl CfgEnv {
@@ -313,11 +313,11 @@ impl<SPEC> CfgEnv<SPEC> {
             enable_amsterdam_eip8037: self.enable_amsterdam_eip8037,
             enable_amsterdam_eip2780: self.enable_amsterdam_eip2780,
             enable_amsterdam_eip7708: self.enable_amsterdam_eip7708,
-            legacy_journal_semantics: self.legacy_journal_semantics,
             amsterdam_eip7708_disabled: self.amsterdam_eip7708_disabled,
             amsterdam_eip8246_delayed_clear_disabled: self.amsterdam_eip8246_delayed_clear_disabled,
             system_call_state_gas_margin_in_reservoir: self
                 .system_call_state_gas_margin_in_reservoir,
+            legacy_journal_semantics: self.legacy_journal_semantics,
         }
     }
 
@@ -427,10 +427,10 @@ impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
             enable_amsterdam_eip8037: is_amsterdam,
             enable_amsterdam_eip2780: is_amsterdam,
             enable_amsterdam_eip7708: false,
-            legacy_journal_semantics: false,
             amsterdam_eip7708_disabled: false,
             amsterdam_eip8246_delayed_clear_disabled: false,
             system_call_state_gas_margin_in_reservoir: false,
+            legacy_journal_semantics: false,
         }
     }
 
