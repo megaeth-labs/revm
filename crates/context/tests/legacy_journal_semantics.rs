@@ -125,6 +125,81 @@ fn test_reverted_account_set_code_leaves_no_code_when_switch_on() {
     assert_eq!(code_after_reverted_account_set_code(true), None);
 }
 
+/// The same cold-flagged slot through `Journal`, the path of the interpreter's SLOAD/SSTORE and
+/// of an inspector's `journal_mut().sload`/`sstore` (`JournaledAccount` built by
+/// `get_account_mut`), in both switch positions.
+fn journal_context_with_cold_flagged_slot(legacy: bool) -> Context {
+    let cfg = CfgEnv::new_with_spec(SpecId::OSAKA).with_legacy_journal_semantics(legacy);
+    let mut ctx: Context = Context::new(EmptyDB::new(), SpecId::OSAKA).with_cfg(cfg);
+    assert_eq!(ctx.journaled_state.inner.legacy_journal_semantics(), legacy);
+    let mut account = Account::from(AccountInfo {
+        balance: U256::from(1_000),
+        nonce: 1,
+        code_hash: KECCAK_EMPTY,
+        code: Some(Bytecode::default()),
+        account_id: None,
+    });
+    let mut slot =
+        EvmStorageSlot::new_changed(U256::ZERO, WRITTEN, ctx.journaled_state.transaction_id);
+    slot.mark_cold();
+    account.storage.insert(KEY, slot);
+    ctx.journaled_state.inner.state.insert(ADDRESS, account);
+    ctx
+}
+
+fn original_after_journal_sload(legacy: bool) -> U256 {
+    let mut ctx = journal_context_with_cold_flagged_slot(legacy);
+    let load = ctx.journaled_state.sload(ADDRESS, KEY).unwrap();
+    assert!(load.is_cold);
+    assert_eq!(load.data, WRITTEN);
+    ctx.journaled_state.inner.state[&ADDRESS].storage[&KEY].original_value
+}
+
+#[test]
+fn test_journal_sload_keeps_the_cold_flagged_slot_baseline_when_switch_off() {
+    assert_eq!(original_after_journal_sload(false), U256::ZERO);
+}
+
+#[test]
+fn test_journal_sload_rebaselines_the_cold_flagged_slot_when_switch_on() {
+    assert_eq!(original_after_journal_sload(true), WRITTEN);
+}
+
+/// `sstore` reports the EIP-2200 `original_value` it priced the write with.
+fn original_reported_by_journal_sstore(legacy: bool) -> U256 {
+    let mut ctx = journal_context_with_cold_flagged_slot(legacy);
+    let store = ctx
+        .journaled_state
+        .sstore(ADDRESS, KEY, U256::from(7))
+        .unwrap();
+    assert!(store.is_cold);
+    assert_eq!(store.data.present_value, WRITTEN);
+    assert_eq!(store.data.new_value, U256::from(7));
+    let slot = &ctx.journaled_state.inner.state[&ADDRESS].storage[&KEY];
+    assert_eq!(slot.present_value, U256::from(7));
+    assert_eq!(slot.original_value, store.data.original_value);
+    store.data.original_value
+}
+
+#[test]
+fn test_journal_sstore_keeps_the_cold_flagged_slot_baseline_when_switch_off() {
+    assert_eq!(original_reported_by_journal_sstore(false), U256::ZERO);
+}
+
+#[test]
+fn test_journal_sstore_rebaselines_the_cold_flagged_slot_when_switch_on() {
+    assert_eq!(original_reported_by_journal_sstore(true), WRITTEN);
+}
+
+#[test]
+fn test_journal_reports_the_eip7708_copy_the_cfg_sync_delivered() {
+    let cfg = CfgEnv::new_with_spec(SpecId::OSAKA).with_enable_amsterdam_eip7708(true);
+    let mut ctx: Context = Context::new(EmptyDB::new(), SpecId::OSAKA).with_cfg(cfg);
+    assert!(ctx.journaled_state.inner.amsterdam_eip7708_enabled());
+    ctx.journaled_state.set_amsterdam_eip7708_enabled(false);
+    assert!(!ctx.journaled_state.inner.amsterdam_eip7708_enabled());
+}
+
 #[test]
 fn test_switch_is_off_by_default() {
     let ctx: Context = Context::new(EmptyDB::new(), SpecId::OSAKA);
