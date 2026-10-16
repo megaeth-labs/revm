@@ -87,6 +87,44 @@ fn test_reverted_code_change_leaves_no_code_when_switch_on() {
     assert_eq!(code_after_reverted_code_change(true), None);
 }
 
+/// The same code change through `JournaledAccountTr::set_code`, which records the previous code
+/// it replaced.
+fn code_after_reverted_account_set_code(legacy: bool) -> Option<Bytecode> {
+    use context_interface::journaled_state::account::JournaledAccountTr;
+
+    let mut journal = JournalInner::<JournalEntry>::new();
+    journal.set_legacy_journal_semantics(legacy);
+    journal
+        .state
+        .insert(ADDRESS, Account::new_not_existing(journal.transaction_id));
+    let checkpoint = journal.checkpoint();
+    let code = Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]));
+    let hash = code.hash_slow();
+    let mut db = EmptyDB::default();
+    journal
+        .load_account_mut(&mut db, ADDRESS)
+        .unwrap()
+        .data
+        .set_code(hash, code);
+    journal.checkpoint_revert(checkpoint);
+    let info = &journal.state[&ADDRESS].info;
+    assert_eq!(info.code_hash, KECCAK_EMPTY);
+    info.code.clone()
+}
+
+#[test]
+fn test_reverted_account_set_code_restores_previous_code_when_switch_off() {
+    assert_eq!(
+        code_after_reverted_account_set_code(false),
+        Some(Bytecode::default())
+    );
+}
+
+#[test]
+fn test_reverted_account_set_code_leaves_no_code_when_switch_on() {
+    assert_eq!(code_after_reverted_account_set_code(true), None);
+}
+
 #[test]
 fn test_switch_is_off_by_default() {
     let ctx: Context = Context::new(EmptyDB::new(), SpecId::OSAKA);
