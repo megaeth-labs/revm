@@ -37,8 +37,10 @@ impl Gas {
     /// failure that caused this halt, and it is kept; the unchecked charge's record also holds
     /// the regular gas from before the spendable part wrapped. With none there, nothing failed:
     /// the halt is a cold access the instruction refused before its charge, because the frame
-    /// could not pay it, or an out-of-gas a consumer's instruction returned itself. Either way the
-    /// regular gas is as it was when the frame stopped.
+    /// could not pay it, an out-of-gas a consumer's instruction returned itself, or one an
+    /// instruction hook asked for ([`Host::write_completed`](crate::Host::write_completed),
+    /// [`Host::frame_starting`](crate::Host::frame_starting)). Either way the regular gas is as it
+    /// was when the frame stopped.
     #[inline]
     pub(crate) const fn record_out_of_gas_halt(&mut self) {
         if self.failed_charge_remaining().is_none() {

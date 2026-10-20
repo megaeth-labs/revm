@@ -138,7 +138,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
   - a regular charge (`record_regular_cost`, `record_cost_unsafe`), whether or not the withheld part would have paid it;
   - a state or history charge whose spill past the reservoir regular gas cannot pay (`record_state_cost`, `record_history_cost`), whether the reservoir paid nothing or part of it; the record is regular gas alone, and the reservoir is left as it was;
   - a forward to a child that regular gas cannot pay (`record_withheld_first_cost`), which only a call before EIP-150 can fail;
-  - an out-of-gas halt of the interpreter with no record there, before the halt zeroes the frame's gas: a cold access the instruction refused before its charge because the frame could not pay it (an account read, `SLOAD`, `SSTORE`, `SELFDESTRUCT`, a call's target and the account it delegates to), or an out-of-gas a consumer's instruction returned itself; a record already there is the failure that caused the halt, and is kept;
+  - an out-of-gas halt of the interpreter with no record there, before the halt zeroes the frame's gas: a cold access the instruction refused before its charge because the frame could not pay it (an account read, `SLOAD`, `SSTORE`, `SELFDESTRUCT`, a call's target and the account it delegates to), an out-of-gas a consumer's instruction returned itself, or one an instruction hook asked for (see Completed-write hook and Frame-start hook); a record already there is the failure that caused the halt, and is kept;
   - a precompile run that needs more gas than the frame has: the frame's whole gas limit, as nothing ran.
 
   The failed deduction took nothing, so the record is all the regular gas the frame had; the unchecked charge records it before the spendable part wraps, and a failure with nothing left records `Some(0)`.
@@ -203,6 +203,33 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Consumer.** MegaETH's legacy engine, which replays blocks produced on revm 40.0.3 and must reproduce them exactly. The two behaviours are inside the journal.
 - **Removal.** When no consumer needs to reproduce revm 40.0.3's journal.
 - **Default.** Off, which is the picked behaviour; the journal reads one `bool` when it warms a cold slot and when it records a code change.
+
+### Completed-write hook
+
+- **API.** `Host::write_completed(&mut self, write: CompletedWrite<'_>, gas: &mut GasTracker) -> WriteVerdict`, whose default continues.
+  `CompletedWrite` (`#[non_exhaustive]`: `Sstore`, `Log`, `SelfDestruct`, with the write's account and what the instruction knows of it) and `WriteVerdict` (`Continue`, `OutOfGas`, `Revert(Bytes)`), in `revm_context_interface::host`.
+- **Contract.** `SSTORE`, `LOG0`–`LOG4` and `SELFDESTRUCT` call it once the write is in the journal and every charge the instruction makes has been made, its refund included, so only on the instruction's success path, on the plain and the inspected path.
+  `gas` is the running frame's tracker. The hook may debit and credit it, and the instruction uses it as the hook left it: nothing is charged after the hook. A charge the hook makes that fails records as any failed charge does (see The failed-charge record), whatever the verdict.
+  `Continue` ends the instruction as it would have ended. `OutOfGas` fails it as a failed charge does: the frame halts out of gas, and the halt records the regular gas the hook left unless a failed charge already did. `Revert(output)` ends the frame as a `Revert` with `output`, on its gas as the hook left it; a `SELFDESTRUCT` so reverted does not self-destruct.
+  Only these instructions call it: a write the journal records any other way (a value transfer and its log, deployed code, an inspector's or a precompile's write) is not offered.
+- **Consumer.** mega-evm meters each completed write against its per-transaction limits and charges its history. Without the hook it wraps the three instructions and stages what its `Host` saw.
+- **Removal.** When upstream exposes an equivalent point, or when mega-evm stops metering writes.
+- **Default.** Continues and touches nothing; the facts are references to values the instruction holds anyway.
+  Where measured (callgrind, the fork's release profile), `SSTORE` and `LOG0`–`LOG4` compile to the same code as without the hook, and `SELFDESTRUCT`'s is laid out differently and runs one instruction fewer.
+
+### Frame-start hook
+
+- **API.** `Host::frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool`, whose default returns `true`.
+  `FrameStart` (`#[non_exhaustive]`, built with `FrameStart::new`: `kind`, `caller`, `target`, `value`, `forward`) and `FrameStartKind`, in `revm_context_interface::host`.
+- **Contract.** `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2` call it after every charge they make and after the forward is taken from the caller's gas, before they build the frame's input, on the plain and the inspected path.
+  `forward` is the regular gas taken: the frame's gas limit without a value call's stipend. `value` is the value transferred, zero for `DELEGATECALL` and `STATICCALL`; `target` is the account the frame runs as, `None` for a creation.
+  `gas` is the caller's tracker. The hook may debit and credit it, and the instruction uses it as the hook left it: nothing is charged after the hook, and the frame's input copies its reservoir from it, so a frame the handler runs and one it answers without running (a precompile) both start from the reservoir the hook left. A charge the hook makes that fails records as any failed charge does, whatever the answer.
+  `true` hands the start to the handler, which may still refuse it (call depth, balance) or answer it without a frame; what the hook did to `gas` stands either way. `false` fails the instruction out of gas and starts no frame: the forward stays taken unless the hook gave it back, and the halt records the regular gas the hook left unless a failed charge already did.
+  A creation the instruction ends before its forward (EIP-8037's checks of the endowment, the nonce and the depth) is not offered.
+- **Consumer.** mega-evm charges a start's write records after the forward and before the frame inherits the caller's reservoir. Without the hook it wraps the call and creation instructions, rewrites the reservoir revm already copied into the input, and takes the input back when the charge fails.
+- **Removal.** When upstream exposes an equivalent point, or when mega-evm stops charging frame starts.
+- **Default.** Returns `true` and touches nothing.
+  Where measured (callgrind, the fork's release profile), `CREATE` and `CREATE2` compile to the same code as without the hook, and a call runs one instruction more: the store of the forward its helper returns, about 0.05% of a call to a contract that stops.
 
 ## Baseline behaviour the fork changes
 

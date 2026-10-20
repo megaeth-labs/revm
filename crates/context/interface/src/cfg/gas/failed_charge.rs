@@ -28,7 +28,9 @@ impl GasTracker {
     ///
     /// The interpreter records it too when it halts a frame out of gas with no record there: a
     /// cold access the instruction refused before its charge, because the frame could not pay it,
-    /// or an out-of-gas a consumer's instruction returned itself. The handler records it where a
+    /// an out-of-gas a consumer's instruction returned itself, or one an instruction hook asked
+    /// for ([`Host::write_completed`](crate::Host::write_completed),
+    /// [`Host::frame_starting`](crate::Host::frame_starting)). The handler records it where a
     /// precompile runs out of gas: the frame's whole gas limit, as nothing ran. A consumer that
     /// builds an out-of-gas result itself can record the same with
     /// [`set_failed_charge_remaining`](Self::set_failed_charge_remaining).
