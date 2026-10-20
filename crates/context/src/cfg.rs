@@ -177,15 +177,6 @@ pub struct CfgEnv<SPEC = SpecId> {
     ///
     /// [EIP-8246]: https://eips.ethereum.org/EIPS/eip-8246
     pub amsterdam_eip8246_delayed_clear_disabled: bool,
-    /// Places the EIP-8037 state-gas margin of a system call in the reservoir.
-    ///
-    /// When enabled together with EIP-8037, a system call runs on at most the base 30M regular
-    /// gas and the rest of its gas limit becomes the state-gas reservoir, as EIP-8037 specifies
-    /// for system calls. Transactions are not affected.
-    ///
-    /// By default, it is set to `false`: the whole system call gas limit is regular gas.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub system_call_state_gas_margin_in_reservoir: bool,
     /// Runs the journal with revm 40.0.3's journal semantics: a storage slot warmed while cold
     /// for the current transaction re-baselines its EIP-2200 `original_value`, and a
     /// `CodeChange` entry reverts to `KECCAK_EMPTY` / no code. For an engine that must
@@ -315,8 +306,6 @@ impl<SPEC> CfgEnv<SPEC> {
             enable_amsterdam_eip7708: self.enable_amsterdam_eip7708,
             amsterdam_eip7708_disabled: self.amsterdam_eip7708_disabled,
             amsterdam_eip8246_delayed_clear_disabled: self.amsterdam_eip8246_delayed_clear_disabled,
-            system_call_state_gas_margin_in_reservoir: self
-                .system_call_state_gas_margin_in_reservoir,
             legacy_journal_semantics: self.legacy_journal_semantics,
         }
     }
@@ -383,12 +372,6 @@ impl<SPEC> CfgEnv<SPEC> {
         self.legacy_journal_semantics = enable;
         self
     }
-
-    /// Sets whether a system call places its EIP-8037 state-gas margin in the reservoir.
-    pub const fn with_system_call_state_gas_margin_in_reservoir(mut self, enable: bool) -> Self {
-        self.system_call_state_gas_margin_in_reservoir = enable;
-        self
-    }
 }
 
 impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
@@ -429,7 +412,6 @@ impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
             enable_amsterdam_eip7708: false,
             amsterdam_eip7708_disabled: false,
             amsterdam_eip8246_delayed_clear_disabled: false,
-            system_call_state_gas_margin_in_reservoir: false,
             legacy_journal_semantics: false,
         }
     }
@@ -665,11 +647,6 @@ impl<SPEC: Into<SpecId> + Clone> Cfg for CfgEnv<SPEC> {
     fn legacy_journal_semantics(&self) -> bool {
         self.legacy_journal_semantics
     }
-
-    #[inline]
-    fn system_call_state_gas_margin_in_reservoir(&self) -> bool {
-        self.system_call_state_gas_margin_in_reservoir
-    }
 }
 
 impl<SPEC: Default + Into<SpecId> + Clone> Default for CfgEnv<SPEC> {
@@ -702,28 +679,5 @@ mod test {
         let cfg = CfgEnv::new_with_spec(SpecId::OSAKA).with_enable_amsterdam_eip7708(true);
         assert!(cfg.enable_amsterdam_eip7708());
         assert!(!cfg.spec.is_enabled_in(SpecId::AMSTERDAM));
-    }
-
-    #[test]
-    fn test_system_call_state_gas_margin_switch_defaults_off() {
-        let cfg: CfgEnv = Default::default();
-        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
-        // Amsterdam turns EIP-8037 on, but not the switch.
-        let cfg = CfgEnv::new_with_spec(SpecId::AMSTERDAM);
-        assert!(cfg.is_amsterdam_eip8037_enabled());
-        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
-    }
-
-    #[test]
-    fn test_system_call_state_gas_margin_switch_survives_a_spec_change() {
-        let cfg = CfgEnv::new_with_spec(SpecId::OSAKA)
-            .with_system_call_state_gas_margin_in_reservoir(true);
-        assert!(cfg.system_call_state_gas_margin_in_reservoir());
-
-        let cfg = cfg.with_spec_and_mainnet_gas_params(SpecId::AMSTERDAM);
-        assert!(cfg.system_call_state_gas_margin_in_reservoir());
-
-        let cfg = cfg.with_system_call_state_gas_margin_in_reservoir(false);
-        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
     }
 }
