@@ -1,18 +1,20 @@
-//! The record a failed regular charge leaves, at the instructions that charge a frame's gas.
+//! The record a failed charge leaves, at the instructions that charge a frame's gas.
 //!
-//! Each test runs a frame until it returns and reads its result's [`Gas`]: a frame whose regular
-//! charge failed carries the regular gas it had left before that charge
+//! Each test runs a frame until it returns and reads its result's [`Gas`]: a frame whose charge
+//! failed carries the regular gas it had left before that charge
 //! ([`Gas::failed_charge_remaining`]), whatever the halt did to its gas, and a frame whose
 //! charges all succeeded carries none.
 
 use bytecode::{opcode::*, Bytecode};
+use context_interface::host::LoadError;
 use primitives::{hardfork::SpecId, Bytes};
 use revm_interpreter::{
     host::DummyHost,
     instruction_table,
     instructions::gas_table_spec,
     interpreter::{EthInterpreter, ExtBytecode},
-    Gas, InputsImpl, InstructionResult, Interpreter, InterpreterAction, SharedMemory,
+    Gas, InputsImpl, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
+    Interpreter, InterpreterAction, SharedMemory,
 };
 
 const SPEC: SpecId = SpecId::OSAKA;
@@ -20,18 +22,23 @@ const SPEC: SpecId = SpecId::OSAKA;
 /// Runs `code` with `gas_limit`, of which `withheld` is withheld before the first instruction,
 /// and returns the frame's result and gas.
 fn run(code: &[u8], gas_limit: u64, withheld: u64) -> (InstructionResult, Gas) {
+    run_on(SPEC, code, gas_limit, withheld)
+}
+
+/// [`run`] on `spec`.
+fn run_on(spec: SpecId, code: &[u8], gas_limit: u64, withheld: u64) -> (InstructionResult, Gas) {
     let mut interpreter = Interpreter::<EthInterpreter>::new(
         SharedMemory::new(),
         ExtBytecode::new(Bytecode::new_raw(Bytes::copy_from_slice(code))),
         InputsImpl::default(),
         false,
-        SPEC,
+        spec,
         gas_limit,
     );
     interpreter.gas.withhold(withheld);
-    let mut host = DummyHost::new(SPEC);
+    let mut host = DummyHost::new(spec);
     let table = instruction_table::<EthInterpreter, DummyHost>();
-    let gas = gas_table_spec(SPEC);
+    let gas = gas_table_spec(spec);
     match interpreter.run_plain(&table, &gas, &mut host) {
         InterpreterAction::Return(result) => (result.result, result.gas),
         other => panic!("expected the frame to return, got {other:?}"),
@@ -128,4 +135,122 @@ fn test_a_failure_beyond_the_withheld_part_records_the_regular_gas_left() {
     assert_eq!(result, InstructionResult::OutOfGas);
     assert_eq!(gas.failed_charge_remaining(), Some(1 + 2));
     assert_eq!(gas.withheld_crossing(), None);
+}
+
+/// Before EIP-150 a call forwards the gas it asks for, without the 63/64 cap: a forward the frame
+/// cannot pay fails the instruction out of gas. The forward draws the withheld part first, so it
+/// fails only beyond the whole regular gas, and the record holds both parts.
+#[test]
+fn test_a_failed_forward_records_the_regular_gas_left() {
+    // `DELEGATECALL(u32::MAX, 0, 0, 0, 0, 0)`: the pushes cost 18.
+    let mut code = [PUSH1, 0].repeat(4);
+    code.push(PUSH20);
+    code.extend_from_slice(&[0; 20]);
+    code.extend_from_slice(&[PUSH4, 0xff, 0xff, 0xff, 0xff, DELEGATECALL, STOP]);
+    let call_gas = u64::from(gas_table_spec(SpecId::HOMESTEAD)[DELEGATECALL as usize]);
+
+    for withheld in [0, 500] {
+        let (result, gas) = run_on(SpecId::HOMESTEAD, &code, 1_000, withheld);
+
+        assert_eq!(result, InstructionResult::OutOfGas, "withheld {withheld}");
+        assert_eq!(
+            gas.failed_charge_remaining(),
+            Some(1_000 - 18 - call_gas),
+            "withheld {withheld}"
+        );
+        assert_eq!(gas.withheld_crossing(), None, "withheld {withheld}");
+    }
+}
+
+/// A way to halt an interpreter.
+type Halt = fn(&mut Interpreter<EthInterpreter>);
+
+/// An opcode no spec defines, which the test below gives to an instruction of its own.
+const OUT_OF_GAS: u8 = 0x0c;
+
+/// An instruction that fails out of gas without charging anything, as a consumer's instruction
+/// can.
+const fn out_of_gas(_: InstructionContext<'_, DummyHost, EthInterpreter>) -> InstructionExecResult {
+    Err(InstructionResult::OutOfGas)
+}
+
+/// An out-of-gas halt that no failed charge recorded records the regular gas the halt zeroes,
+/// both parts: here an instruction of the consumer's that fails out of gas itself.
+#[test]
+fn test_an_unrecorded_out_of_gas_halt_records_the_regular_gas_left() {
+    let mut interpreter = Interpreter::<EthInterpreter>::new(
+        SharedMemory::new(),
+        ExtBytecode::new(Bytecode::new_raw(Bytes::from_static(&[
+            PUSH0, OUT_OF_GAS, STOP,
+        ]))),
+        InputsImpl::default(),
+        false,
+        SPEC,
+        1_000,
+    );
+    interpreter.gas.withhold(500);
+    let mut table = instruction_table::<EthInterpreter, DummyHost>();
+    table[OUT_OF_GAS as usize] = Instruction::new(out_of_gas);
+
+    let action = interpreter.run_plain(&table, &gas_table_spec(SPEC), &mut DummyHost::new(SPEC));
+
+    let InterpreterAction::Return(result) = action else {
+        panic!("expected the frame to return, got {action:?}");
+    };
+    assert_eq!(result.result, InstructionResult::OutOfGas);
+    assert_eq!(result.gas.remaining(), 0, "the halt spent all");
+    // `PUSH0` spent 2; the record holds the rest, the 500 withheld included.
+    assert_eq!(result.gas.failed_charge_remaining(), Some(1_000 - 2));
+}
+
+/// The interpreter's out-of-gas halts record the regular gas left before they zero it, when no
+/// record is there: `halt(OutOfGas)`, `halt_oog`, and `halt_load_error` for a skipped cold load.
+/// A record already there is kept, and other halts record nothing.
+#[test]
+fn test_the_halts_record_an_out_of_gas_only() {
+    let new = || {
+        Interpreter::<EthInterpreter>::new(
+            SharedMemory::new(),
+            ExtBytecode::new(Bytecode::new_raw(Bytes::from_static(&[STOP]))),
+            InputsImpl::default(),
+            false,
+            SPEC,
+            1_000,
+        )
+    };
+    let halts: [(&str, Halt, Option<u64>); 6] = [
+        (
+            "halt(OutOfGas)",
+            |i| i.halt(InstructionResult::OutOfGas),
+            Some(1_000),
+        ),
+        ("halt_oog", |i| i.halt_oog(), Some(1_000)),
+        (
+            "halt_load_error(ColdLoadSkipped)",
+            |i| i.halt_load_error(LoadError::ColdLoadSkipped),
+            Some(1_000),
+        ),
+        (
+            "halt_load_error(DBError)",
+            |i| i.halt_load_error(LoadError::DBError),
+            None,
+        ),
+        ("halt_memory_oog", |i| i.halt_memory_oog(), None),
+        (
+            "halt(InvalidFEOpcode)",
+            |i| i.halt(InstructionResult::InvalidFEOpcode),
+            None,
+        ),
+    ];
+    for (name, halt, record) in halts {
+        let mut interpreter = new();
+        halt(&mut interpreter);
+        assert_eq!(interpreter.gas.failed_charge_remaining(), record, "{name}");
+
+        // A record already there is the failure that caused the halt, and stays.
+        let mut interpreter = new();
+        interpreter.gas.set_failed_charge_remaining(Some(7));
+        halt(&mut interpreter);
+        assert_eq!(interpreter.gas.failed_charge_remaining(), Some(7), "{name}");
+    }
 }

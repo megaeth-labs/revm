@@ -108,6 +108,10 @@ pub fn precompile_output_to_interpreter_result(
 
     // Only a success or revert returns output bytes and keeps its unspent gas.
     if result.is_halt() {
+        if result == InstructionResult::PrecompileOOG {
+            // The charge that failed is the run itself: the frame had all its gas before it.
+            gas.set_failed_charge_remaining(Some(gas_limit));
+        }
         gas.spend_all();
         return InterpreterResult::new(result, Bytes::new(), gas);
     }

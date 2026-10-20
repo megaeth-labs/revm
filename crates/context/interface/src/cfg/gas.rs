@@ -25,9 +25,10 @@ pub use withheld::WithheldCrossing;
 /// nothing withheld, which is the default, every method behaves as it did before the withheld part
 /// existed.
 ///
-/// Every regular charge that fails, a crossing or not, records the regular gas left before it
+/// Every deduction that fails records the regular gas left before it
 /// ([`failed_charge_remaining`](Self::failed_charge_remaining)), which an `OutOfGas` halt would
-/// otherwise destroy.
+/// otherwise destroy: a regular charge, a crossing or not, a state or history charge whose spill
+/// regular gas cannot pay, and a forward.
 ///
 /// Credits of regular gas land on the spendable part, so they can lift it above what a consumer
 /// allows. They are the gas a child returns ([`erase_cost`](Self::erase_cost)), the reservoir a
@@ -132,8 +133,8 @@ pub struct GasTracker {
     /// crate.
     #[cfg_attr(feature = "serde", serde(default))]
     withheld_crossing: Option<WithheldCrossing>,
-    /// The regular gas left, spendable and withheld parts together, before the last regular
-    /// charge that failed ([`failed_charge_remaining`](Self::failed_charge_remaining)).
+    /// The regular gas left, spendable and withheld parts together, before the last charge that
+    /// failed ([`failed_charge_remaining`](Self::failed_charge_remaining)).
     ///
     /// Encodings made before this field existed decode it as `None`.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -347,7 +348,9 @@ impl GasTracker {
     /// first ([`record_withheld_first_cost`](Self::record_withheld_first_cost)).
     /// Tracks state gas spent.
     ///
-    /// Returns `false` if total remaining gas is insufficient.
+    /// Returns `false` if total remaining gas is insufficient, leaving the tracker's gas untouched
+    /// and recording the regular gas left
+    /// ([`failed_charge_remaining`](Self::failed_charge_remaining)).
     #[inline]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_state_cost(&mut self, cost: u64) -> bool {
@@ -378,8 +381,9 @@ impl GasTracker {
     /// `history_gas_spent`, which is what keeps the history dimension separable from the state
     /// dimension downstream.
     ///
-    /// Returns `false` if the total remaining budget is insufficient, leaving the tracker
-    /// untouched.
+    /// Returns `false` if the total remaining budget is insufficient, leaving the tracker's gas
+    /// untouched and recording the regular gas left
+    /// ([`failed_charge_remaining`](Self::failed_charge_remaining)).
     #[inline]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_history_cost(&mut self, cost: u64) -> bool {
@@ -506,7 +510,7 @@ impl GasTracker {
     /// Spends all remaining gas excluding the reservoir: the spendable and the withheld part.
     ///
     /// A recorded [`WithheldCrossing`] is kept, so it can be read after the halt, and with it
-    /// the withheld part this zeroes. So is the record of the last failed regular charge
+    /// the withheld part this zeroes. So is the record of the last failed charge
     /// ([`failed_charge_remaining`](Self::failed_charge_remaining)).
     #[inline]
     pub const fn spend_all(&mut self) {

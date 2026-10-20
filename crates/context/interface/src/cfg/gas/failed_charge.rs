@@ -1,6 +1,6 @@
-//! The record a failed regular charge leaves on a [`GasTracker`].
+//! The record a failed charge leaves on a [`GasTracker`].
 //!
-//! A frame whose regular charge fails halts, and an `OutOfGas` halt zeroes the frame's regular
+//! A frame whose charge fails halts out of gas, and an `OutOfGas` halt zeroes the frame's regular
 //! gas before its result reaches the handler. The record keeps what the frame had left before the
 //! charge, so a consumer can read it from the frame's result.
 
@@ -9,29 +9,55 @@ use core::num::NonZeroU64;
 
 impl GasTracker {
     /// Returns the regular gas left, spendable and withheld parts together, before the last
-    /// regular charge that failed on this tracker, or `None` if none failed.
+    /// charge that failed on this tracker, or `None` if none failed.
     ///
-    /// Every failed regular charge records it, through
-    /// [`record_regular_cost`](Self::record_regular_cost) or
-    /// [`record_cost_unsafe`](Self::record_cost_unsafe): one the withheld part would have paid,
-    /// which also leaves a [`WithheldCrossing`] holding the same amount, one beyond the whole
-    /// regular gas, and one with no regular gas left, which records `Some(0)`. The failed charge
-    /// took nothing, so the record is all the regular gas the frame had; for the unchecked charge
-    /// it is read before the spendable part wraps.
+    /// Every deduction that fails records it:
     ///
-    /// A regular charge that succeeds leaves the record as it is, and so does every other method.
-    /// A deduction that is not a regular charge records nothing when it fails: the gas forwarded
-    /// to a child, and a state or history charge spilling past the reservoir.
+    /// - a regular charge, through [`record_regular_cost`](Self::record_regular_cost) or
+    ///   [`record_cost_unsafe`](Self::record_cost_unsafe): one the withheld part would have paid,
+    ///   which also leaves a [`WithheldCrossing`] holding the same amount, and one beyond the whole
+    ///   regular gas. The unchecked charge records the regular gas left before the spendable part
+    ///   wraps;
+    /// - a state or history charge whose spill past the reservoir regular gas cannot pay, through
+    ///   [`record_state_cost`](Self::record_state_cost) or
+    ///   [`record_history_cost`](Self::record_history_cost), whether the reservoir paid nothing or
+    ///   part of it. The record is regular gas alone; the reservoir is left as it was;
+    /// - a forward to a child that regular gas cannot pay, through
+    ///   [`record_withheld_first_cost`](Self::record_withheld_first_cost), which only a call
+    ///   before EIP-150 can fail.
     ///
-    /// The record is never cleared. It survives [`spend_all`](Self::spend_all), so it can be read
-    /// after the halt the failed charge caused, whatever the halt did to the regular gas, and a
-    /// later failed charge replaces it. A child frame starts with none, and a parent does not take
-    /// over its child's. A frame whose regular charge fails halts, except before Homestead, where
+    /// The interpreter records it too when it halts a frame out of gas with no record there: a
+    /// cold access the instruction refused before its charge, because the frame could not pay it,
+    /// or an out-of-gas a consumer's instruction returned itself. The handler records it where a
+    /// precompile runs out of gas: the frame's whole gas limit, as nothing ran. A consumer that
+    /// builds an out-of-gas result itself can record the same with
+    /// [`set_failed_charge_remaining`](Self::set_failed_charge_remaining).
+    ///
+    /// The failed deduction took nothing, so the record is all the regular gas the frame had; a
+    /// failure with nothing left records `Some(0)`. A deduction that succeeds leaves the record as
+    /// it is, and so does every credit and setter of the regular gas.
+    ///
+    /// The tracker never clears the record. It survives [`spend_all`](Self::spend_all), so it can
+    /// be read after the halt the failed charge caused, whatever the halt did to the regular gas,
+    /// and a later failed charge replaces it. A child frame starts with none, and a parent does not
+    /// take over its child's. A frame whose charge fails halts, except before Homestead, where
     /// `return_create` deploys empty code when the frame cannot pay the code deposit: there the
     /// record is left on a creation that returns successfully.
     #[inline]
     pub const fn failed_charge_remaining(&self) -> Option<u64> {
         self.failed_charge_remaining
+    }
+
+    /// Sets the record returned by [`failed_charge_remaining`](Self::failed_charge_remaining),
+    /// replacing any record already there; `None` clears it. The regular gas is left as it is.
+    ///
+    /// The tracker records a failed deduction itself. This is for a result produced outside the
+    /// tracker that ends a frame out of gas, such as a precompile's or an answer a consumer builds:
+    /// `remaining` is the regular gas the frame had before the charge that failed. Like a recorded
+    /// failure, the record survives [`spend_all`](Self::spend_all).
+    #[inline]
+    pub const fn set_failed_charge_remaining(&mut self, remaining: Option<u64>) {
+        self.failed_charge_remaining = remaining;
     }
 
     /// Records a failed regular charge of `cost` against `spendable`: the regular gas left,
@@ -54,6 +80,19 @@ impl GasTracker {
                 self.withheld_crossing = Some(WithheldCrossing::with_remaining(remaining));
             }
         }
+    }
+
+    /// Records a failed deduction that draws the withheld part first: a forward, or the spill of
+    /// a state or history charge. The tracker is untouched, so the regular gas left is both parts
+    /// as they are. Never a crossing: such a deduction fails only beyond the whole regular gas.
+    ///
+    /// Only called on the failure path of
+    /// [`record_withheld_first_cost`](Self::record_withheld_first_cost), so its success path does
+    /// not pay for it.
+    #[cold]
+    #[inline(never)]
+    pub(super) const fn withheld_first_cost_failed(&mut self) {
+        self.failed_charge_remaining = Some(self.remaining.saturating_add(self.withheld));
     }
 }
 
@@ -209,15 +248,65 @@ mod tests {
         assert_eq!(crossing(&tracker), Some(1_000), "the crossing stays");
     }
 
-    /// A deduction that is not a regular charge records nothing when it fails.
+    /// A state or history charge whose spill onto regular gas fails records the regular gas left
+    /// before it, both parts, whether the reservoir paid nothing or part of the charge. The failed
+    /// charge leaves the reservoir and both parts as they were.
     #[test]
-    fn test_other_deductions_record_nothing() {
-        let mut tracker = GasTracker::new(1_000, 100, 0);
+    fn test_a_failed_spill_records_the_regular_gas_left() {
+        for history in [false, true] {
+            for reservoir in [0, 300] {
+                // 300 spendable and 100 withheld; the charge leaves a spill of 401 past the
+                // reservoir, which the 400 cannot pay.
+                let mut tracker = GasTracker::new(1_000, 400, reservoir);
+                tracker.withhold(100);
+                let charged = if history {
+                    tracker.record_history_cost(reservoir + 401)
+                } else {
+                    tracker.record_state_cost(reservoir + 401)
+                };
 
-        assert!(!tracker.record_withheld_first_cost(101));
-        assert!(!tracker.record_state_cost(101));
-        assert!(!tracker.record_history_cost(101));
+                let case = format!("history: {history}, reservoir: {reservoir}");
+                assert!(!charged, "{case}");
+                assert_eq!(tracker.failed_charge_remaining(), Some(400), "{case}");
+                assert_eq!(tracker.reservoir(), reservoir, "{case}");
+                assert_eq!(
+                    (tracker.spendable(), tracker.withheld()),
+                    (300, 100),
+                    "{case}"
+                );
+                assert_eq!(tracker.withheld_crossing(), None, "{case}");
+            }
+        }
+    }
 
+    /// A forward the regular gas cannot pay, both parts together, records the regular gas left.
+    #[test]
+    fn test_a_failed_forward_records_the_regular_gas_left() {
+        let mut tracker = withheld_600();
+
+        assert!(!tracker.record_withheld_first_cost(1_001));
+
+        assert_eq!(tracker.failed_charge_remaining(), Some(1_000));
+        assert_eq!(tracker.withheld_crossing(), None);
+    }
+
+    /// State and history charges, paid by the reservoir alone or spilling onto regular gas, and
+    /// forwards that succeed leave the record empty.
+    #[test]
+    fn test_deductions_that_succeed_leave_the_record_alone() {
+        let mut tracker = withheld_600();
+
+        assert!(tracker.record_state_cost(100));
+        assert!(tracker.record_history_cost(100));
+        assert!(tracker.record_state_cost(300));
+        assert!(tracker.record_history_cost(300));
+        assert!(tracker.record_withheld_first_cost(300));
+
+        assert_eq!(
+            tracker.state_gas_spilled(),
+            500,
+            "the second state and history charges spilled"
+        );
         assert_eq!(tracker.failed_charge_remaining(), None);
     }
 
@@ -233,6 +322,26 @@ mod tests {
         let set = WithheldCrossing::with_remaining(NonZeroU64::new(7).unwrap());
         tracker.set_withheld_crossing(Some(set));
         assert_eq!(tracker.failed_charge_remaining(), Some(1_000));
+    }
+
+    /// A record set from outside the tracker leaves the regular gas alone, survives the halt, and
+    /// is replaced by a later failure; `None` clears it.
+    #[test]
+    fn test_set_failed_charge_remaining() {
+        let mut tracker = GasTracker::new(1_000, 400, 0);
+
+        tracker.set_failed_charge_remaining(Some(400));
+        assert_eq!(tracker.failed_charge_remaining(), Some(400));
+        assert_eq!(tracker.remaining(), 400);
+
+        tracker.spend_all();
+        assert_eq!(tracker.failed_charge_remaining(), Some(400));
+
+        fail(&mut tracker, 1, false);
+        assert_eq!(tracker.failed_charge_remaining(), Some(0));
+
+        tracker.set_failed_charge_remaining(None);
+        assert_eq!(tracker.failed_charge_remaining(), None);
     }
 
     /// The record round-trips, a zero included, and encodings made before it existed decode with

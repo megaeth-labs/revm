@@ -11,7 +11,7 @@ use core::num::NonZeroU64;
 ///
 /// Recorded by [`GasTracker::record_regular_cost`] and [`GasTracker::record_cost_unsafe`] when
 /// `spendable < cost <= spendable + withheld`. A charge larger than the whole regular gas records
-/// nothing: it would have failed with nothing withheld too.
+/// no crossing: it would have failed with nothing withheld too.
 ///
 /// The record holds the regular gas left before the failed charge ([`remaining`](Self::remaining)):
 /// the tracker's [`remaining`](GasTracker::remaining) at the charge, spendable and withheld parts
@@ -184,9 +184,10 @@ impl GasTracker {
     /// reservoir.
     ///
     /// Draws the withheld part first and the spendable part after it, so it fails only when
-    /// [`remaining`](Self::remaining) cannot pay. On failure the tracker is left untouched and no
-    /// crossing is recorded. With nothing withheld it deducts exactly what
-    /// [`record_regular_cost`](Self::record_regular_cost) deducts.
+    /// [`remaining`](Self::remaining) cannot pay. On failure the regular gas is left untouched, no
+    /// crossing is recorded, and the regular gas left is recorded as
+    /// [`failed_charge_remaining`](Self::failed_charge_remaining). With nothing withheld it
+    /// deducts exactly what [`record_regular_cost`](Self::record_regular_cost) deducts.
     #[inline]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_withheld_first_cost(&mut self, cost: u64) -> bool {
@@ -200,6 +201,7 @@ impl GasTracker {
             self.withheld -= from_withheld;
             return true;
         }
+        self.withheld_first_cost_failed();
         false
     }
 }
@@ -503,7 +505,7 @@ mod tests {
         );
     }
 
-    /// The unchecked charge records nothing when the whole regular gas cannot pay it.
+    /// The unchecked charge records no crossing when the whole regular gas cannot pay it.
     #[test]
     fn test_record_cost_unsafe_records_nothing_beyond_the_withheld_part() {
         let mut tracker = withheld_600();
