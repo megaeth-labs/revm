@@ -121,7 +121,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
   It puts back the amount; the split comes back only as far as the halt left it.
   An `OutOfGas` halt of the interpreter zeroes both parts, so after it the whole amount comes back spendable.
   `return_create`'s own `OutOfGas`, on a code-deposit or code-hash charge that crossed, zeroes nothing, so there the split comes back as it was.
-  A charge beyond the sum records nothing, and neither does an operand refused before any charge.
+  A charge beyond the sum records no crossing, and neither does an operand refused before any charge; the failed-charge record below covers every failed charge.
   The record is the last crossing since it was cleared, survives `spend_all`, starts empty in every child, and is not taken over by a parent.
   A consumer marks a result it produced itself as a crossing with `set_withheld_crossing`, passing `with_remaining` the regular gas the frame had before the charge that crossed.
   A call it holds to an allowance below its forward and answers without running crossed exactly when `allowance < cost <= forward` for the gas `cost` the call needs (for a precompile, the price `Precompile::required_gas` answers); its record is then `with_remaining(forward)`, and a cost above the forward is a plain out-of-gas with no record.
@@ -133,17 +133,26 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 
 ### The failed-charge record
 
-- **API.** `GasTracker::failed_charge_remaining() -> Option<u64>`, forwarded on `Gas`.
-- **Contract.** Every regular charge that fails, through `record_regular_cost` or `record_cost_unsafe`, records the regular gas left before it, spendable and withheld parts together, whether or not the withheld part would have paid it.
-  The failed charge took nothing, so the record is all the regular gas the frame had; the unchecked charge records it before the spendable part wraps, and a failure with nothing left records `Some(0)`.
-  A charge that succeeds leaves the record as it is, and a failed deduction that is not a regular charge records nothing: the gas forwarded to a child, a state or history charge spilling past the reservoir.
-  The record is never cleared: it survives `spend_all`, a later failed charge replaces it, it starts empty in every child, and a parent does not take over its child's.
-  A frame whose regular charge fails halts, except before Homestead, where `return_create` deploys empty code when the frame cannot pay the code deposit: the record is then left on a creation that returns successfully.
+- **API.** `GasTracker::failed_charge_remaining() -> Option<u64>` and `GasTracker::set_failed_charge_remaining(Option<u64>)`, both forwarded on `Gas`.
+- **Contract.** Every deduction that fails and ends the frame out of gas records the regular gas left before it, spendable and withheld parts together:
+  - a regular charge (`record_regular_cost`, `record_cost_unsafe`), whether or not the withheld part would have paid it;
+  - a state or history charge whose spill past the reservoir regular gas cannot pay (`record_state_cost`, `record_history_cost`), whether the reservoir paid nothing or part of it; the record is regular gas alone, and the reservoir is left as it was;
+  - a forward to a child that regular gas cannot pay (`record_withheld_first_cost`), which only a call before EIP-150 can fail;
+  - an out-of-gas halt of the interpreter with no record there, before the halt zeroes the frame's gas: a cold access the instruction refused before its charge because the frame could not pay it (an account read, `SLOAD`, `SSTORE`, `SELFDESTRUCT`, a call's target and the account it delegates to), or an out-of-gas a consumer's instruction returned itself; a record already there is the failure that caused the halt, and is kept;
+  - a precompile run that needs more gas than the frame has: the frame's whole gas limit, as nothing ran.
+
+  The failed deduction took nothing, so the record is all the regular gas the frame had; the unchecked charge records it before the spendable part wraps, and a failure with nothing left records `Some(0)`.
+  A deduction that succeeds leaves the record as it is, and so does every credit and setter of the regular gas.
+  The fork never clears the record: it survives `spend_all`, a later failed charge replaces it, it starts empty in every child, and a parent does not take over its child's.
+  A frame whose charge fails halts, except before Homestead, where `return_create` deploys empty code when the frame cannot pay the code deposit: the record is then left on a creation that returns successfully.
+  A consumer that builds an out-of-gas result itself, outside the interpreter's halt, records the same with `set_failed_charge_remaining`.
+- **Not recorded.** The other out-of-gas halts zero nothing, so the frame's gas stays readable in its result: an operand refused before any charge, the memory limit, and the `SSTORE` stipend sentry.
+  A charge that fails before the first frame, in the transaction's runtime gas phase, records on the transaction's gas, which the handler then rebuilds; no frame ran.
 - **Consumer.** mega-evm's gas detention reads what a halting frame burned. An `OutOfGas` halt zeroes the frame's regular gas inside the interpreter, before the frame's result reaches any boundary mega-evm owns.
 - **Removal.** When upstream keeps a halting frame's regular gas readable, or when mega-evm no longer reads what a halting frame burned.
-- **Default.** The record is written in the same cold, out-of-line function as a crossing, so a charge that succeeds runs the same code.
+- **Default.** Each record is written on the failure side only: the tracker's in cold, out-of-line functions, the interpreter's in its cold out-of-gas halt, the handler's on a precompile's out-of-gas. A deduction or load that succeeds runs the same code.
   It is two words: the tracker is 88 bytes, and a copy of the tracker, and of every `Gas` and frame result that holds one, is 16 bytes larger.
-  Where measured (callgrind, the fork's release profile), that left a transfer and a precompile call unchanged and cost about 0.1% of the instructions of a creation.
+  Where measured (callgrind, the fork's release profile), the field left a transfer and a precompile call unchanged and cost about 0.1% of the instructions of a creation; the records written on the failure side add nothing measurable.
 
 ### Precompile price
 
