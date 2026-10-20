@@ -1,11 +1,14 @@
 use crate::{
-    instructions::utility::{IntoAddress, IntoU256},
+    instructions::{
+        instruction_hooks::write_completed,
+        utility::{IntoAddress, IntoU256},
+    },
     interpreter_types::{InputsTr, InterpreterTypes as ITy, MemoryTr, RuntimeFlag, StackTr},
     Gas, Host, InstructionExecResult as Result, InstructionResult,
 };
 use context_interface::{
     cfg::{GasId, StateGasCharge, StateGasSite},
-    host::LoadError,
+    host::{CompletedWrite, LoadError},
     journaled_state::AccountInfoLoad,
 };
 use core::cmp::min;
@@ -275,7 +278,12 @@ pub fn sstore<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
             .gas_params()
             .sstore_refund(is_istanbul, &state_load.data),
     );
-    Ok(())
+    let write = CompletedWrite::Sstore {
+        address: target,
+        key: index,
+        result: &state_load.data,
+    };
+    write_completed(context.interpreter, context.host, write)
 }
 
 /// EIP-1153: Transient storage opcodes
@@ -336,7 +344,12 @@ pub fn log<const N: usize, H: Host + ?Sized>(context: Ictx<'_, H, impl ITy>) -> 
     };
 
     context.host.log(log);
-    Ok(())
+    let write = CompletedWrite::Log {
+        address: context.interpreter.input.target_address(),
+        topics: N as u8,
+        data_len: len as u64,
+    };
+    write_completed(context.interpreter, context.host, write)
 }
 
 /// Implements the SELFDESTRUCT instruction.
@@ -392,5 +405,11 @@ pub fn selfdestruct<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Resu
             .record_refund(context.host.gas_params().selfdestruct_refund());
     }
 
+    let write = CompletedWrite::SelfDestruct {
+        address: context.interpreter.input.target_address(),
+        target,
+        result: &res.data,
+    };
+    write_completed(context.interpreter, context.host, write)?;
     Err(InstructionResult::SelfDestruct)
 }
