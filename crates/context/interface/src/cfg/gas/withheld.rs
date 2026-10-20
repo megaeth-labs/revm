@@ -202,25 +202,6 @@ impl GasTracker {
         }
         false
     }
-
-    /// Records a failed regular charge of `cost` against `spendable` as a [`WithheldCrossing`]
-    /// holding the regular gas left, `spendable` plus the withheld part, when the withheld part
-    /// would have paid it.
-    ///
-    /// Only called on the failure path of a regular charge, where `cost > spendable`, so the
-    /// charge's success path does not pay for the check. `spendable` is the spendable part before
-    /// the charge: [`record_cost_unsafe`](Self::record_cost_unsafe) has already wrapped it.
-    #[cold]
-    #[inline(never)]
-    pub(super) const fn regular_charge_failed(&mut self, cost: u64, spendable: u64) {
-        // `cost > spendable`, so a withheld part that covers the difference is never zero, and
-        // neither is the regular gas left.
-        if cost - spendable <= self.withheld {
-            if let Some(remaining) = NonZeroU64::new(spendable.saturating_add(self.withheld)) {
-                self.withheld_crossing = Some(WithheldCrossing::with_remaining(remaining));
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -253,12 +234,12 @@ mod tests {
         assert_eq!(size_of::<Option<WithheldCrossing>>(), size_of::<u64>());
     }
 
-    /// The tracker is 72 bytes. Above that, copies of the tracker, and of every `Gas` and frame
-    /// result that holds one, get markedly more expensive, so a new field is measured before this
-    /// changes.
+    /// The tracker is 88 bytes: 72 with the withheld part and its record, and two words more for
+    /// the failed-charge record. Copies of the tracker, and of every `Gas` and frame result that
+    /// holds one, grow with it, so a new field is measured before this changes.
     #[test]
-    fn test_the_tracker_is_72_bytes() {
-        assert_eq!(size_of::<GasTracker>(), 72);
+    fn test_the_tracker_is_88_bytes() {
+        assert_eq!(size_of::<GasTracker>(), 88);
     }
 
     /// Withholding moves gas between the parts and leaves the total alone.
