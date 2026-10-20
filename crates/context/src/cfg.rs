@@ -186,6 +186,15 @@ pub struct CfgEnv<SPEC = SpecId> {
     /// By default, it is set to `false`: the whole system call gas limit is regular gas.
     #[cfg_attr(feature = "serde", serde(default))]
     pub system_call_state_gas_margin_in_reservoir: bool,
+    /// Runs the journal with revm 40.0.3's journal semantics: a storage slot warmed while cold
+    /// for the current transaction re-baselines its EIP-2200 `original_value`, and a
+    /// `CodeChange` entry reverts to `KECCAK_EMPTY` / no code. For an engine that must
+    /// reproduce revm 40.0.3 exactly; new code leaves it `false`.
+    ///
+    /// The journal learns this value through the context's cfg sync, as
+    /// [`CfgEnv::enable_amsterdam_eip7708`] does.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub legacy_journal_semantics: bool,
 }
 
 impl CfgEnv {
@@ -308,6 +317,7 @@ impl<SPEC> CfgEnv<SPEC> {
             amsterdam_eip8246_delayed_clear_disabled: self.amsterdam_eip8246_delayed_clear_disabled,
             system_call_state_gas_margin_in_reservoir: self
                 .system_call_state_gas_margin_in_reservoir,
+            legacy_journal_semantics: self.legacy_journal_semantics,
         }
     }
 
@@ -367,6 +377,13 @@ impl<SPEC> CfgEnv<SPEC> {
         self
     }
 
+    /// Runs the journal with revm 40.0.3's journal semantics; see
+    /// [`CfgEnv::legacy_journal_semantics`].
+    pub const fn with_legacy_journal_semantics(mut self, enable: bool) -> Self {
+        self.legacy_journal_semantics = enable;
+        self
+    }
+
     /// Sets whether a system call places its EIP-8037 state-gas margin in the reservoir.
     pub const fn with_system_call_state_gas_margin_in_reservoir(mut self, enable: bool) -> Self {
         self.system_call_state_gas_margin_in_reservoir = enable;
@@ -413,6 +430,7 @@ impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
             amsterdam_eip7708_disabled: false,
             amsterdam_eip8246_delayed_clear_disabled: false,
             system_call_state_gas_margin_in_reservoir: false,
+            legacy_journal_semantics: false,
         }
     }
 
@@ -641,6 +659,11 @@ impl<SPEC: Into<SpecId> + Clone> Cfg for CfgEnv<SPEC> {
     #[inline]
     fn enable_amsterdam_eip7708(&self) -> bool {
         self.enable_amsterdam_eip7708
+    }
+
+    #[inline]
+    fn legacy_journal_semantics(&self) -> bool {
+        self.legacy_journal_semantics
     }
 
     #[inline]

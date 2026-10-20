@@ -135,6 +135,9 @@ pub struct JournaledAccount<'a, DB, ENTRY: JournalEntryTr = JournalEntry> {
     transaction_id: TransactionId,
     /// Database used to load storage.
     db: &'a mut DB,
+    /// Whether the journal runs with revm 40.0.3's journal semantics
+    /// (`JournalTr::set_legacy_journal_semantics`).
+    legacy_journal_semantics: bool,
 }
 
 impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
@@ -155,7 +158,17 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
             access_list,
             transaction_id,
             db,
+            legacy_journal_semantics: false,
         }
+    }
+
+    /// Sets whether this account's journaling follows revm 40.0.3's journal semantics: a slot
+    /// warmed while cold for the current transaction re-baselines its `original_value`, and a
+    /// `CodeChange` entry records `KECCAK_EMPTY` / no code as the previous code.
+    #[inline]
+    pub const fn with_legacy_journal_semantics(mut self, enabled: bool) -> Self {
+        self.legacy_journal_semantics = enabled;
+        self
     }
 
     /// Loads the storage slot.
@@ -187,7 +200,11 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
                         return Err(JournalLoadError::ColdLoadSkipped);
                     }
                 }
-                slot.mark_warm_with_transaction_id(self.transaction_id);
+                if self.legacy_journal_semantics {
+                    slot.mark_warm_with_transaction_id_rebaselining_cold(self.transaction_id);
+                } else {
+                    slot.mark_warm_with_transaction_id(self.transaction_id);
+                }
                 (slot, is_cold)
             }
             Entry::Vacant(vac) => {
@@ -431,6 +448,12 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccountTr
     fn set_code(&mut self, code_hash: B256, code: Bytecode) {
         self.touch();
         let (had_code_hash, had_code) = self.account.info.set_code_and_hash(code, code_hash);
+        let (had_code_hash, had_code) = if self.legacy_journal_semantics {
+            // revm 40.0.3 reverted a code change to an empty account's code.
+            (KECCAK_EMPTY, None)
+        } else {
+            (had_code_hash, had_code)
+        };
         self.journal_entries
             .push(ENTRY::code_changed(self.address, had_code_hash, had_code));
     }

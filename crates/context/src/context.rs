@@ -48,6 +48,7 @@ fn sync_cfg_to_journal<CFG: Cfg, JOURNAL: JournalTr>(cfg: &CFG, journal: &mut JO
         cfg.is_eip8246_delayed_clear_disabled(),
     );
     journal.set_amsterdam_eip7708_enabled(cfg.enable_amsterdam_eip7708());
+    journal.set_legacy_journal_semantics(cfg.legacy_journal_semantics());
 }
 
 impl<

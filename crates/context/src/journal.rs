@@ -214,6 +214,11 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
     }
 
     #[inline]
+    fn set_legacy_journal_semantics(&mut self, enabled: bool) {
+        self.inner.set_legacy_journal_semantics(enabled);
+    }
+
+    #[inline]
     fn transfer(
         &mut self,
         from: Address,
