@@ -207,7 +207,8 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 ### Completed-write hook
 
 - **API.** `Host::write_completed(&mut self, write: CompletedWrite<'_>, gas: &mut GasTracker) -> WriteVerdict`, whose default continues.
-  `CompletedWrite` (`#[non_exhaustive]`: `Sstore`, `Log`, `SelfDestruct`, with the write's account and what the instruction knows of it) and `WriteVerdict` (`Continue`, `OutOfGas`, `Revert(Bytes)`), in `revm_context_interface::host`.
+  `CompletedWrite` (`Sstore`, `Log`, `SelfDestruct`, with the write's account and what the instruction knows of it) and `WriteVerdict` (`Continue`, `OutOfGas`, `Revert(Bytes)`), in `revm_context_interface::host`.
+  `CompletedWrite` is exhaustive on purpose: mega-evm matches it to meter each write, so a new kind is a compile error in every consumer that matches it rather than a write that passes a wildcard arm un-metered, and adding one is an `api:exception` change.
 - **Contract.** `SSTORE`, `LOG0`–`LOG4` and `SELFDESTRUCT` call it once the write is in the journal and every charge the instruction makes has been made, its refund included, so only on the instruction's success path, on the plain and the inspected path.
   `gas` is the running frame's tracker. The hook may debit and credit it, and the instruction uses it as the hook left it: nothing is charged after the hook. A charge the hook makes that fails records as any failed charge does (see The failed-charge record), whatever the verdict.
   `Continue` ends the instruction as it would have ended. `OutOfGas` fails it as a failed charge does: the frame halts out of gas, and the halt records the regular gas the hook left unless a failed charge already did. `Revert(output)` ends the frame as a `Revert` with `output`, on its gas as the hook left it; a `SELFDESTRUCT` so reverted does not self-destruct.
@@ -220,7 +221,8 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 ### Frame-start hook
 
 - **API.** `Host::frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool`, whose default returns `true`.
-  `FrameStart` (`#[non_exhaustive]`, built with `FrameStart::new`: `kind`, `caller`, `target`, `value`, `forward`) and `FrameStartKind`, in `revm_context_interface::host`.
+  `FrameStart` (`#[non_exhaustive]`, built with `FrameStart::new`: `kind`, `caller`, `target`, `value`, `forward`) and `FrameStartKind` (`Call`, `CallCode`, `DelegateCall`, `StaticCall`, `Create`, `Create2`), in `revm_context_interface::host`.
+  `FrameStartKind` is exhaustive on purpose, as `CompletedWrite` is: mega-evm matches it to charge each start, so a new kind is a compile error in every consumer that matches it rather than a start that passes a wildcard arm uncharged, and adding one is an `api:exception` change.
 - **Contract.** `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2` call it after every charge they make and after the forward is taken from the caller's gas, before they build the frame's input, on the plain and the inspected path.
   `forward` is the regular gas taken: the frame's gas limit without a value call's stipend. `value` is the value transferred, zero for `DELEGATECALL` and `STATICCALL`; `target` is the account the frame runs as, `None` for a creation.
   `gas` is the caller's tracker. The hook may debit and credit it, and the instruction uses it as the hook left it: nothing is charged after the hook, and the frame's input copies its reservoir from it, so a frame the handler runs and one it answers without running (a precompile) both start from the reservoir the hook left. A charge the hook makes that fails records as any failed charge does, whatever the answer.
