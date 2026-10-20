@@ -82,7 +82,6 @@ impl Write {
                 target,
                 result,
             } => Self::SelfDestruct(address, target, result.clone()),
-            other => panic!("a write this test does not know: {other:?}"),
         }
     }
 

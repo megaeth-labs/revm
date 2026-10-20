@@ -11,8 +11,10 @@ use primitives::{Address, Bytes, StorageKey, U256};
 
 /// A state write an instruction completed: the write is in the journal, and every charge the
 /// instruction makes has been made.
+///
+/// Exhaustive on purpose: a new variant is a breaking change, so that every consumer handles every
+/// kind of write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum CompletedWrite<'a> {
     /// `SSTORE` wrote slot `key` of `address`.
     Sstore {
@@ -56,6 +58,9 @@ pub enum WriteVerdict {
 }
 
 /// The kind of frame an instruction is about to start.
+///
+/// Exhaustive on purpose: a new variant is a breaking change, so that every consumer handles every
+/// kind of start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FrameStartKind {
     /// `CALL`.
