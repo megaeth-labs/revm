@@ -12,8 +12,9 @@
 //!
 //! The net is an `i64`, as the gas nets are, while draws and refills take `u64` amounts. As the
 //! tracker does for gas amounts, it assumes that every draw and refill is at most `i64::MAX`
-//! bytes, and that the net, with the nets of the children merged into it, stays within `i64`;
-//! the pool itself may be anything up to the unlimited `u64::MAX`. A release build does not check
+//! bytes, and that the net, with the nets of the children merged into it, stays within
+//! `±i64::MAX`, so it can be negated ([`adopt_bytes_share`](GasTracker::adopt_bytes_share)); the
+//! pool itself may be anything up to the unlimited `u64::MAX`. A release build does not check
 //! it: past it the net saturates, and a rollback no longer restores the pool exactly. A debug
 //! build asserts it wherever the net moves ([`record_bytes`](GasTracker::record_bytes),
 //! [`refill_bytes`](GasTracker::refill_bytes), [`add_bytes_spent`](GasTracker::add_bytes_spent)).
@@ -44,8 +45,8 @@ impl GasTracker {
     ///
     /// Negative while the frame has refilled more than it drew, as
     /// [`history_gas_spent`](Self::history_gas_spent) can be. A rollback adds it back to the pool.
-    /// It is exact while it stays within `i64` and no single draw or refill exceeds `i64::MAX`
-    /// bytes, which a debug build asserts.
+    /// It is exact while it stays within `±i64::MAX` and no single draw or refill exceeds
+    /// `i64::MAX` bytes, which a debug build asserts.
     #[inline]
     pub const fn bytes_spent(&self) -> i64 {
         self.bytes_spent
@@ -62,7 +63,7 @@ impl GasTracker {
     #[inline]
     pub const fn add_bytes_spent(&mut self, delta: i64) {
         debug_assert!(
-            self.bytes_spent.checked_add(delta).is_some(),
+            matches!(self.bytes_spent.checked_add(delta), Some(net) if net != i64::MIN),
             "the byte net leaves the signed range"
         );
         self.bytes_spent = self.bytes_spent.saturating_add(delta);
@@ -96,7 +97,11 @@ impl GasTracker {
     #[inline]
     pub const fn refill_bytes(&mut self, amount: u64) {
         debug_assert!(
-            amount <= i64::MAX as u64 && self.bytes_spent.checked_sub(amount as i64).is_some(),
+            amount <= i64::MAX as u64
+                && matches!(
+                    self.bytes_spent.checked_sub(amount as i64),
+                    Some(net) if net != i64::MIN
+                ),
             "the byte net leaves the signed range"
         );
         self.bytes_remaining = self.bytes_remaining.saturating_add(amount);
@@ -434,6 +439,18 @@ mod tests {
     fn test_a_draw_past_the_signed_maximum_panics_in_a_debug_build() {
         let mut tracker = GasTracker::new(1_000, 1_000, 0);
         let _ = tracker.record_bytes(i64::MAX as u64 + 1);
+    }
+
+    /// Below `-i64::MAX` the net would be `i64::MIN`, whose negation saturates, so a share
+    /// adopted against it would be a byte short: a debug build refuses the refill that gets there.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "the byte net leaves the signed range")]
+    fn test_a_refill_past_the_signed_minimum_panics_in_a_debug_build() {
+        let mut tracker = GasTracker::new(1_000, 1_000, 0);
+        tracker.set_bytes_remaining(0);
+        tracker.refill_bytes(i64::MAX as u64);
+        tracker.refill_bytes(1);
     }
 
     /// With the default pool, forwarding the whole pool and settling a child's return brings the
