@@ -1105,6 +1105,32 @@ fn test_a_precompile_answer_keeps_what_its_provider_drew() {
     }
 }
 
+/// A precompile's answer to a value call carries the history allowance the call instruction gave
+/// the start, as a frame does, and an answer to a call without value carries none.
+#[test]
+fn test_a_precompile_answer_to_a_value_call_carries_the_allowance() {
+    let mut parent = call(ECRECOVER, 1);
+    parent.extend(call(ECRECOVER, 0));
+    let run = Run::new(ends(parent)).allowance(ALLOWANCE);
+
+    let (result, handler) = run.with(PoolHandler::new(None));
+
+    assert!(result.is_success(), "{result:?}");
+    let allowances: Vec<u64> = handler.starts.iter().map(|start| start.2).collect();
+    assert_eq!(allowances, [0, ALLOWANCE, 0]);
+    let answered = Returned::ended(InstructionResult::Return, u64::MAX, 0);
+    assert_eq!(
+        handler.returned[..2],
+        [
+            Returned {
+                allowance: ALLOWANCE,
+                ..answered.clone()
+            },
+            answered,
+        ]
+    );
+}
+
 /// A start the handler refuses for the call depth gives its caller the whole share and the start
 /// charge back, as any start that fails does, for a call and a creation alike. The handler's loop
 /// starts the frame one past the call-stack limit, where a 1,025th nested start would be.
