@@ -151,7 +151,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Consumer.** mega-evm's gas detention reads what a halting frame burned. An `OutOfGas` halt zeroes the frame's regular gas inside the interpreter, before the frame's result reaches any boundary mega-evm owns.
 - **Removal.** When upstream keeps a halting frame's regular gas readable, or when mega-evm no longer reads what a halting frame burned.
 - **Default.** Each record is written on the failure side only: the tracker's in cold, out-of-line functions, the interpreter's in its cold out-of-gas halt, the handler's on a precompile's out-of-gas. A deduction or load that succeeds runs the same code.
-  It is two words: the tracker is 88 bytes, and a copy of the tracker, and of every `Gas` and frame result that holds one, is 16 bytes larger.
+  It is two words: the tracker was 88 bytes with it (136 with the byte pool, see The byte pool), and a copy of the tracker, and of every `Gas` and frame result that holds one, is 16 bytes larger.
   Where measured (callgrind, the fork's release profile), the field left a transfer and a precompile call unchanged and cost about 0.1% of the instructions of a creation; the records written on the failure side add nothing measurable.
 
 ### Precompile price
@@ -226,12 +226,66 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Contract.** `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2` call it after every charge they make and after the forward is taken from the caller's gas, before they build the frame's input, on the plain and the inspected path.
   `forward` is the regular gas taken: the frame's gas limit without a value call's stipend. `value` is the value transferred, zero for `DELEGATECALL` and `STATICCALL`; `target` is the account the frame runs as, `None` for a creation.
   `gas` is the caller's tracker. The hook may debit and credit it, and the instruction uses it as the hook left it: nothing is charged after the hook, and the frame's input copies its reservoir from it, so a frame the handler runs and one it answers without running (a precompile) both start from the reservoir the hook left. A charge the hook makes that fails records as any failed charge does, whatever the answer.
+  After the hook the instruction takes two more things off `gas` for the frame's input: the start charge the hook declared (see The start charge) and the child's share of the byte pool (see The byte pool); the share is of the pool as the hook left it.
   `true` hands the start to the handler, which may still refuse it (call depth, balance) or answer it without a frame; what the hook did to `gas` stands either way. `false` fails the instruction out of gas and starts no frame: the forward stays taken unless the hook gave it back, and the halt records the regular gas the hook left unless a failed charge already did.
   A creation the instruction ends before its forward (EIP-8037's checks of the endowment, the nonce and the depth) is not offered.
 - **Consumer.** mega-evm charges a start's write records after the forward and before the frame inherits the caller's reservoir. Without the hook it wraps the call and creation instructions, rewrites the reservoir revm already copied into the input, and takes the input back when the charge fails.
 - **Removal.** When upstream exposes an equivalent point, or when mega-evm stops charging frame starts.
 - **Default.** Returns `true` and touches nothing.
   Where measured (callgrind, the fork's release profile), `CREATE` and `CREATE2` compile to the same code as without the hook, and a call runs one instruction more: the store of the forward its helper returns, about 0.05% of a call to a contract that stops.
+
+### The byte pool
+
+- **API.** On `GasTracker`, forwarded on `Gas`: `bytes_remaining`, `set_bytes_remaining`, `bytes_spent`, `set_bytes_spent`, `record_bytes`, `refill_bytes`, `bytes_crossing`, `clear_bytes_crossing`, `set_bytes_crossing`.
+  On `GasTracker` alone, the fork's own plumbing: `add_bytes_spent`, `forward_bytes`, `absorb_returned_bytes`.
+  The type `BytesCrossing` (`with_cost`, `cost`), re-exported from `revm_interpreter`.
+  `GasId::bytes_forward_percent` and `GasParams::bytes_forward_share(pool)`.
+  `bytes_share` on `CallInputs` (a field) and `CreateInputs` (`bytes_share`, `set_bytes_share`).
+- **Contract.** The pool is a budget of bytes a frame may append, beside its gas: `bytes_remaining` is what the frame may still draw, `bytes_spent` its net draw, signed as `history_gas_spent` is.
+  `record_bytes(n)` draws; a draw the pool cannot pay takes nothing, returns `false` and records a `BytesCrossing` holding the draw refused, which survives `spend_all`, starts empty in every child, is not taken over by a caller, and stays until cleared or replaced; a consumer marks a result it produced itself with `set_bytes_crossing`.
+  No halt touches the pool, so a halted frame's result still reads the pool as the failed draw found it, until its caller settles it.
+  `refill_bytes(n)` gives bytes back and lowers the net, below zero when the draw was a caller's.
+  The transaction's frame gets the whole pool of the transaction's tracker, set by a consumer at `tx_gas` or in pre-execution.
+  At every `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, after `frame_starting` has answered, the instruction takes `bytes_forward_share` of the caller's pool out of it and puts it on the frame's input as `bytes_share`: the child's pool when it starts, on the frame the handler runs and on an answer it gives without one (a precompile, a refused start).
+  `bytes_forward_share` is `bytes_forward_percent` per cent of the pool, rounded down; a hundred or more forwards the whole pool.
+  A forward is not a draw.
+  The settlement is in `handle_reservoir_remaining_gas` and follows the reservoir, not regular gas: a child that reverts or halts has its draws undone by `rollback_state_gas`, which now gives `bytes_spent` back to the pool, so what the caller absorbs is the child's remaining pool on success and the whole share on revert *and on halt*, since a halted frame appends nothing; the caller kept what it did not forward.
+  The child's net merges into the caller's on success only, as the history net does, so a caller's rollback undoes its children's draws too.
+  `rollback_state_gas` rolls the pool back with state and history gas, so a consumer that rolls a frame back by hand rolls the pool back with it.
+  The first frame's return settles into the transaction's tracker the same way (`last_frame_result`), whose `bytes_spent` is then the transaction's net draw.
+  An outcome a consumer or an inspector builds itself carries whatever pool its gas was built with, an unlimited one by default, and the settlement absorbs it as it is; a consumer that answers a start itself sets the answer's pool to the share it was given.
+  The pool is not reported on `ResultGas`.
+- **Consumer.** mega-evm keeps a per-frame budget of the bytes a transaction appends to the state and the history, which a failed frame gives back and a successful one hands to its caller. That is what the tracker does for the reservoir, and only the tracker's forward and settlement can carry a figure that moves with a frame's gas.
+- **Removal.** When upstream carries an equivalent per-frame budget on its gas, or when mega-evm stops limiting bytes per frame.
+- **Default.** Every tracker starts with an unlimited pool (`u64::MAX`), every schedule forwards the whole pool, and nothing in the workspace draws it, so every figure of the pool is the unlimited pool going out and coming back and every result is upstream's.
+  The tracker is 136 bytes with the pool (three words), the allowance (one) and the start-charge carrier (two); encodings that predate the fields decode with an unlimited pool and zero for the rest.
+
+### The start charge
+
+- **API.** The type `StartCharge` (`new`, `history`, `bytes`, `is_zero`; `#[non_exhaustive]`), re-exported from `revm_interpreter`.
+  On `GasTracker`, forwarded on `Gas`: `start_charge`, `set_start_charge`, `take_start_charge`.
+  `charged_start` on `CallInputs`, `CallOutcome` and `CreateOutcome` (fields) and on `CreateInputs` (`charged_start`, `set_charged_start`); `FrameResult::refundable_start_charge`.
+- **Contract.** The start charge is what a frame start charged its caller and the frame's failure gives back: history gas and bytes of the pool.
+  The `frame_starting` hook declares it on the tracker it is handed (`set_start_charge`), after charging it; the instruction takes it off the tracker right after the hook, whatever the answer, and puts it on the frame's input, so the carrier is zero outside that window and is not part of an encoded tracker; a start the hook refuses discards the charge with the start, and what the hook charged stands.
+  The transaction's frame takes the charge a consumer declared on the transaction's tracker.
+  The charge rides from the input to the outcome, and `return_result` refunds it to the caller whole, with `refill_history` and `refill_bytes`, on the condition `refundable_state_gas_charge` uses: a call that did not succeed, a creation that did not succeed or deployed no address; `last_frame_result` refunds the first frame's the same way, and after a halt consumes the regular gas the refill credited, as it does for the state refund.
+  A frame that succeeds keeps the charge.
+- **Consumer.** mega-evm charges a start's write records to the caller at the hook, after the forward and before the frame's input copies the reservoir, and must give them back when the frame fails. The refund belongs where the fork refunds the upfront state charge.
+- **Removal.** When upstream carries an equivalent refundable start charge, or when mega-evm stops charging frame starts.
+- **Default.** The hook declares nothing, so the carrier, the fields and the refund are zero.
+  This entry breaks rule 1 (`api:exception`): `CallInputs`, `CallOutcome` and `CreateOutcome` are constructible by literal and gain fields (`charged_start`, and `CallInputs` also `bytes_share` and `history_allowance`), so a consumer that constructs them by literal does not compile until it names the new fields. alloy-evm 0.36, revm-inspectors 0.40 and the op-revm fork construct them with `new` and are unaffected; `CreateInputs` has private fields and is unaffected.
+
+### The history allowance
+
+- **API.** On `GasTracker`, forwarded on `Gas`: `history_allowance`, `set_history_allowance`, `draw_history_allowance`.
+  `GasId::call_history_allowance` and `GasParams::call_history_allowance()`; `history_allowance` on `CallInputs`.
+- **Contract.** The allowance is history gas a frame may spend before it charges its budget.
+  A call that transfers value gives its child the schedule's `call_history_allowance`, decided where the call instruction adds the call stipend, carried on the input and set on the child's tracker when it starts, on the frame and on an answer alike; no other start gives one, and the transaction's frame has none.
+  Only a consumer draws it: `draw_history_allowance(cost)` takes `min(cost, allowance)` and returns the part of `cost` the allowance did not cover, which the consumer charges as history.
+  The allowance is the frame's alone: it is not returned, merged or rolled back.
+- **Consumer.** mega-evm lets a value call's child log a bounded number of bytes without charging history, as the call stipend lets it run. Only the call instruction knows which starts get the stipend.
+- **Removal.** When upstream carries an equivalent allowance, or when mega-evm drops the rule.
+- **Default.** Zero on every schedule, so every child starts with none and a draw returns the whole cost; nothing in the workspace draws it.
 
 ## Baseline behaviour the fork changes
 
