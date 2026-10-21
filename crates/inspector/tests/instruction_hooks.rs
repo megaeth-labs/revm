@@ -113,9 +113,9 @@ struct Hooks {
     /// Every start's target as the journal held it when the hook saw the start.
     targets: Vec<View>,
     /// Every destruction's account and beneficiary as the journal held them before the write.
-    destructs: Vec<[View; 2]>,
+    destructions_before: Vec<[View; 2]>,
     /// Every destruction's account and beneficiary as the journal held them at the hook.
-    destructed: Vec<[View; 2]>,
+    destructions_at_hook: Vec<[View; 2]>,
 }
 
 /// An account as the journal holds it: its info and the info the transaction loaded it with, or
@@ -142,8 +142,8 @@ impl Hooks {
             writes: Vec::new(),
             starts: Vec::new(),
             targets: Vec::new(),
-            destructs: Vec::new(),
-            destructed: Vec::new(),
+            destructions_before: Vec::new(),
+            destructions_at_hook: Vec::new(),
         }
     }
 }
@@ -224,7 +224,7 @@ impl Host for HookContext {
         } = write
         {
             let accounts = [self.view(address), self.view(target)];
-            self.hooks.destructed.push(accounts);
+            self.hooks.destructions_at_hook.push(accounts);
         }
         if self.hooks.writes.len() == 1 && self.hooks.first_write_charge > 0 {
             assert!(gas.record_history_cost(self.hooks.first_write_charge));
@@ -323,7 +323,7 @@ impl Host for HookContext {
         let before = [self.view(address), self.view(target)];
         let result = self.inner.selfdestruct(address, target, skip_cold_load);
         if result.is_ok() {
-            self.hooks.destructs.push(before);
+            self.hooks.destructions_before.push(before);
         }
         result
     }
@@ -886,19 +886,6 @@ impl Destruct {
         };
         [source, target]
     }
-
-    /// How the write moved the records of the source and of a beneficiary that is another account,
-    /// with the accounts before it as `before` shows them: `1` for an account it changed from what
-    /// the transaction loaded, `-1` for one it put back, `0` otherwise.
-    fn records(&self, before: &[View; 2]) -> (i8, i8) {
-        let moved = |before: &View, after: &View| changed(after) as i8 - changed(before) as i8;
-        let target = if self.target == self.address {
-            0
-        } else {
-            moved(&before[1], &self.after[1])
-        };
-        (moved(&before[0], &self.after[0]), target)
-    }
 }
 
 /// `PUSH32 word`, where `bytes` fill the word from the left.
@@ -1005,8 +992,8 @@ fn destructions(
     let case = format!("{spec:?} {source:?} {held} {payee:?} {twice}");
     assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
     assert_eq!(
-        hooks.destructs.len(),
-        hooks.destructed.len(),
+        hooks.destructions_before.len(),
+        hooks.destructions_at_hook.len(),
         "{case}: every destruction reaches the hook"
     );
     let writes = hooks
@@ -1019,7 +1006,12 @@ fn destructions(
             _ => None,
         });
     writes
-        .zip(hooks.destructs.into_iter().zip(hooks.destructed))
+        .zip(
+            hooks
+                .destructions_before
+                .into_iter()
+                .zip(hooks.destructions_at_hook),
+        )
         .map(
             |((address, target, balance, result), (before, after))| Destruct {
                 address,
@@ -1035,8 +1027,9 @@ fn destructions(
 
 /// For every destruction, the facts the completed-write hook is handed and the journal at the
 /// hook are enough to rebuild both accounts as they were before the write, so a consumer can tell
-/// how the write moved each account's record: the source's balance before the write is what the
-/// hook sees, and rebuilding from it agrees with the journal before the write. Over a source equal
+/// whether each was changed from what the transaction loaded before the write and after it: the
+/// source's balance before the write is what the hook sees, and rebuilding from it agrees with the
+/// journal before the write. Over a source equal
 /// to its beneficiary or not, created in the transaction or not (EIP-6780) and changed before or
 /// not; its balance zero or not; a beneficiary unchanged, changed or new; a first destruction and
 /// a second (destroyed before); on a spec before EIP-6780, one with it, and one with EIP-8246.
@@ -1081,11 +1074,6 @@ fn test_a_destruction_hands_the_hook_what_rebuilds_both_accounts() {
                             } else {
                                 assert!(!changed(&rebuilt[1]), "{case} #{n}: loaded unchanged");
                             }
-                            assert_eq!(
-                                destruct.records(&rebuilt),
-                                destruct.records(&destruct.before),
-                                "{case} #{n}"
-                            );
                             seen += 1;
                         }
                     }
@@ -1098,15 +1086,23 @@ fn test_a_destruction_hands_the_hook_what_rebuilds_both_accounts() {
     assert_eq!(seen, 3 * 3 * 2 * (5 * 3 + 2));
 }
 
-/// Worked examples of how a destruction moves the source's and a beneficiary's records, from the
-/// rule that an account is a record while its nonce, balance or code differs from what the
-/// transaction loaded: each row is `(spec, source, held, payee, twice)` and the moves of each
-/// destruction. The first two rows leave the source the same after the write (loaded with 5, now
-/// 0) and report the same result, but one changed it and one did not: only the balance before the
-/// write tells them apart. A beneficiary the write puts back as loaded takes its record back.
+/// Worked examples of the balances a consumer rebuilds from a destruction's facts: each row is
+/// `(spec, source, held, payee, twice)` and, for each destruction in turn, the source's balance and
+/// the beneficiary's (none when it is the source) before the write. The first two rows leave the
+/// source the same after the write (loaded with 5, now 0) and report the same result, but one
+/// destructed it from 5, as loaded, and the other from 7, after the transaction funded it: only the
+/// balance before the write tells them apart. A drained beneficiary the write pays rebuilds to the
+/// nothing it held.
 #[test]
-fn test_a_destruction_moves_records_as_its_accounts_changed() {
-    type Row = (SpecId, Source, u8, Payee, bool, &'static [(i8, i8)]);
+fn test_a_destruction_rebuilds_to_the_balances_before_it() {
+    type Row = (
+        SpecId,
+        Source,
+        u8,
+        Payee,
+        bool,
+        &'static [(u64, Option<u64>)],
+    );
     let rows: [Row; 13] = [
         (
             SpecId::PRAGUE,
@@ -1114,7 +1110,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             5,
             Payee::New,
             false,
-            &[(1, 1)],
+            &[(5, Some(0))],
         ),
         (
             SpecId::PRAGUE,
@@ -1122,7 +1118,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             5,
             Payee::New,
             false,
-            &[(0, 1)],
+            &[(7, Some(0))],
         ),
         (
             SpecId::PRAGUE,
@@ -1130,7 +1126,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             0,
             Payee::New,
             false,
-            &[(-1, 1)],
+            &[(2, Some(0))],
         ),
         (
             SpecId::PRAGUE,
@@ -1138,7 +1134,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             0,
             Payee::New,
             false,
-            &[(0, 0)],
+            &[(0, Some(0))],
         ),
         (
             SpecId::PRAGUE,
@@ -1146,7 +1142,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             5,
             Payee::Funded,
             false,
-            &[(1, 0)],
+            &[(5, Some(5))],
         ),
         (
             SpecId::PRAGUE,
@@ -1154,7 +1150,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             5,
             Payee::Untouched,
             false,
-            &[(1, 1)],
+            &[(5, Some(4))],
         ),
         (
             SpecId::PRAGUE,
@@ -1162,7 +1158,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             5,
             Payee::Itself,
             false,
-            &[(0, 0)],
+            &[(5, None)],
         ),
         (
             SpecId::SHANGHAI,
@@ -1170,7 +1166,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             5,
             Payee::Itself,
             false,
-            &[(1, 0)],
+            &[(5, None)],
         ),
         (
             SpecId::AMSTERDAM,
@@ -1178,7 +1174,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             5,
             Payee::Itself,
             false,
-            &[(0, 0)],
+            &[(5, None)],
         ),
         (
             SpecId::PRAGUE,
@@ -1186,7 +1182,7 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             5,
             Payee::New,
             false,
-            &[(0, 1)],
+            &[(5, Some(0))],
         ),
         (
             SpecId::PRAGUE,
@@ -1194,17 +1190,16 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             5,
             Payee::New,
             true,
-            &[(0, 1), (0, 0)],
+            &[(5, Some(0)), (3, Some(5))],
         ),
-        // The drained account's own destruction first, then one that puts it back as loaded, or
-        // pays it nothing and leaves it changed.
+        // The drained account's own destruction in favour of `PARENT` comes first.
         (
             SpecId::PRAGUE,
             Source::Untouched,
             5,
             Payee::Drained,
             false,
-            &[(1, 1), (1, -1)],
+            &[(5, Some(100)), (5, Some(0))],
         ),
         (
             SpecId::PRAGUE,
@@ -1212,19 +1207,24 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             0,
             Payee::Drained,
             false,
-            &[(1, 1), (0, 0)],
+            &[(5, Some(100)), (0, Some(0))],
         ),
     ];
+    let balance = |view: &View| view.as_ref().expect("loaded").0.balance.to::<u64>();
     let mut afters = Vec::new();
-    for (spec, source, held, payee, twice, moves) in rows {
+    for (spec, source, held, payee, twice, balances) in rows {
         let case = format!("{spec:?} {source:?} {held} {payee:?} {twice}");
         let destructs = destructions(spec, source, held, payee, twice);
-        let seen: Vec<(i8, i8)> = destructs
+        let seen: Vec<(u64, Option<u64>)> = destructs
             .iter()
-            .map(|destruct| destruct.records(&destruct.rebuilt()))
+            .map(|destruct| {
+                let rebuilt = destruct.rebuilt();
+                let paid = (destruct.target != destruct.address).then(|| balance(&rebuilt[1]));
+                (balance(&rebuilt[0]), paid)
+            })
             .collect();
 
-        assert_eq!(seen, moves, "{case}");
+        assert_eq!(seen, balances, "{case}");
         afters.push((facts(&destructs[0].after[0]), destructs[0].result.clone()));
     }
     assert_eq!(afters[0], afters[1], "the same after the write");
