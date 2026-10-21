@@ -8,7 +8,10 @@ pub use call_helpers::{
 use call_helpers::load_acc_and_calc_forward;
 
 use crate::{
-    instructions::{instruction_hooks::frame_starting, utility::IntoAddress},
+    instructions::{
+        instruction_hooks::{forward_bytes, frame_starting},
+        utility::IntoAddress,
+    },
     interpreter_action::FrameInput,
     interpreter_types::{
         InputsTr, InterpreterTypes as ITy, LoopControl, MemoryTr, ReturnData, RuntimeFlag, StackTr,
@@ -179,10 +182,13 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
         FrameStartKind::Create
     };
     let start = FrameStart::new(kind, create_inputs.caller(), None, value, gas_limit);
-    frame_starting(&mut context.interpreter.gas, context.host, &start)?;
+    let charged_start = frame_starting(&mut context.interpreter.gas, context.host, &start)?;
+    let bytes_share = forward_bytes(&mut context.interpreter.gas, context.host);
 
     create_inputs.set_gas_limit(gas_limit);
     create_inputs.set_reservoir(context.interpreter.gas.reservoir());
+    create_inputs.set_charged_start(charged_start);
+    create_inputs.set_bytes_share(bytes_share);
     context
         .interpreter
         .bytecode
@@ -226,8 +232,14 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
         get_memory_input_and_out_ranges(context.interpreter, context.host.gas_params())?;
 
     let is_call = KIND == CALL;
-    let (gas_limit, bytecode, bytecode_hash, charged_new_account_state_gas, forward) =
-        load_acc_and_calc_forward(&mut context, to, has_transfer, is_call, local_gas_limit)?;
+    let (
+        gas_limit,
+        bytecode,
+        bytecode_hash,
+        charged_new_account_state_gas,
+        forward,
+        history_allowance,
+    ) = load_acc_and_calc_forward(&mut context, to, has_transfer, is_call, local_gas_limit)?;
 
     let target_address = if matches!(KIND, CALLCODE | DELEGATECALL) {
         context.interpreter.input.target_address()
@@ -261,7 +273,8 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
     };
     let transferred = value.transfer().unwrap_or_default();
     let start = FrameStart::new(kind, caller, Some(target_address), transferred, forward);
-    frame_starting(&mut context.interpreter.gas, context.host, &start)?;
+    let charged_start = frame_starting(&mut context.interpreter.gas, context.host, &start)?;
+    let bytes_share = forward_bytes(&mut context.interpreter.gas, context.host);
 
     // Call host to interact with target contract
     context
@@ -281,6 +294,9 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
                 return_memory_offset,
                 reservoir: context.interpreter.gas.reservoir(),
                 charged_new_account_state_gas,
+                charged_start,
+                bytes_share,
+                history_allowance,
             },
         ))));
     Err(InstructionResult::Suspend)

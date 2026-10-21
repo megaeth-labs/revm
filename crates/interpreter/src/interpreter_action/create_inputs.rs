@@ -1,9 +1,9 @@
-use context_interface::CreateScheme;
+use context_interface::{cfg::gas::StartCharge, CreateScheme};
 use core::cell::OnceCell;
 use primitives::{keccak256, Address, Bytes, B256, U256};
 
 /// Inputs for a create call
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CreateInputs {
     /// Caller address of the EVM
@@ -29,6 +29,20 @@ pub struct CreateInputs {
     /// Encodings made before this field existed decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     charged_state_gas_address: Address,
+    /// What the frame-start hook charged the caller for this creation and the creation's failure
+    /// gives back: history gas and bytes of the pool, refunded to the caller by `return_result`
+    /// when the creation fails, as `charged_create_state_gas` is.
+    ///
+    /// Encodings made before this field existed decode it as no charge.
+    #[cfg_attr(feature = "serde", serde(default))]
+    charged_start: StartCharge,
+    /// The share of the caller's byte pool the creation receives: its pool when it starts. Taken
+    /// out of the caller's pool by the creation instruction, by the schedule's
+    /// `bytes_forward_percent`, and given back with what the creation left of it when it returns.
+    ///
+    /// Encodings made before this field existed decode it as unlimited.
+    #[cfg_attr(feature = "serde", serde(default = "unlimited_bytes"))]
+    bytes_share: u64,
     /// Cached created address. This is computed lazily and cached to avoid
     /// redundant keccak computations when inspectors call `created_address`.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -38,6 +52,27 @@ pub struct CreateInputs {
     /// init code is computed at most once.
     #[cfg_attr(feature = "serde", serde(skip))]
     cached_init_code_hash: OnceCell<B256>,
+}
+
+/// The share an encoding that predates the byte pool decodes to.
+#[cfg(feature = "serde")]
+const fn unlimited_bytes() -> u64 {
+    u64::MAX
+}
+
+impl Default for CreateInputs {
+    /// Empty inputs, as [`new`](Self::new) builds them, so the share starts unlimited.
+    #[inline]
+    fn default() -> Self {
+        Self::new(
+            Address::ZERO,
+            CreateScheme::Create,
+            U256::ZERO,
+            Bytes::new(),
+            0,
+            0,
+        )
+    }
 }
 
 impl CreateInputs {
@@ -59,6 +94,8 @@ impl CreateInputs {
             reservoir,
             charged_create_state_gas: false,
             charged_state_gas_address: Address::ZERO,
+            charged_start: StartCharge::new(0, 0),
+            bytes_share: u64::MAX,
             cached_address: OnceCell::new(),
             cached_init_code_hash: OnceCell::new(),
         }
@@ -172,5 +209,26 @@ impl CreateInputs {
     /// Sets the state gas reservoir (EIP-8037).
     pub const fn set_reservoir(&mut self, reservoir: u64) {
         self.reservoir = reservoir;
+    }
+
+    /// What the frame-start hook charged the caller for this creation and the creation's failure
+    /// gives back.
+    pub const fn charged_start(&self) -> StartCharge {
+        self.charged_start
+    }
+
+    /// Records what the frame-start hook charged the caller for this creation.
+    pub const fn set_charged_start(&mut self, charge: StartCharge) {
+        self.charged_start = charge;
+    }
+
+    /// The share of the caller's byte pool the creation receives: its pool when it starts.
+    pub const fn bytes_share(&self) -> u64 {
+        self.bytes_share
+    }
+
+    /// Sets the share of the caller's byte pool the creation receives.
+    pub const fn set_bytes_share(&mut self, share: u64) {
+        self.bytes_share = share;
     }
 }

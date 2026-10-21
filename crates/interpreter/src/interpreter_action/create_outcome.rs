@@ -1,4 +1,4 @@
-use crate::{Gas, InstructionResult, InterpreterResult};
+use crate::{Gas, InstructionResult, InterpreterResult, StartCharge};
 use primitives::{Address, Bytes};
 
 /// Represents the outcome of a create operation in an interpreter.
@@ -26,6 +26,13 @@ pub struct CreateOutcome {
     /// Encodings made before this field existed decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_state_gas_address: Address,
+    /// Copied from `CreateInputs::charged_start`: what the frame-start hook charged the caller
+    /// for this creation and the creation's failure gives back, so the parent can refund it when
+    /// the creation fails.
+    ///
+    /// Encodings made before this field existed decode it as no charge.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub charged_start: StartCharge,
 }
 
 impl CreateOutcome {
@@ -45,6 +52,7 @@ impl CreateOutcome {
             address,
             charged_create_state_gas: false,
             charged_state_gas_address: Address::ZERO,
+            charged_start: StartCharge::new(0, 0),
         }
     }
 

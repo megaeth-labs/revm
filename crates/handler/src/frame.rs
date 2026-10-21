@@ -159,6 +159,7 @@ impl EthFrame<EthInterpreter> {
         let reservoir_remaining_gas = inputs.reservoir;
         let charged_new_account_state_gas = inputs.charged_new_account_state_gas;
         let charged_state_gas_address = inputs.target_address;
+        let charged_start = inputs.charged_start;
         let gas =
             Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, reservoir_remaining_gas);
 
@@ -174,6 +175,7 @@ impl EthFrame<EthInterpreter> {
                 precompile_call_logs: Vec::new(),
                 charged_new_account_state_gas,
                 charged_state_gas_address,
+                charged_start,
             })))
         };
 
@@ -228,6 +230,7 @@ impl EthFrame<EthInterpreter> {
                 precompile_call_logs: logs,
                 charged_new_account_state_gas,
                 charged_state_gas_address,
+                charged_start,
             })));
         }
 
@@ -282,6 +285,7 @@ impl EthFrame<EthInterpreter> {
         // Recorded by whoever made the charge — the CREATE opcode or the EIP-2780 runtime phase
         // — because the created address is not derivable here on the early-fail paths.
         let charged_state_gas_address = inputs.charged_state_gas_address();
+        let charged_start = inputs.charged_start();
         let return_error = |e| {
             Ok(ItemOrResult::Result(FrameResult::Create(CreateOutcome {
                 result: InterpreterResult {
@@ -295,6 +299,7 @@ impl EthFrame<EthInterpreter> {
                 address: None,
                 charged_create_state_gas,
                 charged_state_gas_address,
+                charged_start,
             })))
         };
 

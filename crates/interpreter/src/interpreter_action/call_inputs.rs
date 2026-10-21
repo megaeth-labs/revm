@@ -1,5 +1,5 @@
 use crate::interpreter_types::MemoryTr;
-use context_interface::{ContextTr, LocalContextTr};
+use context_interface::{cfg::gas::StartCharge, ContextTr, LocalContextTr};
 use core::ops::Range;
 use primitives::{Address, Bytes, B256, U256};
 use state::Bytecode;
@@ -174,6 +174,33 @@ pub struct CallInputs {
     /// On revert/halt of the resulting frame the parent must refund this charge
     /// to the reservoir, matching the CREATE pattern.
     pub charged_new_account_state_gas: bool,
+    /// What the frame-start hook charged the caller for this call and the call's failure gives
+    /// back: history gas and bytes of the pool, refunded to the caller by `return_result` when
+    /// the call does not succeed, as `charged_new_account_state_gas` is.
+    ///
+    /// Encodings made before this field existed decode it as no charge.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub charged_start: StartCharge,
+    /// The share of the caller's byte pool the call receives: its pool when it starts. Taken out
+    /// of the caller's pool by the call instruction, by the schedule's `bytes_forward_percent`,
+    /// and given back with what the call left of it when it returns.
+    ///
+    /// Encodings made before this field existed decode it as unlimited.
+    #[cfg_attr(feature = "serde", serde(default = "unlimited_bytes"))]
+    pub bytes_share: u64,
+    /// History gas the call may spend before it charges its budget: the schedule's
+    /// `call_history_allowance` for a call that transfers value, set where the call instruction
+    /// adds the call stipend, and zero otherwise.
+    ///
+    /// Encodings made before this field existed decode it as zero.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub history_allowance: u64,
+}
+
+/// The share an encoding that predates the byte pool decodes to.
+#[cfg(feature = "serde")]
+const fn unlimited_bytes() -> u64 {
+    u64::MAX
 }
 
 impl CallInputs {

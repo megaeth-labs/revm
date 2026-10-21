@@ -6,7 +6,7 @@ use context_interface::{
 };
 use interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
-    GasTracker,
+    GasTracker, StartCharge,
 };
 use primitives::{Address, TxKind};
 use state::Bytecode;
@@ -132,6 +132,9 @@ pub fn create_init_frame<CTX: ContextTr>(
                 return_memory_offset: 0..0,
                 reservoir: gas.reservoir(),
                 charged_new_account_state_gas,
+                charged_start: StartCharge::default(),
+                bytes_share: u64::MAX,
+                history_allowance: 0,
             }))))
         }
         TxKind::Create => {

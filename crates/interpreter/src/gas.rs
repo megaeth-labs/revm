@@ -2,6 +2,7 @@
 
 pub use context_interface::cfg::gas::*;
 
+mod byte_pool;
 mod failed_charge;
 mod withheld;
 

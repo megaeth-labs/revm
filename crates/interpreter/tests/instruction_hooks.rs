@@ -778,8 +778,9 @@ fn input_gas(input: &FrameInput) -> (u64, u64) {
 }
 
 /// Each frame-starting instruction hands its start to the hook once the forward is taken, and
-/// charges nothing after it: the instruction leaves the gas the hook was handed, and the frame's
-/// input carries the forward, with a value call's stipend on top.
+/// charges nothing after it: the instruction leaves the gas the hook was handed, apart from the
+/// byte pool, whose share goes to the frame after the hook, and the frame's input carries the
+/// forward, with a value call's stipend on top.
 #[test]
 fn test_a_start_reaches_the_hook_with_the_forward_taken() {
     let spec = SpecId::OSAKA;
@@ -821,10 +822,12 @@ fn test_a_start_reaches_the_hook_with_the_forward_taken() {
             before_forward - forward,
             "{name}: the hook sees the forward taken"
         );
+        let mut after_the_forward = at_hook;
+        after_the_forward.set_bytes_remaining(0);
         assert_eq!(
             *gas.tracker(),
-            at_hook,
-            "{name}: nothing is charged after the hook"
+            after_the_forward,
+            "{name}: nothing is charged after the hook; the whole pool is forwarded"
         );
         let stipend = if matches!(op, CALL | CALLCODE) {
             params.call_stipend()
