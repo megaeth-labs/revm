@@ -10,10 +10,11 @@
 //! the frames draw the pool through instructions of the test's own, which stand in for a
 //! consumer's hooks: `DRAW` draws bytes, `DECLARE` has the start hook charge and declare a start
 //! charge at the next start, and `LOG` charges history after drawing the frame's allowance, as a
-//! consumer's write hook would.
+//! consumer's write hook would. The context's code-deposit admission hook draws deployed code's
+//! bytes when a test asks it to.
 
 use bytecode::opcode::{
-    CALL, CREATE, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH3, REVERT, STOP,
+    CALL, CREATE, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH3, RETURN, REVERT, STOP,
 };
 use context::{
     result::{EVMError, ExecutionResult},
@@ -22,6 +23,7 @@ use context::{
 };
 use context_interface::{
     cfg::{gas::InitialAndFloorGas, GasId, GasParams, StateGasSite},
+    context::CodeDeposit,
     host::{FrameStart, LoadError},
     journaled_state::AccountInfoLoad,
     Database, Host,
@@ -157,12 +159,25 @@ impl Returned {
     }
 }
 
+/// What the code-deposit admission hook does with a deposit.
+#[derive(Clone, Copy, Debug)]
+enum Deposit {
+    /// Admits it and touches nothing, as the default hook does.
+    Untouched,
+    /// Draws the code's bytes from the creating frame's pool and admits it.
+    Drawn,
+    /// Draws the code's bytes from the creating frame's pool and refuses it.
+    DrawnAndRefused,
+}
+
 /// The mainnet [`Context`] with a start hook that does what a consumer's does for a start
-/// `DECLARE` marked: charges [`DECLARED`] on the caller's gas and declares it on the start.
+/// `DECLARE` marked: charges [`DECLARED`] on the caller's gas and declares it on the start; and an
+/// admission hook that does with a code deposit what [`Deposit`] says.
 struct DeclaringContext {
     inner: MainnetContext<Db>,
     /// Set by `DECLARE`, taken by the next start.
     declare_next: bool,
+    deposit: Deposit,
 }
 
 impl ContextTr for DeclaringContext {
@@ -203,6 +218,24 @@ impl ContextTr for DeclaringContext {
 
     fn error(&mut self) -> &mut Result<(), ContextError<DbError>> {
         self.inner.error()
+    }
+
+    fn admit_code_deposit(
+        &mut self,
+        deposit: &CodeDeposit<'_>,
+        gas: &mut GasTracker,
+    ) -> Result<(), Bytes> {
+        let refuses = match self.deposit {
+            Deposit::Untouched => return Ok(()),
+            Deposit::Drawn => false,
+            Deposit::DrawnAndRefused => true,
+        };
+        assert!(gas.record_bytes(deposit.code.len() as u64));
+        if refuses {
+            Err(Bytes::new())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -536,6 +569,7 @@ struct Run {
     parent_nonce: u64,
     /// `call_history_allowance` in the schedule.
     allowance: u64,
+    deposit: Deposit,
 }
 
 impl Run {
@@ -545,7 +579,13 @@ impl Run {
             parent_balance: 10,
             parent_nonce: 1,
             allowance: 0,
+            deposit: Deposit::Untouched,
         }
+    }
+
+    const fn deposit(mut self, deposit: Deposit) -> Self {
+        self.deposit = deposit;
+        self
     }
 
     const fn penniless(mut self) -> Self {
@@ -606,6 +646,7 @@ impl Run {
         let ctx = DeclaringContext {
             inner,
             declare_next: false,
+            deposit: self.deposit,
         };
         let mut instructions = EthInstructions::new_mainnet_with_spec(SPEC);
         instructions.insert_instruction(DRAW, Instruction::new(draw), 0);
@@ -890,4 +931,40 @@ fn test_a_consumer_that_sets_nothing_sees_the_mainnet_result() {
         "the unlimited pool, less the draws so far"
     );
     assert_eq!(handler.settled, Some((less(2), 2 * DRAW_BYTES as i64, 0)));
+}
+
+/// The admission hook draws deployed code's bytes from the creating frame's pool. An admitted
+/// deposit's draw is the creation's own: its caller takes its net over and the transaction's net
+/// counts it, as for any draw of a frame that succeeded. A refused deposit ends the creation as a
+/// revert with the draw undone, and its caller gets the whole share back.
+#[test]
+fn test_a_deposit_drawn_at_admission_is_held_against_the_transaction() {
+    // Deploys 32 zero bytes.
+    let initcode = [PUSH1, 32, PUSH0, RETURN];
+    for (name, deposit, returned, settled) in [
+        (
+            "admitted",
+            Deposit::Drawn,
+            Returned::ended(InstructionResult::Return, POOL - 32, 32),
+            (POOL - 32, 32, 0),
+        ),
+        (
+            "refused",
+            Deposit::DrawnAndRefused,
+            Returned::ended(InstructionResult::Revert, POOL, 0),
+            (POOL, 0, 0),
+        ),
+    ] {
+        let run = Run::new(ends(create(&initcode))).deposit(deposit);
+
+        let (result, handler) = run.with(PoolHandler::new(Some(POOL)));
+
+        assert!(result.is_success(), "{name}: {result:?}");
+        assert_eq!(
+            handler.starts[1].0, POOL,
+            "{name}: the whole pool forwarded"
+        );
+        assert_eq!(handler.returned[0], returned, "{name}");
+        assert_eq!(handler.settled, Some(settled), "{name}");
+    }
 }

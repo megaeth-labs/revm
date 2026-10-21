@@ -5,7 +5,8 @@
 //! admission hook, which records every deposit it is offered and admits, refuses with a named
 //! output, or fails fatally. Each case is compared with a twin: an admitting context against
 //! [`Context`] itself, and a refused deposit against the same creation whose init code reverts.
-//! One test calls `return_create` directly, on a frame whose regular gas is partly withheld.
+//! Two tests call `return_create` directly: on a frame whose regular gas is partly withheld, and
+//! on a frame with a byte pool the hook draws the deposit from.
 
 use bytecode::opcode::{
     CREATE, MSTORE, MSTORE8, PUSH0, PUSH1, PUSH3, PUSH4, RETURN, RETURNDATASIZE, REVERT, SSTORE,
@@ -60,7 +61,7 @@ const REVERT_32: [u8; 4] = [PUSH1, 32, PUSH0, REVERT];
 const RETURN_EF: [u8; 8] = [PUSH1, 0xEF, PUSH0, MSTORE8, PUSH1, 1, PUSH0, RETURN];
 
 /// What the context does with a deposit it is offered.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Policy {
     Admit,
     Refuse,
@@ -81,6 +82,9 @@ struct Offered {
 struct AdmissionContext {
     inner: MainnetContext<Db>,
     policy: Policy,
+    /// Bytes the hook draws from the creating frame's pool before it decides, as a consumer that
+    /// holds deployed code to a byte budget does; zero draws nothing.
+    draw: u64,
     offered: Vec<Offered>,
     /// The creating frame's gas before and after the deposit's charges, of every deposit offered.
     offered_gas: Vec<(GasTracker, GasTracker)>,
@@ -128,7 +132,13 @@ impl ContextTr for AdmissionContext {
         self.inner.error()
     }
 
-    fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+    fn admit_code_deposit(
+        &mut self,
+        deposit: &CodeDeposit<'_>,
+        gas: &mut GasTracker,
+    ) -> Result<(), Bytes> {
+        // A draw the pool cannot pay records the crossing on `gas`, as any failed draw does.
+        let _ = gas.record_bytes(self.draw);
         self.offered.push(Offered {
             address: deposit.address,
             code: deposit.code.clone(),
@@ -327,6 +337,7 @@ fn admission_context(db: Db, schedule: Schedule, policy: Policy) -> AdmissionCon
     AdmissionContext {
         inner: context(db, schedule),
         policy,
+        draw: 0,
         offered: Vec::new(),
         offered_gas: Vec::new(),
         deposit_prices: Vec::new(),
@@ -647,11 +658,18 @@ fn return_create_on(
         history_per_byte: 0,
     };
     let mut ctx = admission_context(db(None), schedule, policy);
+    let result = return_create_with(&mut ctx, gas, code);
+    (result, ctx)
+}
+
+/// Calls `return_create` on `ctx` for a creation at [`CONTRACT`] that returned `code` with `gas`,
+/// and returns the creation's result.
+fn return_create_with<CTX: ContextTr>(ctx: &mut CTX, gas: Gas, code: Bytes) -> InterpreterResult {
     ctx.journal_mut().load_account(CONTRACT).unwrap();
     let checkpoint = ctx.journal_mut().checkpoint();
     let mut result = InterpreterResult::new(InstructionResult::Return, code, gas);
-    return_create(&mut ctx, checkpoint, &mut result, CONTRACT);
-    (result, ctx)
+    return_create(ctx, checkpoint, &mut result, CONTRACT);
+    result
 }
 
 /// Before Homestead a frame that cannot pay the code deposit does not fail: `return_create`
@@ -717,6 +735,96 @@ fn test_a_pre_homestead_deposit_the_frame_cannot_pay_is_offered_with_its_crossin
     let (result, ctx) = return_create_on(SpecId::HOMESTEAD, Policy::Admit, gas, code);
     assert!(ctx.offered.is_empty());
     assert_eq!(result.result, InstructionResult::OutOfGas);
+}
+
+/// The hook is lent the creating frame's gas, so it can draw the deployed code's bytes from the
+/// frame's pool. A draw on an admitted deposit stays on the frame, a failed one with its crossing;
+/// a refusal puts the gas back to `gas_before`, which undoes the draw and discards the crossing.
+/// The default hook leaves the gas as the deposit's charges left it.
+#[test]
+fn test_the_hook_draws_the_deposit_from_the_frames_pool() {
+    const POOL: u64 = 1_000;
+    let mut gas = Gas::new(100_000);
+    gas.set_bytes_remaining(POOL);
+    let code = Bytes::from_static(&[0; 32]);
+    // OSAKA: the deposit is one regular charge, 200 per byte.
+    let charged = {
+        let mut charged = gas;
+        assert!(charged.record_regular_cost(32 * 200));
+        charged
+    };
+    let pool = |gas: &Gas| {
+        (
+            gas.bytes_remaining(),
+            gas.bytes_spent(),
+            gas.bytes_crossing(),
+        )
+    };
+
+    let default = return_create_with(&mut context(db(None), SCHEDULES[0]), gas, code.clone());
+    assert_eq!(default.result, InstructionResult::Return, "the default");
+    assert_eq!(
+        default.gas, charged,
+        "the default hook leaves the gas alone"
+    );
+
+    for (name, policy, draw, result, figures) in [
+        (
+            "admitted",
+            Policy::Admit,
+            32,
+            InstructionResult::Return,
+            (POOL - 32, 32, false),
+        ),
+        (
+            "admitted, the draw failed",
+            Policy::Admit,
+            POOL + 1,
+            InstructionResult::Return,
+            (POOL, 0, true),
+        ),
+        (
+            "refused",
+            Policy::Refuse,
+            32,
+            InstructionResult::Revert,
+            (POOL, 0, false),
+        ),
+        (
+            "refused, the draw failed",
+            Policy::Refuse,
+            POOL + 1,
+            InstructionResult::Revert,
+            (POOL, 0, false),
+        ),
+    ] {
+        let mut ctx = admission_context(db(None), SCHEDULES[0], policy);
+        ctx.draw = draw;
+
+        let returned = return_create_with(&mut ctx, gas, code.clone());
+
+        assert_eq!(ctx.offered.len(), 1, "{name}");
+        assert_eq!(returned.result, result, "{name}");
+        assert_eq!(pool(&returned.gas), figures, "{name}");
+        let [(before, after)] = ctx.offered_gas[..] else {
+            panic!("{name}: offered {} times", ctx.offered_gas.len());
+        };
+        assert_eq!(&before, gas.tracker(), "{name}: gas_before");
+        assert_eq!(
+            &after,
+            charged.tracker(),
+            "{name}: gas_after, before the hook drew"
+        );
+        if policy == Policy::Refuse {
+            assert_eq!(returned.gas, gas, "{name}: put back to gas_before");
+        } else {
+            assert_eq!(
+                returned.gas.remaining(),
+                charged.remaining(),
+                "{name}: the deposit is paid"
+            );
+        }
+    }
 }
 
 /// A hook that fails fatally records the cause and refuses; the transaction returns the cause,

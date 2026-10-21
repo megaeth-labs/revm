@@ -7,7 +7,7 @@
 
 use context::{
     context_interface::{
-        cfg::{GasId, GasParams, StateGasSite},
+        cfg::{gas::GasTracker, GasId, GasParams, StateGasSite},
         context::CodeDeposit,
         host::LoadError,
         journaled_state::AccountInfoLoad,
@@ -88,7 +88,11 @@ impl ContextTr for RefusingContext {
         self.inner.error()
     }
 
-    fn admit_code_deposit(&mut self, _deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
+    fn admit_code_deposit(
+        &mut self,
+        _deposit: &CodeDeposit<'_>,
+        _gas: &mut GasTracker,
+    ) -> Result<(), Bytes> {
         self.offered += 1;
         Err(Bytes::from_static(REFUSAL))
     }
