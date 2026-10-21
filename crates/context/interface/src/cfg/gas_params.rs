@@ -232,6 +232,9 @@ impl GasParams {
             gas::NON_ZERO_BYTE_MULTIPLIER;
         table[GasId::tx_token_cost().as_usize()] = gas::STANDARD_TOKEN_COST;
         table[GasId::tx_base_stipend().as_usize()] = 21000;
+        // The fork's entries: a child frame receives the whole byte pool, and a value call's
+        // child no history allowance, on every spec.
+        table[GasId::bytes_forward_percent().as_usize()] = 100;
 
         if spec.is_enabled_in(SpecId::HOMESTEAD) {
             table[GasId::tx_create_cost().as_usize()] = gas::CREATE;
@@ -814,6 +817,28 @@ impl GasParams {
             .saturating_mul(len as u64)
     }
 
+    /// The share of a caller's byte pool a child frame receives when it starts:
+    /// [`bytes_forward_percent`](GasId::bytes_forward_percent) per cent of `pool`, rounded down.
+    ///
+    /// A hundred or more, which every schedule here sets, forwards the whole pool.
+    #[inline]
+    pub fn bytes_forward_share(&self, pool: u64) -> u64 {
+        let percent = self.get(GasId::bytes_forward_percent());
+        if percent >= 100 {
+            return pool;
+        }
+        // `floor(pool * percent / 100)` without widening: the quotient's part is exact, and the
+        // remainder's part is below a hundred times a hundred.
+        pool / 100 * percent + pool % 100 * percent / 100
+    }
+
+    /// History gas a value call's child may spend before it charges its budget
+    /// ([`call_history_allowance`](GasId::call_history_allowance)). Zero on every schedule here.
+    #[inline]
+    pub fn call_history_allowance(&self) -> u64 {
+        self.get(GasId::call_history_allowance())
+    }
+
     /// Used in [GasParams::initial_tx_gas] to calculate the eip7702 per-auth cost.
     ///
     /// Pre-Amsterdam this is the pessimistic bundled `PER_EMPTY_ACCOUNT_COST`
@@ -1276,6 +1301,8 @@ impl GasId {
             x if x == Self::tx_account_write_cost().as_u8() => "tx_account_write_cost",
             x if x == Self::tx_create_access_cost().as_u8() => "tx_create_access_cost",
             x if x == Self::code_deposit_history_gas().as_u8() => "code_deposit_history_gas",
+            x if x == Self::bytes_forward_percent().as_u8() => "bytes_forward_percent",
+            x if x == Self::call_history_allowance().as_u8() => "call_history_allowance",
             _ => "unknown",
         }
     }
@@ -1351,6 +1378,8 @@ impl GasId {
             "tx_account_write_cost" => Some(Self::tx_account_write_cost()),
             "tx_create_access_cost" => Some(Self::tx_create_access_cost()),
             "code_deposit_history_gas" => Some(Self::code_deposit_history_gas()),
+            "bytes_forward_percent" => Some(Self::bytes_forward_percent()),
+            "call_history_allowance" => Some(Self::call_history_allowance()),
             _ => None,
         }
     }
@@ -1641,6 +1670,28 @@ impl GasId {
     pub const fn code_deposit_history_gas() -> GasId {
         Self::new(255)
     }
+
+    /// The share of a caller's byte pool a child frame receives when it starts, in per cent of
+    /// the pool, rounded down ([`GasParams::bytes_forward_share`]). A hundred, the whole pool,
+    /// on every schedule defined here; a chain that keeps part of the pool for the caller lowers
+    /// it.
+    ///
+    /// A fork id, allocated from the top of the table below
+    /// [`code_deposit_history_gas`](Self::code_deposit_history_gas).
+    pub const fn bytes_forward_percent() -> GasId {
+        Self::new(254)
+    }
+
+    /// History gas a value call's child may spend before it charges its budget
+    /// ([`GasTracker::history_allowance`](crate::cfg::gas::GasTracker::history_allowance)). The
+    /// call instruction sets it on the child where it adds the call stipend. Zero on every
+    /// schedule defined here.
+    ///
+    /// A fork id, allocated from the top of the table below
+    /// [`bytes_forward_percent`](Self::bytes_forward_percent).
+    pub const fn call_history_allowance() -> GasId {
+        Self::new(253)
+    }
 }
 
 #[cfg(test)]
@@ -1713,16 +1764,91 @@ mod tests {
             "Not all unique names are resolvable via from_str"
         );
 
-        // The known GasIds are upstream's indices 1-49 (0 is unused) plus the fork's
-        // `code_deposit_history_gas` at 255, allocated from the top of the table so upstream's
-        // next sequential id does not collide with it. Every one of them has a name.
-        let expected_ids: HashSet<u8> = (1..=49).chain([255]).collect();
+        // The known GasIds are upstream's indices 1-49 (0 is unused) plus the fork's, allocated
+        // from the top of the table so upstream's next sequential id does not collide with them:
+        // `code_deposit_history_gas` at 255, `bytes_forward_percent` at 254 and
+        // `call_history_allowance` at 253. Every one of them has a name.
+        let expected_ids: HashSet<u8> = (1..=49).chain([253, 254, 255]).collect();
         assert_eq!(named_ids, expected_ids);
         assert_eq!(
             unique_names.len(),
-            50,
-            "Expected 50 unique GasIds, found {}",
+            52,
+            "Expected 52 unique GasIds, found {}",
             unique_names.len()
+        );
+    }
+
+    /// Every schedule forwards the whole pool: the share is the pool itself, `u64::MAX`
+    /// included. A schedule that sets a percentage forwards that much, rounded down, and one at
+    /// or above a hundred forwards the whole pool.
+    #[test]
+    fn test_bytes_forward_share_defaults_to_the_whole_pool() {
+        for spec in [
+            SpecId::FRONTIER,
+            SpecId::LONDON,
+            SpecId::OSAKA,
+            SpecId::AMSTERDAM,
+            SpecId::default(),
+        ] {
+            let params = GasParams::new_spec(spec);
+            assert_eq!(params.get(GasId::bytes_forward_percent()), 100, "{spec:?}");
+            for pool in [0, 1, 99, 100, 149, 1_000, u64::MAX - 1, u64::MAX] {
+                assert_eq!(params.bytes_forward_share(pool), pool, "{spec:?} {pool}");
+            }
+        }
+
+        let mut params = GasParams::new_spec(SpecId::OSAKA);
+        params.override_gas([(GasId::bytes_forward_percent(), 98)]);
+        assert_eq!(params.bytes_forward_share(0), 0);
+        assert_eq!(params.bytes_forward_share(1), 0);
+        assert_eq!(params.bytes_forward_share(100), 98);
+        assert_eq!(params.bytes_forward_share(149), 146, "rounded down");
+        assert_eq!(params.bytes_forward_share(1_000), 980);
+        assert_eq!(
+            params.bytes_forward_share(u64::MAX),
+            (u64::MAX as u128 * 98 / 100) as u64,
+            "no overflow"
+        );
+
+        params.override_gas([(GasId::bytes_forward_percent(), 0)]);
+        assert_eq!(params.bytes_forward_share(1_000), 0);
+        params.override_gas([(GasId::bytes_forward_percent(), 250)]);
+        assert_eq!(
+            params.bytes_forward_share(1_000),
+            1_000,
+            "capped at the whole pool"
+        );
+
+        assert_eq!(
+            GasId::from_name("bytes_forward_percent"),
+            Some(GasId::bytes_forward_percent())
+        );
+        assert_eq!(
+            GasId::bytes_forward_percent().name(),
+            "bytes_forward_percent"
+        );
+    }
+
+    /// No schedule gives a value call's child a history allowance.
+    #[test]
+    fn test_call_history_allowance_defaults_to_zero() {
+        for spec in [SpecId::FRONTIER, SpecId::OSAKA, SpecId::AMSTERDAM] {
+            assert_eq!(
+                GasParams::new_spec(spec).call_history_allowance(),
+                0,
+                "{spec:?}"
+            );
+        }
+        let mut params = GasParams::new_spec(SpecId::OSAKA);
+        params.override_gas([(GasId::call_history_allowance(), 160)]);
+        assert_eq!(params.call_history_allowance(), 160);
+        assert_eq!(
+            GasId::from_name("call_history_allowance"),
+            Some(GasId::call_history_allowance())
+        );
+        assert_eq!(
+            GasId::call_history_allowance().name(),
+            "call_history_allowance"
         );
     }
 
