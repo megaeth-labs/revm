@@ -94,7 +94,16 @@ pub struct FrameStart {
     pub kind: FrameStartKind,
     /// The frame's caller: the account the frame sees as `CALLER`.
     pub caller: Address,
-    /// The account the frame runs as; `None` for a creation, whose address is decided later.
+    /// The account the frame runs as. For a `CALL` or `STATICCALL`, the account called; for a
+    /// `CALLCODE` or `DELEGATECALL`, the calling frame's own account, which runs the called
+    /// account's code.
+    ///
+    /// For a `CREATE` or `CREATE2`, the address the creation takes, computed once: the handler
+    /// builds the frame at the same address without computing it again. `None` only for a
+    /// creation the handler fails before it takes an address, which reaches the hook only when
+    /// EIP-8037 is off: an endowment above the caller's balance, a caller's nonce at its maximum,
+    /// or a creating frame at the depth limit. With EIP-8037 on, the instruction ends such a
+    /// creation before the hook.
     pub target: Option<Address>,
     /// The value the start transfers; zero for `DELEGATECALL` and `STATICCALL`.
     pub value: U256,

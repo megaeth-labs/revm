@@ -15,7 +15,8 @@ use context_interface::{
     journaled_state::AccountInfoLoad,
 };
 use primitives::{
-    address, hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, B256, U256,
+    address, constants::CALL_STACK_LIMIT, hardfork::SpecId, Address, Bytes, Log, StorageKey,
+    StorageValue, B256, KECCAK_EMPTY, U256,
 };
 use revm_interpreter::{
     host::DummyHost,
@@ -80,6 +81,10 @@ struct HookHost {
     cold: bool,
     /// Every account is empty.
     empty: bool,
+    /// Every account's balance.
+    balance: U256,
+    /// Every account's nonce.
+    nonce: u64,
     /// The original and present value of every slot.
     slot: StorageValue,
     /// What `SELFDESTRUCT` finds.
@@ -102,6 +107,8 @@ impl HookHost {
             dummy: DummyHost::new(spec),
             cold: false,
             empty: false,
+            balance: U256::from(AMPLE),
+            nonce: 0,
             slot: StorageValue::ZERO,
             destruct: SelfDestructResult::default(),
             price_fails: false,
@@ -120,6 +127,16 @@ impl HookHost {
 
     const fn empty(mut self) -> Self {
         self.empty = true;
+        self
+    }
+
+    fn with_balance(mut self, balance: u64) -> Self {
+        self.balance = U256::from(balance);
+        self
+    }
+
+    const fn with_nonce(mut self, nonce: u64) -> Self {
+        self.nonce = nonce;
         self
     }
 
@@ -312,7 +329,7 @@ impl Host for HookHost {
     ) -> Result<AccountInfoLoad<'_>, LoadError> {
         self.refuses_cold(skip_cold_load)?;
         Ok(AccountInfoLoad {
-            account: Cow::Owned(AccountInfo::from_balance(U256::from(AMPLE))),
+            account: Cow::Owned(AccountInfo::from_balance(self.balance).with_nonce(self.nonce)),
             is_cold: self.cold,
             is_empty: self.empty,
         })
@@ -328,6 +345,18 @@ fn run(
     reservoir: u64,
     host: &mut HookHost,
 ) -> (InterpreterAction, Gas) {
+    run_at_depth(spec, code, gas_limit, reservoir, 0, host)
+}
+
+/// [`run`] in a frame at `depth`.
+fn run_at_depth(
+    spec: SpecId,
+    code: &[u8],
+    gas_limit: u64,
+    reservoir: u64,
+    depth: usize,
+    host: &mut HookHost,
+) -> (InterpreterAction, Gas) {
     let mut interpreter = Interpreter::<EthInterpreter>::new(
         SharedMemory::new(),
         ExtBytecode::new(Bytecode::new_raw(Bytes::copy_from_slice(code))),
@@ -335,6 +364,7 @@ fn run(
             target_address: CONTRACT,
             caller_address: CALLER,
             call_value: U256::from(APPARENT_VALUE),
+            depth,
             ..Default::default()
         },
         false,
@@ -758,14 +788,34 @@ fn start_cases() -> Vec<(&'static str, Vec<u8>, FrameStart)> {
         (
             "CREATE",
             create_code(CREATE, 0, 3),
-            start(FrameStartKind::Create, CONTRACT, None, value),
+            start(
+                FrameStartKind::Create,
+                CONTRACT,
+                Some(created(CREATE)),
+                value,
+            ),
         ),
         (
             "CREATE2",
             create_code(CREATE2, 0, 3),
-            start(FrameStartKind::Create2, CONTRACT, None, value),
+            start(
+                FrameStartKind::Create2,
+                CONTRACT,
+                Some(created(CREATE2)),
+                value,
+            ),
         ),
     ]
+}
+
+/// The address [`create_code`]`(op, 0, _)` creates at, [`CONTRACT`]'s nonce being `0`: `CREATE`
+/// from the nonce, `CREATE2` from its salt `0x5a` and the hash of no init code.
+fn created(op: u8) -> Address {
+    if op == CREATE2 {
+        CONTRACT.create2(B256::from(U256::from(0x5a)), KECCAK_EMPTY)
+    } else {
+        CONTRACT.create(0)
+    }
 }
 
 /// The gas limit and reservoir of a frame's input.
@@ -840,6 +890,91 @@ fn test_a_start_reaches_the_hook_with_the_forward_taken() {
             "{name}: the frame's gas limit"
         );
         assert_eq!(reservoir, 0, "{name}");
+    }
+}
+
+/// A creation's start carries the address the creation takes, with EIP-8037 and without it, up to
+/// the frame below the depth limit, and the frame's input carries the same address, computed once:
+/// the handler reuses it whatever nonce it reads.
+#[test]
+fn test_a_creation_start_carries_the_address_its_input_caches() {
+    for spec in [SpecId::OSAKA, SpecId::AMSTERDAM] {
+        for op in [CREATE, CREATE2] {
+            for depth in [0, CALL_STACK_LIMIT as usize - 1] {
+                let mut host = HookHost::new(spec);
+                let code = create_code(op, 0, 3);
+                let (action, _) = run_at_depth(spec, &code, AMPLE, 0, depth, &mut host);
+                let FrameInput::Create(inputs) = started(action) else {
+                    panic!("{spec:?} {op:#x} at {depth}: a creation's input");
+                };
+
+                assert_eq!(
+                    host.start().0.target,
+                    Some(created(op)),
+                    "{spec:?} {op:#x} at {depth}"
+                );
+                assert_eq!(
+                    inputs.created_address(7),
+                    created(op),
+                    "{spec:?} {op:#x} at {depth}: the input carries the address the hook saw"
+                );
+            }
+        }
+    }
+}
+
+/// Without EIP-8037, a creation the handler fails before it takes an address reaches the hook with
+/// none, and its input carries none: an endowment above the caller's balance, a caller's nonce at
+/// its maximum, and a frame at the depth limit. With EIP-8037 the instruction ends each before the
+/// hook and pushes zero.
+#[test]
+fn test_a_creation_that_fails_before_its_address_starts_without_one() {
+    let cases = |spec| {
+        [
+            (
+                "an endowment above the balance",
+                HookHost::new(spec).with_balance(2),
+                0,
+            ),
+            (
+                "a nonce at its maximum",
+                HookHost::new(spec).with_nonce(u64::MAX),
+                0,
+            ),
+            (
+                "the depth limit",
+                HookHost::new(spec),
+                CALL_STACK_LIMIT as usize,
+            ),
+        ]
+    };
+    for op in [CREATE, CREATE2] {
+        let code = create_code(op, 0, 3);
+        for (name, mut host, depth) in cases(SpecId::OSAKA) {
+            let (action, _) = run_at_depth(SpecId::OSAKA, &code, AMPLE, 0, depth, &mut host);
+            let FrameInput::Create(inputs) = started(action) else {
+                panic!("{op:#x}, {name}: a creation's input");
+            };
+
+            assert_eq!(host.start().0.target, None, "{op:#x}, {name}");
+            if op == CREATE {
+                assert_eq!(
+                    inputs.created_address(5),
+                    CONTRACT.create(5),
+                    "{name}: the input carries no address"
+                );
+            }
+        }
+        for (name, mut host, depth) in cases(SpecId::AMSTERDAM) {
+            let (action, _) = run_at_depth(SpecId::AMSTERDAM, &code, AMPLE, 0, depth, &mut host);
+
+            assert_eq!(
+                returned(action).0,
+                InstructionResult::Stop,
+                "{op:#x}, {name}"
+            );
+            assert!(!host.reached(), "{op:#x}, {name}: the hook is not reached");
+        }
     }
 }
 

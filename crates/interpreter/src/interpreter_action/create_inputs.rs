@@ -118,6 +118,12 @@ impl CreateInputs {
         })
     }
 
+    /// The created address, if [`created_address`](Self::created_address) has computed it since
+    /// the caller, the scheme or the init code last changed.
+    pub(crate) fn cached_created_address(&self) -> Option<Address> {
+        self.cached_address.get().copied()
+    }
+
     /// Returns the keccak256 hash of the init code.
     ///
     /// The result is cached so that `created_address()` and frame initialization

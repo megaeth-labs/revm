@@ -27,7 +27,8 @@ use interpreter::{
     SStoreResult, SelfDestructResult, StateLoad,
 };
 use primitives::{
-    address, hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, TxKind, B256, U256,
+    address, hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, TxKind, B256,
+    KECCAK_EMPTY, U256,
 };
 use revm_inspector::{InspectEvm, Inspector, NoOpInspector};
 use state::{
@@ -107,6 +108,22 @@ struct Hooks {
     writes: Vec<(Write, GasTracker)>,
     /// Every start, with the gas as the hook found it.
     starts: Vec<(FrameStart, GasTracker)>,
+    /// Every start's target as the journal held it when the hook saw the start.
+    targets: Vec<View>,
+}
+
+/// An account as the journal holds it: its info and the info the transaction loaded it with, or
+/// `None` for an account the transaction has not loaded.
+type View = Option<(AccountInfo, AccountInfo)>;
+
+/// Whether the transaction has changed the account `view` shows: its nonce, balance or code differs
+/// from what the transaction loaded. An account it has not loaded is unchanged.
+fn changed(view: &View) -> bool {
+    view.as_ref().is_some_and(|(info, original)| {
+        info.nonce != original.nonce
+            || info.balance != original.balance
+            || info.code_hash != original.code_hash
+    })
 }
 
 impl Hooks {
@@ -118,6 +135,7 @@ impl Hooks {
             first_start_charge: 0,
             writes: Vec::new(),
             starts: Vec::new(),
+            targets: Vec::new(),
         }
     }
 }
@@ -126,6 +144,17 @@ impl Hooks {
 struct HookContext {
     inner: MainnetContext<Db>,
     hooks: Hooks,
+}
+
+impl HookContext {
+    /// The account at `address` as the journal holds it.
+    fn view(&self, address: Address) -> View {
+        self.inner
+            .journal_ref()
+            .state
+            .get(&address)
+            .map(|account| (account.info.clone(), account.original_info()))
+    }
 }
 
 impl ContextTr for HookContext {
@@ -190,6 +219,8 @@ impl Host for HookContext {
 
     fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
         self.hooks.starts.push((*start, *gas));
+        let target = start.target.and_then(|target| self.view(target));
+        self.hooks.targets.push(target);
         if self.hooks.starts.len() == 1 && self.hooks.first_start_charge > 0 {
             assert!(gas.record_history_cost(self.hooks.first_start_charge));
         }
@@ -321,13 +352,20 @@ impl Host for HookContext {
     }
 }
 
-/// The gas limit and reservoir of every frame the inspector saw start, the transaction's first.
+/// What the inspector saw of the frames that started.
 #[derive(Default)]
-struct Frames(Vec<(u64, u64)>);
+struct Frames {
+    /// The gas limit and reservoir of every frame, the transaction's first.
+    gas: Vec<(u64, u64)>,
+    /// The address each creation's frame took, in the order the creations started.
+    created: Vec<Option<Address>>,
+    /// The place in `created` of each creation that has not returned yet.
+    open: Vec<usize>,
+}
 
 impl Inspector<HookContext, EthInterpreter> for Frames {
     fn call(&mut self, _context: &mut HookContext, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        self.0.push((inputs.gas_limit, inputs.reservoir));
+        self.gas.push((inputs.gas_limit, inputs.reservoir));
         None
     }
 
@@ -336,8 +374,20 @@ impl Inspector<HookContext, EthInterpreter> for Frames {
         _context: &mut HookContext,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
-        self.0.push((inputs.gas_limit(), inputs.reservoir()));
+        self.gas.push((inputs.gas_limit(), inputs.reservoir()));
+        self.open.push(self.created.len());
+        self.created.push(None);
         None
+    }
+
+    fn create_end(
+        &mut self,
+        _context: &mut HookContext,
+        _inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        let started = self.open.pop().expect("a creation returns once it started");
+        self.created[started] = outcome.address;
     }
 }
 
@@ -447,8 +497,14 @@ impl Run {
 
     /// The transaction with `transact` and with `inspect_tx`, which must end the same way and
     /// reach the hooks at the same points with the same gas. Returns the outcome, what the hooks
-    /// saw, and the frames the inspector saw start.
+    /// saw, and the gas of the frames the inspector saw start.
     fn on_both_paths(&self) -> (ResultAndState, Hooks, Vec<(u64, u64)>) {
+        let (outcome, hooks, frames) = self.on_both_paths_with_frames();
+        (outcome, hooks, frames.gas)
+    }
+
+    /// [`on_both_paths`](Self::on_both_paths), with all the inspector saw of the frames.
+    fn on_both_paths_with_frames(&self) -> (ResultAndState, Hooks, Frames) {
         let mut plain = self.evm();
         let transacted = plain.transact(Self::tx()).expect("the transaction runs");
         let mut inspected = self.evm();
@@ -461,7 +517,7 @@ impl Run {
             inspected.ctx.hooks, plain.ctx.hooks,
             "both paths reach the hooks at the same points with the same gas"
         );
-        (transacted, plain.ctx.hooks, inspected.inspector.0)
+        (transacted, plain.ctx.hooks, inspected.inspector)
     }
 }
 
@@ -652,6 +708,77 @@ fn test_hooks_that_only_observe_change_nothing() {
             ],
             "{spec:?}"
         );
+    }
+}
+
+/// A creation's start carries the address its frame takes, with EIP-8037 and without it: a `CREATE`
+/// from the transaction's frame, one from the frame it created, whose nonce starts at 1, and a
+/// `CREATE2`.
+#[test]
+fn test_a_creation_start_carries_the_address_its_frame_takes() {
+    let mut parent = create(CREATE, &ends(create(CREATE, &[])));
+    parent.extend(ends(create(CREATE2, &[])));
+    let first = PARENT.create(1);
+    let expected = vec![
+        Some(first),
+        Some(first.create(1)),
+        Some(PARENT.create2(B256::from(U256::from(0x5a)), KECCAK_EMPTY)),
+    ];
+    for spec in [SpecId::PRAGUE, SpecId::AMSTERDAM] {
+        let (outcome, hooks, frames) = Run::new(spec, parent.clone()).on_both_paths_with_frames();
+        let targets: Vec<Option<Address>> =
+            hooks.starts.iter().map(|(start, _)| start.target).collect();
+
+        assert!(outcome.result.is_success(), "{spec:?}");
+        assert_eq!(frames.created, expected, "{spec:?}: the frames' addresses");
+        assert_eq!(
+            targets, frames.created,
+            "{spec:?}: each start carries its frame's address"
+        );
+    }
+}
+
+/// At a creation's start, a consumer can tell whether the transaction has changed the account the
+/// creation takes: one the transaction funded first is changed, one it has not touched is not. With
+/// EIP-8037 the instruction has loaded the account before the hook; without it the account is not
+/// loaded until the frame starts, and an account the transaction has not loaded is unchanged.
+#[test]
+fn test_a_creation_start_shows_whether_its_account_was_changed() {
+    let salt = B256::from(U256::from(0x5a));
+    for (op, address) in [
+        (CREATE, PARENT.create(1)),
+        (CREATE2, PARENT.create2(salt, KECCAK_EMPTY)),
+    ] {
+        for spec in [SpecId::PRAGUE, SpecId::AMSTERDAM] {
+            for funded in [false, true] {
+                let mut parent = if funded {
+                    call(CALL, address, 0, 1)
+                } else {
+                    Vec::new()
+                };
+                parent.extend(ends(create(op, &[])));
+                let (outcome, hooks, _) = Run::new(spec, parent).on_both_paths();
+                let creation = hooks
+                    .starts
+                    .iter()
+                    .position(|(start, _)| start.kind != FrameStartKind::Call)
+                    .expect("the creation starts");
+                let created = &outcome.state[&address].info;
+
+                assert!(outcome.result.is_success(), "{op:#x} {spec:?} {funded}");
+                assert_eq!(hooks.starts[creation].0.target, Some(address));
+                assert_eq!(
+                    changed(&hooks.targets[creation]),
+                    funded,
+                    "{op:#x} {spec:?}: the account was funded first: {funded}"
+                );
+                assert_eq!(
+                    (created.nonce, created.balance),
+                    (1, U256::from(funded as u8)),
+                    "{op:#x} {spec:?} {funded}: the frame took the account"
+                );
+            }
+        }
     }
 }
 

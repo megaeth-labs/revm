@@ -3,11 +3,11 @@
 
 use crate::{
     interpreter_types::{InterpreterTypes as ITy, LoopControl},
-    Gas, Host, InstructionExecResult as Result, InstructionResult, Interpreter, InterpreterAction,
-    StartCharge,
+    CreateInputs, Gas, Host, InstructionExecResult as Result, InstructionResult, Interpreter,
+    InterpreterAction, StartCharge,
 };
 use context_interface::host::{CompletedWrite, FrameStart, WriteVerdict};
-use primitives::{hints_util::cold_path, Bytes};
+use primitives::{constants::CALL_STACK_LIMIT, hints_util::cold_path, Bytes};
 
 /// Hands `write`, which the running instruction completed after its last charge, to
 /// [`Host::write_completed`] with the frame's gas, and applies the verdict: the instruction goes
@@ -59,6 +59,29 @@ pub(crate) fn frame_starting<H: Host + ?Sized>(
         cold_path();
         Err(InstructionResult::OutOfGas)
     }
+}
+
+/// Computes the address the creation `inputs` takes into their cache, for the frame-start hook,
+/// when EIP-8037 is off; with it on, the creation instruction's EIP-8037 branch computes it. It does
+/// so after the checks that branch makes, so a creation the handler fails before it takes an
+/// address gets none: an endowment above the caller's balance, a caller's nonce at its maximum, or
+/// a creating frame at `depth` the depth limit. The handler builds the frame from the cache, so the
+/// address and a `CREATE2`'s init-code hash are computed once. The caller is the running frame's
+/// account, which the journal holds, so reading its nonce loads nothing cold.
+#[inline]
+pub(crate) fn cache_created_address<H: Host + ?Sized>(
+    host: &mut H,
+    inputs: &CreateInputs,
+    depth: usize,
+) -> Result {
+    let caller = host
+        .load_account_info_skip_cold_load(inputs.caller(), false, false)?
+        .account;
+    let (balance, nonce) = (caller.balance, caller.nonce);
+    if balance >= inputs.value() && nonce != u64::MAX && depth < CALL_STACK_LIMIT as usize {
+        inputs.created_address(nonce);
+    }
+    Ok(())
 }
 
 /// Takes the child's share of the caller's byte pool out of `gas`, by the schedule's

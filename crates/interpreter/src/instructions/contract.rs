@@ -9,7 +9,7 @@ use call_helpers::load_acc_and_calc_forward;
 
 use crate::{
     instructions::{
-        instruction_hooks::{forward_bytes, frame_starting},
+        instruction_hooks::{cache_created_address, forward_bytes, frame_starting},
         utility::IntoAddress,
     },
     interpreter_action::FrameInput,
@@ -152,6 +152,12 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
             create_inputs.set_charged_create_state_gas(true);
             create_inputs.set_charged_state_gas_address(created_address);
         }
+    } else {
+        cache_created_address(
+            context.host,
+            &create_inputs,
+            context.interpreter.input.depth(),
+        )?;
     }
 
     let mut gas_limit = context.interpreter.gas.remaining();
@@ -181,7 +187,13 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
     } else {
         FrameStartKind::Create
     };
-    let start = FrameStart::new(kind, create_inputs.caller(), None, value, gas_limit);
+    let start = FrameStart::new(
+        kind,
+        create_inputs.caller(),
+        create_inputs.cached_created_address(),
+        value,
+        gas_limit,
+    );
     let charged_start = frame_starting(&mut context.interpreter.gas, context.host, start)?;
     let bytes_share = forward_bytes(&mut context.interpreter.gas, context.host);
 
