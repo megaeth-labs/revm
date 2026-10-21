@@ -219,10 +219,11 @@ impl EthFrame<EthInterpreter> {
         let gas_limit = inputs.gas_limit;
 
         if let Some(mut result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_string)? {
-            // The provider built the answer's gas from the inputs' regular gas and reservoir; the
-            // pool and the allowance it does not know are set here, so the caller's settlement
-            // gets its share back from the answer as it would from a frame.
-            result.gas.set_bytes_remaining(bytes_share);
+            // The provider built the answer's gas from the inputs' regular gas and reservoir. The
+            // answer takes the caller's share as the pool it started with, less what the provider
+            // drew on it, and the allowance the input carries, so the caller's settlement gets the
+            // share back from the answer as it would from a frame.
+            result.gas.tracker_mut().adopt_bytes_share(bytes_share);
             result.gas.set_history_allowance(history_allowance);
             let mut logs = Vec::new();
             if result.result.is_ok() {

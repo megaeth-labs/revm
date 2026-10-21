@@ -11,7 +11,7 @@
 //! consumer's hooks: `DRAW` draws bytes, `DECLARE` has the start hook charge and declare a start
 //! charge at the next start, and `LOG` charges history after drawing the frame's allowance, as a
 //! consumer's write hook would. The context's code-deposit admission hook draws deployed code's
-//! bytes when a test asks it to.
+//! bytes, and the precompile provider draws on the answers it builds, when a test asks them to.
 
 use bytecode::opcode::{
     CALL, CREATE, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH3, RETURN, REVERT, STOP,
@@ -30,23 +30,30 @@ use context_interface::{
 };
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use interpreter::{
-    interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, GasTracker,
-    Instruction, InstructionContext, InstructionExecResult, InstructionResult, SStoreResult,
-    SelfDestructResult, StartCharge, StateLoad,
+    interpreter::EthInterpreter, interpreter_action::FrameInit, CallInputs, FrameInput, GasTracker,
+    Instruction, InstructionContext, InstructionExecResult, InstructionResult, InterpreterResult,
+    SStoreResult, SelfDestructResult, StartCharge, StateLoad,
 };
 use primitives::{
-    address, hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, TxKind, B256, U256,
+    address, hardfork::SpecId, Address, AddressSet, Bytes, Log, StorageKey, StorageValue, TxKind,
+    B256, U256,
 };
 use revm_handler::{
     instructions::EthInstructions, EthFrame, EthPrecompiles, EvmTr, FrameResult, Handler,
-    ItemOrResult, MainContext, MainnetContext, MainnetEvm, MainnetHandler,
+    ItemOrResult, MainContext, MainnetContext, MainnetHandler, PrecompileProvider,
 };
 use state::{AccountInfo, Bytecode};
 
 type Db = CacheDB<EmptyDB>;
 type DbError = <Db as Database>::Error;
 type TestContext = DeclaringContext;
-type TestEvm = MainnetEvm<TestContext>;
+type TestEvm = Evm<
+    TestContext,
+    (),
+    EthInstructions<EthInterpreter, TestContext>,
+    DrawingPrecompiles,
+    EthFrame,
+>;
 type TestError = EVMError<DbError>;
 type Mainnet = MainnetHandler<TestEvm, TestError, EthFrame<EthInterpreter>>;
 
@@ -384,6 +391,39 @@ impl Host for DeclaringContext {
     }
 }
 
+/// [`EthPrecompiles`], whose answers the provider draws on when told to: it starts an answer's
+/// pool at the share the input carries and draws `draw` bytes from it, as a provider that appends
+/// bytes for a call would. With nothing to draw it is [`EthPrecompiles`].
+struct DrawingPrecompiles {
+    inner: EthPrecompiles,
+    draw: u64,
+}
+
+impl PrecompileProvider<TestContext> for DrawingPrecompiles {
+    type Output = InterpreterResult;
+
+    fn set_spec(&mut self, spec: SpecId) -> bool {
+        PrecompileProvider::<TestContext>::set_spec(&mut self.inner, spec)
+    }
+
+    fn run(
+        &mut self,
+        context: &mut TestContext,
+        inputs: &CallInputs,
+    ) -> Result<Option<InterpreterResult>, String> {
+        let mut answer = self.inner.run(context, inputs)?;
+        if let Some(answer) = answer.as_mut().filter(|_| self.draw > 0) {
+            answer.gas.set_bytes_remaining(inputs.bytes_share);
+            assert!(answer.gas.record_bytes(self.draw));
+        }
+        Ok(answer)
+    }
+
+    fn warm_addresses(&self) -> &AddressSet {
+        self.inner.warm_addresses()
+    }
+}
+
 /// The figures of a frame's input as it started: its share, its start charge and its allowance.
 type Started = (u64, StartCharge, u64);
 
@@ -570,6 +610,8 @@ struct Run {
     /// `call_history_allowance` in the schedule.
     allowance: u64,
     deposit: Deposit,
+    /// What the precompile provider draws on each answer.
+    precompile_draw: u64,
 }
 
 impl Run {
@@ -580,7 +622,13 @@ impl Run {
             parent_nonce: 1,
             allowance: 0,
             deposit: Deposit::Untouched,
+            precompile_draw: 0,
         }
+    }
+
+    const fn precompile_draw(mut self, draw: u64) -> Self {
+        self.precompile_draw = draw;
+        self
     }
 
     const fn deposit(mut self, deposit: Deposit) -> Self {
@@ -652,7 +700,11 @@ impl Run {
         instructions.insert_instruction(DRAW, Instruction::new(draw), 0);
         instructions.insert_instruction(DECLARE, Instruction::new(declare), 0);
         instructions.insert_instruction(LOG, Instruction::new(log), 0);
-        let mut evm: TestEvm = Evm::new(ctx, instructions, EthPrecompiles::new(SPEC));
+        let precompiles = DrawingPrecompiles {
+            inner: EthPrecompiles::new(SPEC),
+            draw: self.precompile_draw,
+        };
+        let mut evm: TestEvm = Evm::new(ctx, instructions, precompiles);
         evm.ctx.set_tx(
             TxEnv::builder_for_bench()
                 .kind(TxKind::Call(PARENT))
@@ -964,6 +1016,42 @@ fn test_a_deposit_drawn_at_admission_is_held_against_the_transaction() {
             handler.starts[1].0, POOL,
             "{name}: the whole pool forwarded"
         );
+        assert_eq!(handler.returned[0], returned, "{name}");
+        assert_eq!(handler.settled, Some(settled), "{name}");
+    }
+}
+
+/// A precompile's answer starts with its caller's share as its pool, less what the provider drew
+/// on it, so its pool and its net add up to the share, as a frame's do: the caller takes the
+/// provider's draw over when the call succeeds, and gets the whole share back when it fails.
+#[test]
+fn test_a_precompile_answer_keeps_what_its_provider_drew() {
+    const PROVIDER_DRAW: u64 = 40;
+    let mut succeeding = vec![DRAW];
+    succeeding.extend(call(ECRECOVER, 0));
+    let mut failing = vec![DRAW];
+    failing.extend(starved_call(ECRECOVER));
+    // PARENT drew 100 and forwards the 900 left; the provider draws 40 of them.
+    for (name, parent, returned, settled) in [
+        (
+            "succeeds",
+            succeeding,
+            Returned::ended(InstructionResult::Return, 860, 40),
+            (860, 140, 0),
+        ),
+        (
+            "fails",
+            failing,
+            Returned::ended(InstructionResult::PrecompileOOG, 860, 40),
+            (900, 100, 0),
+        ),
+    ] {
+        let run = Run::new(ends(parent)).precompile_draw(PROVIDER_DRAW);
+
+        let (result, handler) = run.with(PoolHandler::new(Some(POOL)));
+
+        assert!(result.is_success(), "{name}: {result:?}");
+        assert_eq!(handler.starts[1].0, 900, "{name}");
         assert_eq!(handler.returned[0], returned, "{name}");
         assert_eq!(handler.settled, Some(settled), "{name}");
     }

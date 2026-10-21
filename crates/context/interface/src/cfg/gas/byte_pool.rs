@@ -97,6 +97,17 @@ impl GasTracker {
         self.bytes_remaining = self.bytes_remaining.saturating_add(remaining);
     }
 
+    /// Takes `share` as the pool this tracker started with: the pool becomes `share` less the net
+    /// drawn so far, so that the pool and the net add up to `share`, as a frame's do.
+    ///
+    /// For a tracker built outside a frame, such as a precompile's answer, which may have drawn
+    /// before it learns the share its caller forwarded. A rollback then restores `share`. A net
+    /// above `share` leaves an empty pool.
+    #[inline]
+    pub const fn adopt_bytes_share(&mut self, share: u64) {
+        self.bytes_remaining = share.saturating_add_signed(self.bytes_spent.saturating_neg());
+    }
+
     /// The crossing: whether a draw failed that the pool could not pay, since the record was last
     /// cleared, or a consumer set it with [`set_bytes_crossing`](Self::set_bytes_crossing).
     ///
@@ -320,6 +331,33 @@ mod tests {
 
         parent.absorb_returned_bytes(700);
         assert_eq!(parent.bytes_remaining(), 720);
+    }
+
+    /// A tracker that adopts a share keeps its net and takes the share less the net as its pool,
+    /// so a rollback restores the share: after draws, after a refill below zero, and after none.
+    #[test]
+    fn test_an_adopted_share_less_the_net_is_the_pool() {
+        for (name, draws, refills, pool) in [
+            ("drew", 40, 0, 860),
+            ("refilled", 0, 25, 925),
+            ("nothing", 0, 0, 900),
+        ] {
+            let mut answer = GasTracker::new(500, 500, 0);
+            assert!(answer.record_bytes(draws));
+            answer.refill_bytes(refills);
+            let spent = answer.bytes_spent();
+
+            answer.adopt_bytes_share(900);
+
+            assert_eq!(answer.bytes_remaining(), pool, "{name}");
+            assert_eq!(answer.bytes_spent(), spent, "{name}: the net is kept");
+            answer.rollback_state_gas();
+            assert_eq!(
+                answer.bytes_remaining(),
+                900,
+                "{name}: a rollback restores the share"
+            );
+        }
     }
 
     /// A forward above the pool and a return above `u64::MAX` saturate rather than wrap.
