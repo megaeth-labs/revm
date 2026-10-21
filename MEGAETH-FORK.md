@@ -68,6 +68,9 @@ Each entry names the API a consumer uses and what the fork guarantees about it.
 A hook's default keeps upstream's behaviour: a consumer that does not use it sees the same results.
 Each entry's **Consumer** says who needs it and why it cannot be done outside the fork, its **Removal** the condition under which the fork drops it, and its **Default** what it costs a consumer that does not use it.
 
+A field a hook adds to a serialized type carries `serde(default)`, so in a format that carries field names, such as JSON, an encoding made before the field existed decodes with the default.
+A format that encodes a struct by position, such as bincode, cannot read such an encoding, as with upstream's own field additions: it reads the old fields in their places and then looks for the new ones, so a value persisted in such a format must not cross an upgrade of the fork that adds a field.
+
 ### State-gas price
 
 - **API.** `Host::state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64>` and `Host::state_gas_charge(&mut self, charge: StateGasCharge) -> Option<u64>`.
@@ -94,7 +97,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Consumer.** mega-evm charges history gas for the bytes a transaction appends to the chain's history. The code deposit is charged inside `return_create`, and only the tracker can unwind a frame's history charges with its state charges.
 - **Removal.** When upstream carries an equivalent gas dimension, or when mega-evm stops charging history gas.
 - **Default.** No schedule prices `code_deposit_history_gas`, and nothing else in the workspace charges history gas, so the counter stays zero and every result is upstream's.
-  The counter decodes as zero from encodings that predate it.
+  In a format that carries field names, the counter decodes as zero from encodings that predate it.
 
 ### Amsterdam opcodes and transfer logs below Amsterdam
 
@@ -152,7 +155,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Removal.** When upstream keeps a halting frame's regular gas readable, or when mega-evm no longer reads what a halting frame burned.
 - **Default.** Each record is written on the failure side only: the tracker's in cold, out-of-line functions, the interpreter's in its cold out-of-gas halt, the handler's on a precompile's out-of-gas. A deduction or load that succeeds runs the same code.
   It was two words as an `Option<u64>`: the tracker was 88 bytes with it, and a copy of the tracker, and of every `Gas` and frame result that holds one, 16 bytes larger.
-  It is now a number and a flag, and the flag shares its word with the byte pool's crossing (see The byte pool); the encoding is unchanged, an optional number in the same place.
+  It is now a number and a flag, and the flag shares its word with the byte pool's crossing (see The byte pool); the record's encoding is unchanged, an optional number in the same place.
   Where measured (callgrind, the fork's release profile), the field left a transfer and a precompile call unchanged and cost about 0.1% of the instructions of a creation; the records written on the failure side add nothing measurable.
 
 ### Precompile price
@@ -199,7 +202,8 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
   Inlined into a consumer's own function, the admitting default may shift its block layout; where measured, that cost one unconditional branch on one out-of-gas path and changed no success path.
   Where measured (callgrind, the fork's release profile), lending `gas` costs nothing: a top-level creation runs the same instruction count as without it, and a nested `CREATE` 0.06 fewer.
   The `gas` parameter changed this released hook's signature, an exception to rule 1 (`api:exception`): an override does not compile until it takes the parameter.
-  mega-evm's `MegaContext::admit_code_deposit` is the one override found; alloy-evm 0.36, revm-inspectors 0.40, the op-revm fork and mega-reth do not override it, and nothing built against upstream revm can, since the hook is the fork's.
+  mega-evm's `MegaContext::admit_code_deposit` is the one override found, in Satin W9 (`cz/feat/satin-w9` at `f1d1a48d`, `crates/mega-evm/src/evm/context.rs:696`) and the W8 trees before it.
+  The legacy engine (`cz/feat/legacy-on-fork` at `501cc7cc`), alloy-evm 0.36, revm-inspectors 0.40, the op-revm fork and mega-reth (`2dc2f44ac8`, `b97b508a0b`) do not override it, and nothing built against upstream revm can, since the hook is the fork's.
 
 ### revm 40.0.3's journal semantics
 
@@ -240,6 +244,8 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Removal.** When upstream exposes an equivalent point, or when mega-evm stops charging frame starts.
 - **Default.** Returns `true` and touches nothing.
   Where measured (callgrind, the fork's release profile), `CREATE` and `CREATE2` compile to the same code as without the hook, and a call runs one instruction more: the store of the forward its helper returns, about 0.05% of a call to a contract that stops.
+  The hook takes `&mut FrameStart` since the start charge moved onto the start; its first version took `&FrameStart`. No release carries that version, so upstream's superset is untouched, but an override written against it does not compile until it takes `&mut`, a change `cargo semver-checks` cannot see; the pull request that makes it lists it with the `api:exception` items.
+  Satin W9 overrides it (`crates/mega-evm/src/evm/host.rs:376` at `f1d1a48d`); the legacy engine (`501cc7cc`), alloy-evm 0.36, revm-inspectors 0.40, the op-revm fork and mega-reth (`2dc2f44ac8`, `b97b508a0b`) do not.
 
 ### The byte pool
 
@@ -252,6 +258,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
   The crossing is a bit: it says that a draw failed, not what the draw asked for, which the hook that drew knows when it fails.
   No halt touches the pool, so a halted frame's result still reads the pool as the failed draw found it, until its caller settles it.
   `refill_bytes(n)` gives bytes back and lowers the net, below zero when the draw was a caller's.
+  Byte amounts are bounded as the tracker bounds gas amounts: every draw and refill is at most `i64::MAX`, and the net with its children's nets merged in stays within `±i64::MAX`, so it can be negated; a debug build asserts it where the net moves, and past it a release build saturates the net, so a rollback no longer restores the pool exactly.
   A consumer draws deployed code's bytes where the deposit is admitted: `ContextTr::admit_code_deposit` is lent the creating frame's tracker (see Code-deposit admission).
   The transaction's frame gets the whole pool of the transaction's tracker, set by a consumer at `tx_gas` or in pre-execution.
   At every `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, after `frame_starting` has answered, the instruction takes `bytes_forward_share` of the caller's pool out of it and puts it on the frame's input as `bytes_share`: the child's pool when it starts, on the frame the handler runs and on an answer it gives without one (a precompile, a refused start).
@@ -260,7 +267,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
   The settlement is in `handle_reservoir_remaining_gas` and follows the reservoir, not regular gas: a child that reverts or halts has its draws undone by `rollback_state_gas`, which now gives `bytes_spent` back to the pool, so what the caller absorbs is the child's remaining pool on success and the whole share on revert *and on halt*, since a halted frame appends nothing; the caller kept what it did not forward.
   The child's net merges into the caller's on success only, as the history net does, so a caller's rollback undoes its children's draws too.
   `rollback_state_gas` rolls the pool back with state and history gas, so a consumer that rolls a frame back by hand rolls the pool back with it.
-  The first frame's return settles into the transaction's tracker the same way (`last_frame_result`), whose `bytes_spent` is then the transaction's net draw.
+  The first frame's return settles into the transaction's tracker the same way (`last_frame_result`, through `execution::settle_first_frame`, see The start charge), whose `bytes_spent` is then the transaction's net draw.
   A precompile's answer adopts the share as the pool it started with (`adopt_bytes_share`): its pool is the share less what its provider drew on it, so its pool and net add up to the share as a frame's do; a provider that draws on its answer starts the answer's pool at the input's `bytes_share` first, so a draw the share cannot pay fails.
   An outcome an inspector builds to answer a start carries whatever pool its gas was built with, an unlimited one with `CallOutcome::new` and `CreateOutcome::new`, and the settlement absorbs it as it is.
   A consumer that answers a start itself, without a frame or a provider, sets the answer's pool to the share it was given.
@@ -268,7 +275,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Consumer.** mega-evm keeps a per-frame budget of the bytes a transaction appends to the state and the history, which a failed frame gives back and a successful one hands to its caller. That is what the tracker does for the reservoir, and only the tracker's forward and settlement can carry a figure that moves with a frame's gas.
 - **Removal.** When upstream carries an equivalent per-frame budget on its gas, or when mega-evm stops limiting bytes per frame.
 - **Default.** Every tracker starts with an unlimited pool (`u64::MAX`), every schedule forwards the whole pool, and nothing in the workspace draws it, so every figure of the pool is the unlimited pool going out and coming back and every result is upstream's.
-  The tracker is 112 bytes, 88 without the pool: the pool and its net take a word each, the allowance (see The history allowance) a third, and the crossing a bit in the word the failed-charge record's flag takes (see The failed-charge record); encodings that predate the fields decode with an unlimited pool, no crossing and zero for the rest.
+  The tracker is 112 bytes, 88 without the pool: the pool and its net take a word each, the allowance (see The history allowance) a third, and the crossing a bit in the word the failed-charge record's flag takes (see The failed-charge record); in a format that carries field names, encodings that predate the fields decode with an unlimited pool, no crossing and zero for the rest, and a positional format cannot read them (see Hooks).
   `Gas` is 128 bytes (104), `InterpreterResult` 168 (144), `CallOutcome` and `FrameResult` 248 (208), `CreateOutcome` 232 (192), the outcomes with the start charge's two words.
   Where measured (callgrind, the fork's release profile, against the base without the pool, the start charge and the allowance), the three figures together cost a transfer 120 instructions (+2.2%), a creation 144 (+0.8%), a `SELFDESTRUCT` transaction 151 (+1.9%), a transaction that calls a precompile 135 (+0.04%; 10 of them the answer's adopted share) and each `CALL` about 139 (+6.3% on a transaction of 64 calls), most of it in moving the larger frame results; snailtracer is unchanged.
 
@@ -277,10 +284,14 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **API.** The type `StartCharge` (`new`, `history`, `bytes`, `is_zero`; `#[non_exhaustive]`), re-exported from `revm_interpreter`.
   `FrameStart::charge` (see Frame-start hook).
   `charged_start` on `CallInputs`, `CallOutcome` and `CreateOutcome` (fields) and on `CreateInputs` (`charged_start`, `set_charged_start`); `FrameResult::refundable_start_charge`.
+  `revm_handler::execution::settle_first_frame`, the settlement of the first frame.
 - **Contract.** The start charge is what a frame start charged its caller and the frame's failure gives back: history gas and bytes of the pool.
   The `frame_starting` hook charges the caller's tracker and declares the refundable part on the start it is handed (`start.charge`); the instruction copies it onto the frame's input when the hook admits the start; a start the hook refuses discards the charge with the start, and what the hook charged stands.
   The transaction's frame has no start hook: a consumer that charges the transaction's tracker for it in pre-execution puts the refundable part on the first frame's input (`charged_start`), from `Handler::first_frame_input`.
   The charge rides from the input to the outcome, and `return_result` refunds it to the caller whole, with `refill_history` and `refill_bytes`, on the condition `refundable_state_gas_charge` uses: a call that did not succeed, a creation that did not succeed or deployed no address; `last_frame_result` refunds the first frame's the same way, and after a halt consumes the regular gas the refill credited, as it does for the state refund.
+  `last_frame_result` settles the first frame through `execution::settle_first_frame`, which is all of mainnet's settlement but the copy of the transaction's gas into the frame's result: the spend and the settlement of the frame, the EIP-2780 state-gas refund and the start-charge refund, each with its halt rule.
+  A chain whose handler overrides `last_frame_result` calls it rather than copying the mainnet body, so the start-charge refund and any later step reach it too, and applies its own rules between it and the copy, as the op-revm fork does with its pre-Regolith deposit rule.
+  Upstream's own steps of the settlement (the spend, `handle_reservoir_remaining_gas` and the EIP-2780 refund) live in `crates/handler/src/execution/first_frame.rs`, not in `handler.rs`: a pick or a base-line merge that changes upstream's `last_frame_result` body lands there, and records the move as its conflict resolution.
   A frame that succeeds keeps the charge.
   A precompile's answer and a start the handler refuses before any frame (call depth, balance) carry the input's charge, so they refund as a frame does.
   An outcome an inspector builds to answer a start carries no charge unless the inspector copies the input's (`CallOutcome::new` and `CreateOutcome::new` carry none), so the caller keeps the charge, as revm keeps its own upfront state charge on an outcome a tool builds; an outcome the inspector rewrites at `call_end` or `create_end` keeps the frame's charge, so a success rewritten into a failure is refunded.
@@ -288,10 +299,19 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Consumer.** mega-evm charges a start's write records to the caller at the hook, after the forward and before the frame's input copies the reservoir, and must give them back when the frame fails. The refund belongs where the fork refunds the upfront state charge.
 - **Removal.** When upstream carries an equivalent refundable start charge, or when mega-evm stops charging frame starts.
 - **Default.** The hook declares nothing, so the fields and the refund are zero.
+  `settle_first_frame` is inlined: where measured (callgrind, the fork's release profile), a transfer and a transaction of 64 calls run the same instruction count as when its steps were `last_frame_result`'s body.
   This entry breaks rule 1 (`api:exception`): `CallInputs`, `CallOutcome` and `CreateOutcome` are constructible by literal and gain fields (`charged_start`, and `CallInputs` also `bytes_share` and `history_allowance`), so a consumer that constructs them by literal does not compile until it names the new fields.
-  alloy-evm 0.36, revm-inspectors 0.40 and the op-revm fork construct them with `new` and are unaffected; `CreateInputs` has private fields and is unaffected.
-  Foundry constructs `CallOutcome` and `CreateOutcome` by literal in its cheatcodes and its inspector stack, and mega-reth's oracle executor constructs a `CallOutcome` by literal; both already fail against the fork's base, whose outcomes carry the earlier EIP-8037 field `charged_state_gas_address` that no upstream release has, so the outcomes' new field breaks no literal that compiled against the fork before.
-  Foundry also constructs `CallInputs` once by literal in its cheatcodes; the base's `CallInputs` has upstream's fields, so that literal is broken by this entry for the first time, in a file its outcome literals already break.
+  Their defaults are no charge (`StartCharge::default()`), an unlimited share (`u64::MAX`) and no allowance (`0`).
+  The consumers checked, each at a revision:
+  - alloy-evm 0.36 and revm-inspectors 0.40 construct them with `new` and are unaffected; `CreateInputs` has private fields and is unaffected.
+  - The op-revm fork (`v20.0.0-mega.3`) constructs them with `new` and compiles unchanged, but its `OpHandler::last_frame_result` copied mainnet's settlement and so missed the first frame's start-charge refund; its next release calls `settle_first_frame`, and a consumer that declares a first-frame charge needs that release.
+  - MegaETH's legacy engine (`cz/feat/legacy-on-fork` at `501cc7cc`) builds the first frame's `CallInputs` by literal in production (`crates/mega-evm/src/evm/execution.rs:724`) and in tests (`evm/execution.rs:2114`, `evm/precompiles.rs:432`, `limit/storage_call_stipend.rs:233`, `tests/rex5/call_too_deep_guard.rs:43`). It uses none of the new figures, but stops compiling: its repin names the three fields at their defaults and runs the legacy gate.
+  - Satin W9 (`cz/feat/satin-w9` at `f1d1a48d`) builds `CreateOutcome` and `CallOutcome` by literal in production (`crates/mega-evm/src/evm/frame.rs:73`, `:91`), `CallInputs` in unit and integration tests (ten sites), and `CreateOutcome` in two integration tests (`tests/system/keyless/differential.rs:950`, `tests/system/keyless/inspector.rs:69`). Its migration puts the input's charge and share on those answers, and the start-charge refund in `frame.rs`'s `settle_frame_result`, which mirrors the inner settlement.
+  - Foundry, master as fetched on 2026-10-21, constructs `CallOutcome` and `CreateOutcome` by literal in its cheatcodes and its inspector stack, and `CallInputs` once in its cheatcodes. It requests revm 43.0.2, alloy-evm 0.39.0 and revm-inspectors 0.44.1, so it cannot take this 40.0.3 fork through a version-satisfying patch: the literals are porting work, not a checked build.
+  - mega-reth's oracle executor constructs a `CallOutcome` by literal at `2dc2f44ac8`, which pins revm 27.1.0, and with `CallOutcome::new` at `b97b508a0b`, which pins revm 40.0.3.
+
+  Foundry's and mega-reth's outcome literals already fail against the fork's base, whose outcomes carry the earlier EIP-8037 field `charged_state_gas_address` that no upstream release has; Satin W9's, production and test, were written against the fork and break here.
+  The base's `CallInputs` has upstream's fields, so every `CallInputs` literal (the legacy engine's, Satin W9's tests', Foundry's) breaks here for the first time.
 
 ### The history allowance
 
@@ -300,6 +320,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Contract.** The allowance is history gas a frame may spend before it charges its budget.
   A call that transfers value gives its child the schedule's `call_history_allowance`, decided where the call instruction adds the call stipend, carried on the input and set on the child's tracker when it starts, on the frame and on an answer alike; no other start gives one, and the transaction's frame has none.
   Only a consumer draws it: `draw_history_allowance(cost)` takes `min(cost, allowance)` and returns the part of `cost` the allowance did not cover, which the consumer charges as history.
+  A precompile's answer is given the input's allowance after its provider ran, so the allowance it carries back is the input's, whatever the provider drew.
   The allowance is the frame's alone: it is not returned, merged or rolled back.
 - **Consumer.** mega-evm lets a value call's child log a bounded number of bytes without charging history, as the call stipend lets it run. Only the call instruction knows which starts get the stipend.
 - **Removal.** When upstream carries an equivalent allowance, or when mega-evm drops the rule.
