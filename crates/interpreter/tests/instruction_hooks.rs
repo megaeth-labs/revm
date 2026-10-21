@@ -903,7 +903,9 @@ fn test_a_start_reaches_the_hook_with_the_forward_taken() {
 
 /// A creation's start carries the address the creation takes, with EIP-8037 and without it, up to
 /// the frame below the depth limit, and the frame's input carries the same address, computed once:
-/// the handler reuses it whatever nonce it reads.
+/// the handler reuses it whatever nonce it reads. The input holds the address, and a `CREATE2`'s
+/// init-code hash, as computed: a copy that has computed nothing differs from it until it computes
+/// the address for the nonce the instruction read.
 #[test]
 fn test_a_creation_start_carries_the_address_its_input_caches() {
     for spec in [SpecId::OSAKA, SpecId::AMSTERDAM] {
@@ -926,15 +928,23 @@ fn test_a_creation_start_carries_the_address_its_input_caches() {
                     created(op),
                     "{spec:?} {op:#x} at {depth}: the input carries the address the hook saw"
                 );
+                let mut uncached = (*inputs).clone();
+                uncached.set_init_code(uncached.init_code().clone());
+                assert_ne!(uncached, *inputs, "{spec:?} {op:#x} at {depth}");
+                assert_eq!(uncached.created_address(0), created(op));
+                assert_eq!(
+                    uncached, *inputs,
+                    "{spec:?} {op:#x} at {depth}: the address and a CREATE2's hash were computed"
+                );
             }
         }
     }
 }
 
 /// Without EIP-8037, a creation the handler fails before it takes an address reaches the hook with
-/// none, and its input carries none: an endowment above the caller's balance, a caller's nonce at
-/// its maximum, and a frame at the depth limit. With EIP-8037 the instruction ends each before the
-/// hook and pushes zero.
+/// none, and its input holds nothing computed, neither the address nor a `CREATE2`'s init-code
+/// hash: an endowment above the caller's balance, a caller's nonce at its maximum, and a frame at
+/// the depth limit. With EIP-8037 the instruction ends each before the hook and pushes zero.
 #[test]
 fn test_a_creation_that_fails_before_its_address_starts_without_one() {
     let cases = |spec| {
@@ -965,13 +975,12 @@ fn test_a_creation_that_fails_before_its_address_starts_without_one() {
             };
 
             assert_eq!(host.start().0.target, None, "{op:#x}, {name}");
-            if op == CREATE {
-                assert_eq!(
-                    inputs.created_address(5),
-                    CONTRACT.create(5),
-                    "{name}: the input carries no address"
-                );
-            }
+            let mut uncached = (*inputs).clone();
+            uncached.set_init_code(uncached.init_code().clone());
+            assert_eq!(
+                uncached, *inputs,
+                "{op:#x}, {name}: the input holds nothing computed"
+            );
         }
         for (name, mut host, depth) in cases(SpecId::AMSTERDAM) {
             let (action, _) = run_at_depth(SpecId::AMSTERDAM, &code, AMPLE, 0, depth, &mut host);
