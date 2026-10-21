@@ -12,6 +12,9 @@ use primitives::{Address, TxKind};
 use state::Bytecode;
 use std::boxed::Box;
 
+mod first_frame;
+pub use first_frame::settle_first_frame;
+
 /// Creates the first [`FrameInput`] from the transaction and the
 /// transaction-level `gas`, forwarding all remaining regular gas and the
 /// reservoir to the frame.

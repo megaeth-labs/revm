@@ -1,7 +1,6 @@
 use crate::{
     evm::FrameTr,
     execution,
-    frame::handle_reservoir_remaining_gas,
     post_execution::{self, build_result_gas},
     pre_execution::{self, apply_eip7702_auth_list, PreExecutionOutput},
     validation, EvmTr, FrameResult, ItemOrResult,
@@ -15,11 +14,10 @@ use context_interface::{
     context::{take_error, ContextError},
     journaled_state::JournalCheckpoint,
     result::{HaltReasonTr, InvalidHeader, InvalidTransaction, ResultGas},
-    Cfg, ContextTr, Database, Host, JournalTr, Transaction,
+    Cfg, ContextTr, Database, JournalTr, Transaction,
 };
 use interpreter::{interpreter_action::FrameInit, GasTracker, InitialAndFloorGas, SharedMemory};
 use primitives::{TxKind, U256};
-use std::string::ToString;
 
 /// Trait for errors that can occur during EVM execution.
 ///
@@ -502,6 +500,12 @@ pub trait Handler {
     ///
     /// The settled transaction-level gas is written back to the frame result,
     /// which carries it into the post-execution phase.
+    ///
+    /// The settlement is [`execution::settle_first_frame`], which also refunds
+    /// the first frame's start charge. An override calls it rather than copying
+    /// this body, and copies the gas into the frame result itself.
+    ///
+    /// [`handle_reservoir_remaining_gas`]: crate::handle_reservoir_remaining_gas
     #[inline]
     fn last_frame_result(
         &mut self,
@@ -509,55 +513,9 @@ pub trait Handler {
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         parent_gas: &mut GasTracker,
     ) -> Result<(), Self::Error> {
-        let instruction_result = frame_result.instruction_result();
-
-        // All regular gas was forwarded to the first frame: consume it on the
-        // transaction-level gas; the settle below returns the frame's unused
-        // part.
-        parent_gas.spend_all();
-
-        // Settle the frame into the transaction-level gas like a parent frame.
-        handle_reservoir_remaining_gas(
-            instruction_result,
-            parent_gas,
-            frame_result.gas_mut().tracker_mut(),
-        );
-
-        // Refund the EIP-2780 refundable first-frame charge when no account
-        // leaf was created, exactly like `EthFrame::return_result` refunds
-        // the upfront CALL/CREATE state charges of inner frames.
-        if let Some(charge) = frame_result.refundable_state_gas_charge() {
-            // A failure the frame already recorded (a failed code deposit lookup, say) is
-            // returned first, as `EthFrame::return_result` does for inner frames, so a failing
-            // refund lookup cannot overwrite it.
-            take_error::<Self::Error, _>(evm.ctx().error())?;
-            // Priced through the same hook the charge went through. A failed lookup surfaces as
-            // an external error: the hook recorded the cause.
-            let Some(charge) = evm.ctx().state_gas_charge(charge) else {
-                take_error::<Self::Error, _>(evm.ctx().error())?;
-                return Err(Self::Error::from_string(
-                    "state gas price lookup failed".to_string(),
-                ));
-            };
-            parent_gas.refill_reservoir(charge);
-            // Unlike an inner frame's caller, the transaction ends here: an
-            // exceptional halt consumes all regular gas, including the
-            // spilled portion the refill just credited back to `remaining`.
-            if instruction_result.is_halt() {
-                parent_gas.spend_all();
-            }
-        }
-
-        // Refund the start charge a consumer put on the first frame's input for what it charged
-        // the transaction's gas, whole, on the same condition and with the same halt rule,
-        // exactly like `EthFrame::return_result` refunds the start charges of inner frames.
-        if let Some(charge) = frame_result.refundable_start_charge() {
-            parent_gas.refill_history(charge.history);
-            parent_gas.refill_bytes(charge.bytes);
-            if instruction_result.is_halt() {
-                parent_gas.spend_all();
-            }
-        }
+        // Settle the frame into the transaction-level gas like a parent frame, and refund what
+        // its failure gives back.
+        execution::settle_first_frame::<_, Self::Error>(evm.ctx(), frame_result, parent_gas)?;
 
         // The frame result carries the transaction-level gas onward to the
         // post-execution phase.
