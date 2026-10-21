@@ -313,7 +313,7 @@ struct Ended {
     result: InstructionResult,
     pool: u64,
     spent: i64,
-    crossing: Option<u64>,
+    crossing: bool,
     history: i64,
     allowance: u64,
     charged_start: StartCharge,
@@ -329,7 +329,7 @@ impl Ended {
             result,
             pool,
             spent,
-            crossing: None,
+            crossing: false,
             history: 0,
             allowance: 0,
             charged_start: StartCharge::new(0, 0),
@@ -351,7 +351,7 @@ impl Figures {
             result,
             pool: gas.bytes_remaining(),
             spent: gas.bytes_spent(),
-            crossing: gas.bytes_crossing().map(|crossing| crossing.cost()),
+            crossing: gas.bytes_crossing(),
             history: gas.history_gas_spent(),
             allowance: gas.history_allowance(),
             charged_start: charged,
@@ -570,7 +570,7 @@ fn test_both_paths_record_a_failed_draw() {
         figures.ends,
         [
             Ended {
-                crossing: Some(u64::MAX),
+                crossing: true,
                 ..Ended::with(InstructionResult::OutOfGas, UNLIMITED - DRAW_BYTES, 0)
             },
             Ended::stopped(UNLIMITED - DRAW_BYTES, DRAW_BYTES as i64),

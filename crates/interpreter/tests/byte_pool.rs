@@ -341,7 +341,7 @@ fn test_every_start_forwards_the_whole_pool_by_default() {
             "{kind:?}: the caller keeps nothing"
         );
         assert_eq!(gas.bytes_spent(), 0, "{kind:?}: a forward is not a draw");
-        assert_eq!(gas.bytes_crossing(), None, "{kind:?}");
+        assert!(!gas.bytes_crossing(), "{kind:?}");
     }
 }
 
@@ -419,7 +419,7 @@ fn test_a_refused_start_forwards_no_bytes_and_discards_the_declared_charge() {
             "{kind:?}: no share taken"
         );
         assert_eq!(gas.bytes_spent(), 200, "{kind:?}");
-        assert_eq!(gas.bytes_crossing(), None, "{kind:?}");
+        assert!(!gas.bytes_crossing(), "{kind:?}");
     }
 }
 
@@ -444,11 +444,7 @@ fn test_a_draw_the_pool_cannot_pay_records_a_crossing_that_survives_the_halt() {
             "{kind:?}: the failed draw took nothing"
         );
         assert_eq!(gas.bytes_spent(), 0, "{kind:?}");
-        assert_eq!(
-            gas.bytes_crossing().map(|crossing| crossing.cost()),
-            Some(POOL + 1),
-            "{kind:?}"
-        );
+        assert!(gas.bytes_crossing(), "{kind:?}");
     }
 }
 

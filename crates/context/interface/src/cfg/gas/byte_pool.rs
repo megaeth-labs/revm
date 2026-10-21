@@ -3,49 +3,14 @@
 //!
 //! The pool is a figure beside the gas: `bytes_remaining` is what the frame may still draw, and
 //! `bytes_spent` is the frame's net draw so far, signed as the state and history nets are. A draw
-//! ([`record_bytes`](GasTracker::record_bytes)) the pool cannot pay fails, takes nothing and leaves
-//! a [`BytesCrossing`]. A frame that reverts or halts gives its draws back
-//! ([`rollback_state_gas`](GasTracker::rollback_state_gas)), and a frame that succeeds hands its
-//! net to its caller, so a caller's rollback undoes its children's draws too. The pool starts
-//! unlimited (`u64::MAX`), and nothing in this workspace draws it, so a consumer that sets no pool
-//! sees nothing of it.
+//! ([`record_bytes`](GasTracker::record_bytes)) the pool cannot pay fails, takes nothing and sets
+//! the crossing ([`bytes_crossing`](GasTracker::bytes_crossing)). A frame that reverts or halts
+//! gives its draws back ([`rollback_state_gas`](GasTracker::rollback_state_gas)), and a frame that
+//! succeeds hands its net to its caller, so a caller's rollback undoes its children's draws too.
+//! The pool starts unlimited (`u64::MAX`), and nothing in this workspace draws it, so a consumer
+//! that sets no pool sees nothing of it.
 
 use super::{saturating_signed, GasTracker};
-use core::num::NonZeroU64;
-
-/// A draw of the byte pool that the pool could not pay.
-///
-/// Recorded by [`GasTracker::record_bytes`] when `cost > bytes_remaining`. The failed draw took
-/// nothing, so the pool is as it was before it; the record says that a draw failed, and what it
-/// asked for. A consumer reads it from a halted frame's result to tell a frame that ran out of
-/// bytes from one that ran out of gas, and turns it into a stop of its own class.
-///
-/// A draw of zero never fails, so the cost is never zero and `Option<BytesCrossing>` takes no more
-/// room than a `u64`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct BytesCrossing {
-    /// The bytes the failed draw asked for.
-    cost: NonZeroU64,
-}
-
-impl BytesCrossing {
-    /// A record of a failed draw of `cost` bytes.
-    ///
-    /// The tracker makes its own records. This is for a consumer that marks a result it produced
-    /// outside the tracker as a failed draw, and puts the record on the tracker with
-    /// [`GasTracker::set_bytes_crossing`].
-    #[inline]
-    pub const fn with_cost(cost: NonZeroU64) -> Self {
-        Self { cost }
-    }
-
-    /// The bytes the failed draw asked for. Never zero.
-    #[inline]
-    pub const fn cost(&self) -> u64 {
-        self.cost.get()
-    }
-}
 
 impl GasTracker {
     /// The byte pool: what this frame may still draw.
@@ -90,9 +55,8 @@ impl GasTracker {
 
     /// Draws `cost` bytes from the pool.
     ///
-    /// Returns `false` if the pool cannot pay, leaving it untouched and recording a
-    /// [`BytesCrossing`] ([`bytes_crossing`](Self::bytes_crossing)). A draw of zero always
-    /// succeeds. The draw is counted on [`bytes_spent`](Self::bytes_spent), so a rollback gives
+    /// Returns `false` if the pool cannot pay, leaving it untouched and setting the crossing
+    /// ([`bytes_crossing`](Self::bytes_crossing)). A draw of zero always succeeds. The draw is counted on [`bytes_spent`](Self::bytes_spent), so a rollback gives
     /// it back.
     #[inline]
     #[must_use = "a draw the pool cannot pay is the consumer's stop"]
@@ -102,7 +66,7 @@ impl GasTracker {
             self.bytes_spent = self.bytes_spent.saturating_add(saturating_signed(cost));
             return true;
         }
-        self.bytes_draw_failed(cost);
+        self.bytes_crossing = true;
         false
     }
 
@@ -133,33 +97,37 @@ impl GasTracker {
         self.bytes_remaining = self.bytes_remaining.saturating_add(remaining);
     }
 
-    /// The record of the last draw the pool could not pay, since the record was last cleared, or
-    /// one a consumer set with [`set_bytes_crossing`](Self::set_bytes_crossing); whichever was
-    /// written last.
+    /// The crossing: whether a draw failed that the pool could not pay, since the record was last
+    /// cleared, or a consumer set it with [`set_bytes_crossing`](Self::set_bytes_crossing).
     ///
+    /// A consumer reads it from a halted frame's result to tell a frame that ran out of bytes from
+    /// one that ran out of gas, and turns it into a stop of its own class. The record says that a
+    /// draw failed, not what it asked for: the hook that drew knows its cost when the draw fails.
     /// The failed draw took nothing, and no halt touches the pool, so the pool itself still reads
     /// as it was at the failure until the frame's rollback. The record survives
     /// [`spend_all`](Self::spend_all), starts empty in every child, and is not taken over by a
-    /// caller.
+    /// caller. It is a bit beside the failed-charge record
+    /// ([`failed_charge_remaining`](Self::failed_charge_remaining)), and each is set and cleared
+    /// apart from the other.
     #[inline]
-    pub const fn bytes_crossing(&self) -> Option<BytesCrossing> {
+    pub const fn bytes_crossing(&self) -> bool {
         self.bytes_crossing
     }
 
     /// Clears the record returned by [`bytes_crossing`](Self::bytes_crossing).
     #[inline]
     pub const fn clear_bytes_crossing(&mut self) {
-        self.bytes_crossing = None;
+        self.bytes_crossing = false;
     }
 
-    /// Sets the record returned by [`bytes_crossing`](Self::bytes_crossing), replacing any record
-    /// already there; `None` clears it. The pool is left as it is.
+    /// Sets the record returned by [`bytes_crossing`](Self::bytes_crossing); `false` clears it.
+    /// The pool is left as it is.
     ///
     /// For a consumer that marks a result it produced itself, such as an answer it gave without
     /// running a frame, as a failed draw, so a classifier reading the record treats it as one the
     /// tracker recorded.
     #[inline]
-    pub const fn set_bytes_crossing(&mut self, crossing: Option<BytesCrossing>) {
+    pub const fn set_bytes_crossing(&mut self, crossing: bool) {
         self.bytes_crossing = crossing;
     }
 
@@ -170,33 +138,17 @@ impl GasTracker {
         self.bytes_remaining = self.bytes_remaining.saturating_add_signed(self.bytes_spent);
         self.bytes_spent = 0;
     }
-
-    /// Records a draw of `cost` the pool could not pay. Only called on the failure side of
-    /// [`record_bytes`](Self::record_bytes), where `cost > bytes_remaining >= 0`, so the cost is
-    /// never zero and the success side does not pay for the record.
-    #[cold]
-    #[inline(never)]
-    const fn bytes_draw_failed(&mut self, cost: u64) {
-        if let Some(cost) = NonZeroU64::new(cost) {
-            self.bytes_crossing = Some(BytesCrossing::with_cost(cost));
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BytesCrossing, GasTracker};
-    use core::num::NonZeroU64;
+    use super::GasTracker;
 
     /// A tracker with a pool of 1,000 bytes.
     fn pool_1000() -> GasTracker {
         let mut tracker = GasTracker::new(1_000, 1_000, 300);
         tracker.set_bytes_remaining(1_000);
         tracker
-    }
-
-    fn crossing(tracker: &GasTracker) -> Option<u64> {
-        tracker.bytes_crossing().map(|crossing| crossing.cost())
     }
 
     /// Every tracker starts with an unlimited pool, nothing drawn and no record; `Default` is
@@ -206,18 +158,32 @@ mod tests {
         let tracker = GasTracker::new(1_000, 1_000, 300);
         assert_eq!(tracker.bytes_remaining(), u64::MAX);
         assert_eq!(tracker.bytes_spent(), 0);
-        assert_eq!(tracker.bytes_crossing(), None);
+        assert!(!tracker.bytes_crossing());
         assert_eq!(GasTracker::default(), GasTracker::new(0, 0, 0));
         assert_eq!(GasTracker::default().bytes_remaining(), u64::MAX);
     }
 
-    /// An absent record takes no extra room.
+    /// The crossing shares a word with the failed-charge record and is a record of its own: a
+    /// failed draw records no failed charge, a failed charge records no crossing, and setting or
+    /// clearing either leaves the other as it is.
     #[test]
-    fn test_an_absent_crossing_takes_no_extra_room() {
-        assert_eq!(
-            core::mem::size_of::<Option<BytesCrossing>>(),
-            core::mem::size_of::<u64>()
-        );
+    fn test_the_crossing_and_the_failed_charge_record_are_independent() {
+        let mut tracker = pool_1000();
+        assert!(!tracker.record_bytes(1_001));
+        assert!(tracker.bytes_crossing());
+        assert_eq!(tracker.failed_charge_remaining(), None);
+
+        tracker.clear_bytes_crossing();
+        assert!(!tracker.record_regular_cost(1_001));
+        assert_eq!(tracker.failed_charge_remaining(), Some(1_000));
+        assert!(!tracker.bytes_crossing());
+
+        tracker.set_bytes_crossing(true);
+        tracker.set_failed_charge_remaining(None);
+        assert!(tracker.bytes_crossing());
+        tracker.set_failed_charge_remaining(Some(0));
+        tracker.clear_bytes_crossing();
+        assert_eq!(tracker.failed_charge_remaining(), Some(0));
     }
 
     #[test]
@@ -229,10 +195,10 @@ mod tests {
 
         assert_eq!(tracker.bytes_remaining(), 500);
         assert_eq!(tracker.bytes_spent(), 500);
-        assert_eq!(tracker.bytes_crossing(), None);
+        assert!(!tracker.bytes_crossing());
     }
 
-    /// A draw the pool cannot pay takes nothing and leaves a record of what it asked for.
+    /// A draw the pool cannot pay takes nothing and leaves the record.
     #[test]
     fn test_a_draw_beyond_the_pool_fails_and_records_the_crossing() {
         let mut tracker = pool_1000();
@@ -246,7 +212,7 @@ mod tests {
             "the failed draw took nothing"
         );
         assert_eq!(tracker.bytes_spent(), 900);
-        assert_eq!(crossing(&tracker), Some(101));
+        assert!(tracker.bytes_crossing());
     }
 
     /// A draw of exactly the pool succeeds, and a draw of zero succeeds on an empty pool.
@@ -256,29 +222,27 @@ mod tests {
         assert!(tracker.record_bytes(1_000));
         assert_eq!(tracker.bytes_remaining(), 0);
         assert!(tracker.record_bytes(0));
-        assert_eq!(tracker.bytes_crossing(), None);
+        assert!(!tracker.bytes_crossing());
         assert!(!tracker.record_bytes(1));
-        assert_eq!(crossing(&tracker), Some(1));
+        assert!(tracker.bytes_crossing());
     }
 
-    /// The record stays until it is cleared: a later draw that succeeds leaves it, a later failed
-    /// draw replaces it, and a consumer clears or sets it.
+    /// The record stays until it is cleared: a later draw that succeeds leaves it, and a consumer
+    /// clears or sets it, which leaves the pool as it is.
     #[test]
-    fn test_the_record_stays_until_cleared_and_the_last_failure_wins() {
+    fn test_the_record_stays_until_cleared() {
         let mut tracker = pool_1000();
         assert!(!tracker.record_bytes(1_001));
         assert!(tracker.record_bytes(10));
-        assert_eq!(crossing(&tracker), Some(1_001));
-
-        assert!(!tracker.record_bytes(2_000));
-        assert_eq!(crossing(&tracker), Some(2_000));
+        assert!(tracker.bytes_crossing());
 
         tracker.clear_bytes_crossing();
-        assert_eq!(tracker.bytes_crossing(), None);
+        assert!(!tracker.bytes_crossing());
 
-        let set = BytesCrossing::with_cost(NonZeroU64::new(7).unwrap());
-        tracker.set_bytes_crossing(Some(set));
-        assert_eq!(tracker.bytes_crossing(), Some(set));
+        tracker.set_bytes_crossing(true);
+        assert!(tracker.bytes_crossing());
+        tracker.set_bytes_crossing(false);
+        assert!(!tracker.bytes_crossing());
         assert_eq!(
             tracker.bytes_remaining(),
             990,
@@ -298,7 +262,7 @@ mod tests {
 
         assert_eq!(tracker.remaining(), 0);
         assert_eq!(tracker.bytes_remaining(), 400);
-        assert_eq!(crossing(&tracker), Some(500));
+        assert!(tracker.bytes_crossing());
     }
 
     /// A refill gives bytes back and lowers the net, below zero when the draw was a caller's.
@@ -423,6 +387,6 @@ mod tests {
         let decoded = serde_json::from_value::<GasTracker>(older).unwrap();
         assert_eq!(decoded.bytes_remaining(), u64::MAX);
         assert_eq!(decoded.bytes_spent(), 0);
-        assert_eq!(decoded.bytes_crossing(), None);
+        assert!(!decoded.bytes_crossing());
     }
 }

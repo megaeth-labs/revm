@@ -36,7 +36,7 @@ pub use context_interface::{
     context::{SStoreResult, SelfDestructResult, StateLoad},
     host, CreateScheme, Host,
 };
-pub use gas::{BytesCrossing, Gas, GasTracker, StartCharge};
+pub use gas::{Gas, GasTracker, StartCharge};
 pub use instruction_context::InstructionContext;
 pub use instruction_result::*;
 pub use instructions::{

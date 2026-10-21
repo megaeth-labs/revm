@@ -236,13 +236,14 @@ mod tests {
         assert_eq!(size_of::<Option<WithheldCrossing>>(), size_of::<u64>());
     }
 
-    /// The tracker is 120 bytes: 72 with the withheld part and its record, two words more for the
-    /// failed-charge record, and four more for the byte pool (the pool, its net and its record)
-    /// and the history allowance. Copies of the tracker, and of every `Gas` and frame result that
-    /// holds one, grow with it, so a new field is measured before this changes.
+    /// The tracker is 112 bytes: 72 with the withheld part and its record, two words more for the
+    /// failed-charge record, whose second word also holds the byte pool's crossing, and three more
+    /// for the byte pool and its net and the history allowance. Copies of the tracker, and of
+    /// every `Gas` and frame result that holds one, grow with it, so a new field is measured
+    /// before this changes.
     #[test]
-    fn test_the_tracker_is_120_bytes() {
-        assert_eq!(size_of::<GasTracker>(), 120);
+    fn test_the_tracker_is_112_bytes() {
+        assert_eq!(size_of::<GasTracker>(), 112);
     }
 
     /// Withholding moves gas between the parts and leaves the total alone.

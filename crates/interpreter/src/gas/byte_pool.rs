@@ -3,7 +3,7 @@
 //! Each method forwards to the [`GasTracker`](super::GasTracker) method of the same name, which
 //! documents it.
 
-use super::{BytesCrossing, Gas};
+use super::Gas;
 
 impl Gas {
     /// The byte pool: what this frame may still draw. Unlimited unless a consumer set a pool.
@@ -38,8 +38,8 @@ impl Gas {
         self.tracker.set_bytes_spent(val);
     }
 
-    /// Draws `cost` bytes from the pool; `false` if the pool cannot pay, which records a
-    /// [`BytesCrossing`].
+    /// Draws `cost` bytes from the pool; `false` if the pool cannot pay, which sets the crossing
+    /// ([`bytes_crossing`](Self::bytes_crossing)).
     ///
     /// See [`GasTracker::record_bytes`](super::GasTracker::record_bytes).
     #[inline]
@@ -56,11 +56,11 @@ impl Gas {
         self.tracker.refill_bytes(amount);
     }
 
-    /// The record of the last draw the pool could not pay, since it was last cleared.
+    /// Whether a draw failed that the pool could not pay, since the record was last cleared.
     ///
     /// See [`GasTracker::bytes_crossing`](super::GasTracker::bytes_crossing).
     #[inline]
-    pub const fn bytes_crossing(&self) -> Option<BytesCrossing> {
+    pub const fn bytes_crossing(&self) -> bool {
         self.tracker.bytes_crossing()
     }
 
@@ -76,7 +76,7 @@ impl Gas {
     ///
     /// See [`GasTracker::set_bytes_crossing`](super::GasTracker::set_bytes_crossing).
     #[inline]
-    pub const fn set_bytes_crossing(&mut self, crossing: Option<BytesCrossing>) {
+    pub const fn set_bytes_crossing(&mut self, crossing: bool) {
         self.tracker.set_bytes_crossing(crossing);
     }
 

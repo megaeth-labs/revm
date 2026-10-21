@@ -47,7 +47,11 @@ impl GasTracker {
     /// record is left on a creation that returns successfully.
     #[inline]
     pub const fn failed_charge_remaining(&self) -> Option<u64> {
-        self.failed_charge_remaining
+        if self.failed_charge_recorded {
+            Some(self.failed_charge_remaining)
+        } else {
+            None
+        }
     }
 
     /// Sets the record returned by [`failed_charge_remaining`](Self::failed_charge_remaining),
@@ -59,7 +63,20 @@ impl GasTracker {
     /// failure, the record survives [`spend_all`](Self::spend_all).
     #[inline]
     pub const fn set_failed_charge_remaining(&mut self, remaining: Option<u64>) {
+        match remaining {
+            Some(remaining) => self.record_failed_charge(remaining),
+            None => {
+                self.failed_charge_remaining = 0;
+                self.failed_charge_recorded = false;
+            }
+        }
+    }
+
+    /// Records `remaining` as the regular gas left before a failed charge.
+    #[inline]
+    const fn record_failed_charge(&mut self, remaining: u64) {
         self.failed_charge_remaining = remaining;
+        self.failed_charge_recorded = true;
     }
 
     /// Records a failed regular charge of `cost` against `spendable`: the regular gas left,
@@ -74,7 +91,7 @@ impl GasTracker {
     #[inline(never)]
     pub(super) const fn regular_charge_failed(&mut self, cost: u64, spendable: u64) {
         let remaining = spendable.saturating_add(self.withheld);
-        self.failed_charge_remaining = Some(remaining);
+        self.record_failed_charge(remaining);
         // `cost > spendable`, so a withheld part that covers the difference is never zero, and
         // neither is the regular gas left.
         if cost - spendable <= self.withheld {
@@ -94,7 +111,7 @@ impl GasTracker {
     #[cold]
     #[inline(never)]
     pub(super) const fn withheld_first_cost_failed(&mut self) {
-        self.failed_charge_remaining = Some(self.remaining.saturating_add(self.withheld));
+        self.record_failed_charge(self.remaining.saturating_add(self.withheld));
     }
 }
 

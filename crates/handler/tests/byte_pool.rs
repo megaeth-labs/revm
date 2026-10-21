@@ -117,25 +117,25 @@ const fn log(
 }
 
 /// A frame's pool figures as it returned, before its caller settled it: its result, its pool,
-/// its net draw, the draw that failed, its history gas and its allowance.
+/// its net draw, whether a draw failed, its history gas and its allowance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Returned {
     result: InstructionResult,
     pool: u64,
     spent: i64,
-    crossing: Option<u64>,
+    crossing: bool,
     history: i64,
     allowance: u64,
 }
 
 impl Returned {
-    fn of(result: &FrameResult) -> Self {
+    const fn of(result: &FrameResult) -> Self {
         let gas = result.gas();
         Self {
             result: result.instruction_result(),
             pool: gas.bytes_remaining(),
             spent: gas.bytes_spent(),
-            crossing: gas.bytes_crossing().map(|crossing| crossing.cost()),
+            crossing: gas.bytes_crossing(),
             history: gas.history_gas_spent(),
             allowance: gas.history_allowance(),
         }
@@ -150,7 +150,7 @@ impl Returned {
             result,
             pool,
             spent,
-            crossing: None,
+            crossing: false,
             history: 0,
             allowance: 0,
         }
@@ -708,7 +708,7 @@ fn test_a_failed_draw_halts_the_frame_with_a_record_the_caller_can_read() {
         handler.returned,
         [
             Returned {
-                crossing: Some(DRAW_BYTES),
+                crossing: true,
                 ..Returned::ended(InstructionResult::OutOfGas, 50, 0)
             },
             Returned::stopped(50, 100),

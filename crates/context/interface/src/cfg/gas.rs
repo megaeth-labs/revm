@@ -4,12 +4,13 @@ use crate::{cfg::gas_params, cfg::GasParams, Transaction};
 use primitives::hardfork::SpecId;
 
 mod byte_pool;
+#[cfg(feature = "serde")]
+mod encoding;
 mod failed_charge;
 mod history_allowance;
 mod start_charge;
 mod withheld;
 
-pub use byte_pool::BytesCrossing;
 pub use start_charge::StartCharge;
 pub use withheld::WithheldCrossing;
 
@@ -65,8 +66,16 @@ pub use withheld::WithheldCrossing;
 /// checks it. Above it, a rollback no longer restores the reservoir exactly and can burn or mint
 /// gas at the boundary. Reaching it takes a transaction gas limit above `i64::MAX`
 /// (about 9.2 × 10^18).
+///
+/// Encoded, the tracker has a field per figure, in the order below; the failed-charge record and
+/// the byte pool's crossing, which share a word in memory, are encoded as an optional number and
+/// a `bool` in their own places.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(from = "encoding::Encoded", into = "encoding::Encoded")
+)]
 pub struct GasTracker {
     /// Gas Limit,
     gas_limit: u64,
@@ -116,7 +125,6 @@ pub struct GasTracker {
     /// exactly as it did before this field existed.
     ///
     /// Encodings made before this field existed decode it as zero.
-    #[cfg_attr(feature = "serde", serde(default))]
     history_gas_spent: i64,
     /// Refunded gas. Used to refund the gas to the caller at the end of execution.
     refunded: i64,
@@ -128,7 +136,6 @@ pub struct GasTracker {
     /// method behaves as it did before this field existed.
     ///
     /// Encodings made before this field existed decode it as zero.
-    #[cfg_attr(feature = "serde", serde(default))]
     withheld: u64,
     /// The record of the last failed regular charge the withheld part would have paid
     /// ([`withheld_crossing`](Self::withheld_crossing)): the regular gas left before that
@@ -141,45 +148,39 @@ pub struct GasTracker {
     /// position, such as bincode, cannot tell the two records apart and reads the old one as the
     /// regular gas left, so a record persisted in such a format must not cross an upgrade of this
     /// crate.
-    #[cfg_attr(feature = "serde", serde(default))]
     withheld_crossing: Option<WithheldCrossing>,
     /// The regular gas left, spendable and withheld parts together, before the last charge that
-    /// failed ([`failed_charge_remaining`](Self::failed_charge_remaining)).
+    /// failed ([`failed_charge_remaining`](Self::failed_charge_remaining)), if
+    /// `failed_charge_recorded` is set, and zero otherwise.
     ///
     /// Encodings made before this field existed decode it as `None`.
-    #[cfg_attr(feature = "serde", serde(default))]
-    failed_charge_remaining: Option<u64>,
+    failed_charge_remaining: u64,
+    /// Whether `failed_charge_remaining` holds a record. A flag apart from the record rather than
+    /// an `Option`, whose tag would take a word of its own, so it shares a word with
+    /// `bytes_crossing`.
+    failed_charge_recorded: bool,
     /// The byte pool ([`bytes_remaining`](Self::bytes_remaining)): what this frame may still
     /// draw. Unlimited unless a consumer sets a pool; nothing in this workspace draws it.
     ///
     /// Encodings made before this field existed decode it as unlimited.
-    #[cfg_attr(feature = "serde", serde(default = "unlimited_bytes"))]
     bytes_remaining: u64,
     /// The frame's net draw of the pool ([`bytes_spent`](Self::bytes_spent)), signed as
     /// `history_gas_spent` is, so a rollback can give it back and a merge can hand it on.
     ///
     /// Encodings made before this field existed decode it as zero.
-    #[cfg_attr(feature = "serde", serde(default))]
     bytes_spent: i64,
-    /// The record of the last draw the pool could not pay
-    /// ([`bytes_crossing`](Self::bytes_crossing)). One word, since a failed draw is never zero.
+    /// Whether a draw failed that the pool could not pay
+    /// ([`bytes_crossing`](Self::bytes_crossing)). A bit, in the word `failed_charge_recorded`
+    /// takes.
     ///
-    /// Encodings made before this field existed decode it as `None`.
-    #[cfg_attr(feature = "serde", serde(default))]
-    bytes_crossing: Option<BytesCrossing>,
+    /// Encodings made before this field existed decode it as `false`.
+    bytes_crossing: bool,
     /// History gas this frame may spend before it charges its budget
     /// ([`history_allowance`](Self::history_allowance)). Zero unless the schedule gives a value
     /// call's child one.
     ///
     /// Encodings made before this field existed decode it as zero.
-    #[cfg_attr(feature = "serde", serde(default))]
     history_allowance: u64,
-}
-
-/// The pool a tracker starts with, and an encoding that predates the pool decodes to.
-#[cfg(feature = "serde")]
-const fn unlimited_bytes() -> u64 {
-    u64::MAX
 }
 
 impl Default for GasTracker {
@@ -204,10 +205,11 @@ impl GasTracker {
             refunded: 0,
             withheld: 0,
             withheld_crossing: None,
-            failed_charge_remaining: None,
+            failed_charge_remaining: 0,
+            failed_charge_recorded: false,
             bytes_remaining: u64::MAX,
             bytes_spent: 0,
-            bytes_crossing: None,
+            bytes_crossing: false,
             history_allowance: 0,
         }
     }
