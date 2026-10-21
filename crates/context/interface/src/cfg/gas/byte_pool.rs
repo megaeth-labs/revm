@@ -9,6 +9,15 @@
 //! succeeds hands its net to its caller, so a caller's rollback undoes its children's draws too.
 //! The pool starts unlimited (`u64::MAX`), and nothing in this workspace draws it, so a consumer
 //! that sets no pool sees nothing of it.
+//!
+//! The net is an `i64`, as the gas nets are, while draws and refills take `u64` amounts. As the
+//! tracker does for gas amounts, it assumes that every draw and refill is at most `i64::MAX`
+//! bytes, and that the net, with the nets of the children merged into it, stays within `i64`;
+//! the pool itself may be anything up to the unlimited `u64::MAX`. A release build does not check
+//! it: past it the net saturates, and a rollback no longer restores the pool exactly. A debug
+//! build asserts it wherever the net moves ([`record_bytes`](GasTracker::record_bytes),
+//! [`refill_bytes`](GasTracker::refill_bytes), [`add_bytes_spent`](GasTracker::add_bytes_spent)).
+//! Reaching it takes a transaction that appends about 9.2 × 10^18 bytes.
 
 use super::{saturating_signed, GasTracker};
 
@@ -35,6 +44,8 @@ impl GasTracker {
     ///
     /// Negative while the frame has refilled more than it drew, as
     /// [`history_gas_spent`](Self::history_gas_spent) can be. A rollback adds it back to the pool.
+    /// It is exact while it stays within `i64` and no single draw or refill exceeds `i64::MAX`
+    /// bytes, which a debug build asserts.
     #[inline]
     pub const fn bytes_spent(&self) -> i64 {
         self.bytes_spent
@@ -50,6 +61,10 @@ impl GasTracker {
     /// caller, so a later rollback of the caller undoes the child's draws too.
     #[inline]
     pub const fn add_bytes_spent(&mut self, delta: i64) {
+        debug_assert!(
+            self.bytes_spent.checked_add(delta).is_some(),
+            "the byte net leaves the signed range"
+        );
         self.bytes_spent = self.bytes_spent.saturating_add(delta);
     }
 
@@ -62,6 +77,10 @@ impl GasTracker {
     #[must_use = "a draw the pool cannot pay is the consumer's stop"]
     pub const fn record_bytes(&mut self, cost: u64) -> bool {
         if let Some(left) = self.bytes_remaining.checked_sub(cost) {
+            debug_assert!(
+                cost <= i64::MAX as u64 && self.bytes_spent.checked_add(cost as i64).is_some(),
+                "the byte net leaves the signed range"
+            );
             self.bytes_remaining = left;
             self.bytes_spent = self.bytes_spent.saturating_add(saturating_signed(cost));
             return true;
@@ -76,6 +95,10 @@ impl GasTracker {
     /// which the merge on return reconciles, as [`refill_history`](Self::refill_history) does.
     #[inline]
     pub const fn refill_bytes(&mut self, amount: u64) {
+        debug_assert!(
+            amount <= i64::MAX as u64 && self.bytes_spent.checked_sub(amount as i64).is_some(),
+            "the byte net leaves the signed range"
+        );
         self.bytes_remaining = self.bytes_remaining.saturating_add(amount);
         self.bytes_spent = self.bytes_spent.saturating_sub(saturating_signed(amount));
     }
@@ -370,6 +393,47 @@ mod tests {
         let mut unlimited = GasTracker::new(1, 1, 0);
         unlimited.absorb_returned_bytes(1);
         assert_eq!(unlimited.bytes_remaining(), u64::MAX);
+    }
+
+    /// The net is exact up to `i64::MAX` bytes: a draw of it from the unlimited pool, a refill of
+    /// it, and a child's net of it merged into its caller each roll back to the pool they started
+    /// from.
+    #[test]
+    fn test_the_net_is_exact_up_to_the_signed_maximum() {
+        const MAX: u64 = i64::MAX as u64;
+
+        let mut drawn = GasTracker::new(1_000, 1_000, 0);
+        assert!(drawn.record_bytes(MAX));
+        assert_eq!(drawn.bytes_spent(), i64::MAX);
+        drawn.rollback_state_gas();
+        assert_eq!(drawn.bytes_remaining(), u64::MAX);
+
+        let mut refilled = GasTracker::new(1_000, 1_000, 0);
+        refilled.set_bytes_remaining(0);
+        refilled.refill_bytes(MAX);
+        assert_eq!(refilled.bytes_spent(), -i64::MAX);
+        refilled.rollback_state_gas();
+        assert_eq!(refilled.bytes_remaining(), 0);
+
+        let mut caller = GasTracker::new(1_000, 1_000, 0);
+        caller.forward_bytes(u64::MAX);
+        let mut child = GasTracker::new(500, 500, 0);
+        assert!(child.record_bytes(MAX));
+        caller.add_bytes_spent(child.bytes_spent());
+        caller.absorb_returned_bytes(child.bytes_remaining());
+        assert_eq!(caller.bytes_spent(), i64::MAX);
+        caller.rollback_state_gas();
+        assert_eq!(caller.bytes_remaining(), u64::MAX);
+    }
+
+    /// One byte past it the net would saturate, and a rollback would leave the unlimited pool a
+    /// byte short: a debug build refuses the draw.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "the byte net leaves the signed range")]
+    fn test_a_draw_past_the_signed_maximum_panics_in_a_debug_build() {
+        let mut tracker = GasTracker::new(1_000, 1_000, 0);
+        let _ = tracker.record_bytes(i64::MAX as u64 + 1);
     }
 
     /// With the default pool, forwarding the whole pool and settling a child's return brings the

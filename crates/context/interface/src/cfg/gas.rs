@@ -67,6 +67,10 @@ pub use withheld::WithheldCrossing;
 /// gas at the boundary. Reaching it takes a transaction gas limit above `i64::MAX`
 /// (about 9.2 × 10^18).
 ///
+/// The byte pool's net ([`bytes_spent`](Self::bytes_spent)) is an `i64` too, and assumes the same
+/// bound on byte amounts: every draw and refill, and the net with its children's merged in, within
+/// `i64`. A debug build asserts it where the net moves.
+///
 /// Encoded, the tracker has a field per figure, in the order below; the failed-charge record and
 /// the byte pool's crossing, which share a word in memory, are encoded as an optional number and
 /// a `bool` in their own places.
