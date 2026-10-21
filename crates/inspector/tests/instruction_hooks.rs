@@ -33,8 +33,9 @@ use primitives::{
 use revm_inspector::{InspectEvm, Inspector, NoOpInspector};
 use state::{
     bytecode::opcode::{
-        CALL, CALLCODE, CREATE, CREATE2, DELEGATECALL, LOG0, LOG1, MSTORE, POP, PUSH0, PUSH1,
-        PUSH4, SELFDESTRUCT, SSTORE, STATICCALL, STOP,
+        ADDRESS, CALL, CALLCODE, CALLVALUE, CREATE, CREATE2, DELEGATECALL, DUP6, JUMPDEST, JUMPI,
+        LOG0, LOG1, MSTORE, POP, PUSH0, PUSH1, PUSH32, PUSH4, RETURN, SELFDESTRUCT, SSTORE,
+        STATICCALL, STOP,
     },
     AccountInfo, Bytecode,
 };
@@ -62,7 +63,7 @@ const STOP_OUTPUT: &[u8] = b"stop";
 enum Write {
     Sstore(Address, StorageKey, SStoreResult),
     Log(Address, u8, u64),
-    SelfDestruct(Address, Address, SelfDestructResult),
+    SelfDestruct(Address, Address, U256, SelfDestructResult),
 }
 
 impl Write {
@@ -81,8 +82,9 @@ impl Write {
             CompletedWrite::SelfDestruct {
                 address,
                 target,
+                balance,
                 result,
-            } => Self::SelfDestruct(address, target, result.clone()),
+            } => Self::SelfDestruct(address, target, balance, result.clone()),
         }
     }
 
@@ -110,6 +112,10 @@ struct Hooks {
     starts: Vec<(FrameStart, GasTracker)>,
     /// Every start's target as the journal held it when the hook saw the start.
     targets: Vec<View>,
+    /// Every destruction's account and beneficiary as the journal held them before the write.
+    destructs: Vec<[View; 2]>,
+    /// Every destruction's account and beneficiary as the journal held them at the hook.
+    destructed: Vec<[View; 2]>,
 }
 
 /// An account as the journal holds it: its info and the info the transaction loaded it with, or
@@ -136,6 +142,8 @@ impl Hooks {
             writes: Vec::new(),
             starts: Vec::new(),
             targets: Vec::new(),
+            destructs: Vec::new(),
+            destructed: Vec::new(),
         }
     }
 }
@@ -211,6 +219,13 @@ impl ContextSetters for HookContext {
 impl Host for HookContext {
     fn write_completed(&mut self, write: CompletedWrite<'_>, gas: &mut GasTracker) -> WriteVerdict {
         self.hooks.writes.push((Write::of(write), *gas));
+        if let CompletedWrite::SelfDestruct {
+            address, target, ..
+        } = write
+        {
+            let accounts = [self.view(address), self.view(target)];
+            self.hooks.destructed.push(accounts);
+        }
         if self.hooks.writes.len() == 1 && self.hooks.first_write_charge > 0 {
             assert!(gas.record_history_cost(self.hooks.first_write_charge));
         }
@@ -305,7 +320,12 @@ impl Host for HookContext {
         target: Address,
         skip_cold_load: bool,
     ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
-        self.inner.selfdestruct(address, target, skip_cold_load)
+        let before = [self.view(address), self.view(target)];
+        let result = self.inner.selfdestruct(address, target, skip_cold_load);
+        if result.is_ok() {
+            self.hooks.destructs.push(before);
+        }
+        result
     }
 
     fn log(&mut self, log: Log) {
@@ -691,7 +711,7 @@ fn test_hooks_that_only_observe_change_nothing() {
                 Write::Log(CHILD, 0, 0),
                 Write::Log(PARENT, 0, 0),
                 Write::Log(PARENT, 0, 0),
-                Write::SelfDestruct(PARENT, BENEFICIARY, destructed),
+                Write::SelfDestruct(PARENT, BENEFICIARY, U256::from(9), destructed),
             ],
             "{spec:?}: the static call's log fails before the hook"
         );
@@ -780,6 +800,396 @@ fn test_a_creation_start_shows_whether_its_account_was_changed() {
             }
         }
     }
+}
+
+/// An account that destructs itself: its code stops when called with value, which funds it, and
+/// self-destructs otherwise.
+const DESTRUCTOR: Address = address!("0x00000000000000000000000000000000000de57e");
+/// An account with a balance of 4 that a destruction pays.
+const PAYEE: Address = address!("0x00000000000000000000000000000000000ba1ee");
+
+/// The account a destruction destructs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// [`DESTRUCTOR`], which the transaction has not changed before.
+    Untouched,
+    /// [`DESTRUCTOR`], funded with 2 by the transaction first.
+    Funded,
+    /// An account the transaction creates with a [`DESTRUCTOR`]'s code (EIP-6780).
+    Created,
+}
+
+/// The account a destruction pays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Payee {
+    /// [`PAYEE`], which the transaction has not changed before.
+    Untouched,
+    /// [`PAYEE`], funded with 1 by the transaction first.
+    Funded,
+    /// [`BENEFICIARY`], which does not exist.
+    New,
+    /// The destructed account itself.
+    Itself,
+}
+
+/// A destruction: the source and the beneficiary as the journal held them before the write and at
+/// the hook, with what the hook was handed.
+#[derive(Debug)]
+struct Destruct {
+    address: Address,
+    target: Address,
+    balance: U256,
+    result: SelfDestructResult,
+    before: [View; 2],
+    after: [View; 2],
+}
+
+/// An account's nonce, balance and code hash, and those it was loaded with.
+type Facts = ((u64, U256, B256), (u64, U256, B256));
+
+fn facts(view: &View) -> Option<Facts> {
+    view.as_ref().map(|(info, original)| {
+        (
+            (info.nonce, info.balance, info.code_hash),
+            (original.nonce, original.balance, original.code_hash),
+        )
+    })
+}
+
+impl Destruct {
+    /// The source and the beneficiary before the write, as a consumer rebuilds them from the
+    /// journal at the hook and the hook's facts: the write changed no nonce and no code, the
+    /// source held `balance`, and a beneficiary that is another account got all of it.
+    fn rebuilt(&self) -> [View; 2] {
+        let with_balance = |view: &View, balance: U256| {
+            view.clone().map(|(mut info, original)| {
+                info.balance = balance;
+                (info, original)
+            })
+        };
+        let source = with_balance(&self.after[0], self.balance);
+        let target = if self.target == self.address {
+            source.clone()
+        } else {
+            let paid = self.after[1]
+                .as_ref()
+                .expect("the write loaded it")
+                .0
+                .balance;
+            with_balance(&self.after[1], paid - self.balance)
+        };
+        [source, target]
+    }
+
+    /// How the write moved the records of the source and of a beneficiary that is another account,
+    /// with the accounts before it as `before` shows them: `1` for an account it changed from what
+    /// the transaction loaded, `-1` for one it put back, `0` otherwise.
+    fn records(&self, before: &[View; 2]) -> (i8, i8) {
+        let moved = |before: &View, after: &View| changed(after) as i8 - changed(before) as i8;
+        let target = if self.target == self.address {
+            0
+        } else {
+            moved(&before[1], &self.after[1])
+        };
+        (moved(&before[0], &self.after[0]), target)
+    }
+}
+
+/// `PUSH32 word`, where `bytes` fill the word from the left.
+fn push_word(bytes: &[u8]) -> Vec<u8> {
+    let mut word = [0u8; 32];
+    word[..bytes.len()].copy_from_slice(bytes);
+    let mut code = vec![PUSH32];
+    code.extend_from_slice(&word);
+    code
+}
+
+/// `bytes` stored in memory from offset 0.
+fn mstore_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut code = Vec::new();
+    for (word, chunk) in bytes.chunks(32).enumerate() {
+        code.extend(push_word(chunk));
+        code.extend_from_slice(&[PUSH1, (word * 32) as u8, MSTORE]);
+    }
+    code
+}
+
+/// A [`DESTRUCTOR`]'s code, paying `payee`, or the account itself when `None`.
+fn destructor(payee: Option<Address>) -> Vec<u8> {
+    let pay = payee.map_or(vec![ADDRESS], push_address);
+    let stop = 5 + pay.len() as u8;
+    let mut code = vec![CALLVALUE, PUSH1, stop, JUMPI];
+    code.extend(pay);
+    code.extend_from_slice(&[SELFDESTRUCT, JUMPDEST, STOP]);
+    code
+}
+
+/// Init code that deploys `runtime`.
+fn deploying(runtime: &[u8]) -> Vec<u8> {
+    let mut code = mstore_bytes(runtime);
+    code.extend_from_slice(&[PUSH1, runtime.len() as u8, PUSH0, RETURN]);
+    code
+}
+
+/// `CREATE` of `initcode` endowed with `value`, leaving the address on the stack.
+fn create_keeping(initcode: &[u8], value: u8) -> Vec<u8> {
+    let mut code = mstore_bytes(initcode);
+    code.extend_from_slice(&[PUSH1, initcode.len() as u8, PUSH0, PUSH1, value, CREATE]);
+    code
+}
+
+/// A `CALL` with `value` and all the gas the cap allows to the address on top of the stack, which
+/// stays there.
+fn call_top(value: u8) -> Vec<u8> {
+    vec![
+        PUSH0, PUSH0, PUSH0, PUSH0, PUSH1, value, DUP6, PUSH4, 0xff, 0xff, 0xff, 0xff, CALL, POP,
+    ]
+}
+
+/// The transaction [`PARENT`] runs for a destruction of `source` holding `held` that pays
+/// `payee`, done once or twice: the second time after the transaction funded the source with 3.
+/// Returns each destruction.
+fn destructions(
+    spec: SpecId,
+    source: Source,
+    held: u8,
+    payee: Payee,
+    twice: bool,
+) -> Vec<Destruct> {
+    let pays = match payee {
+        Payee::Untouched | Payee::Funded => Some(PAYEE),
+        Payee::New => Some(BENEFICIARY),
+        Payee::Itself => None,
+    };
+    let code = destructor(pays);
+    let call_source = |value: u8| match source {
+        Source::Created => call_top(value),
+        Source::Untouched | Source::Funded => call(CALL, DESTRUCTOR, u32::MAX, value),
+    };
+    let mut parent = Vec::new();
+    if source == Source::Created {
+        parent.extend(create_keeping(&deploying(&code), held));
+    }
+    if payee == Payee::Funded {
+        parent.extend(call(CALL, PAYEE, 0, 1));
+    }
+    if source == Source::Funded {
+        parent.extend(call_source(2));
+    }
+    parent.extend(call_source(0));
+    if twice {
+        parent.extend(call_source(3));
+        parent.extend(call_source(0));
+    }
+    parent.push(STOP);
+
+    let mut run = Run::new(spec, parent).with(PAYEE, Vec::new(), 4);
+    run.accounts[0].2 = 100;
+    if source != Source::Created {
+        run = run.with(DESTRUCTOR, code, u64::from(held));
+    }
+    let (outcome, hooks, _) = run.on_both_paths();
+    let case = format!("{spec:?} {source:?} {held} {payee:?} {twice}");
+    assert!(outcome.result.is_success(), "{case}: {:?}", outcome.result);
+    assert_eq!(
+        hooks.destructs.len(),
+        hooks.destructed.len(),
+        "{case}: every destruction reaches the hook"
+    );
+    let writes = hooks
+        .writes
+        .into_iter()
+        .filter_map(|(write, _)| match write {
+            Write::SelfDestruct(address, target, balance, result) => {
+                Some((address, target, balance, result))
+            }
+            _ => None,
+        });
+    writes
+        .zip(hooks.destructs.into_iter().zip(hooks.destructed))
+        .map(
+            |((address, target, balance, result), (before, after))| Destruct {
+                address,
+                target,
+                balance,
+                result,
+                before,
+                after,
+            },
+        )
+        .collect()
+}
+
+/// For every destruction, the facts the completed-write hook is handed and the journal at the
+/// hook are enough to rebuild both accounts as they were before the write, so a consumer can tell
+/// how the write moved each account's record: the source's balance before the write is what the
+/// hook sees, and rebuilding from it agrees with the journal before the write. Over a source equal
+/// to its beneficiary or not, created in the transaction or not (EIP-6780) and changed before or
+/// not; its balance zero or not; a beneficiary unchanged, changed or new; a first destruction and
+/// a second (destroyed before); on a spec before EIP-6780, one with it, and one with EIP-8246.
+#[test]
+fn test_a_destruction_hands_the_hook_what_rebuilds_both_accounts() {
+    let mut seen = 0;
+    for spec in [SpecId::SHANGHAI, SpecId::PRAGUE, SpecId::AMSTERDAM] {
+        for source in [Source::Untouched, Source::Funded, Source::Created] {
+            for held in [0, 5] {
+                for payee in [Payee::Untouched, Payee::Funded, Payee::New, Payee::Itself] {
+                    for twice in [false, true] {
+                        let case = format!("{spec:?} {source:?} {held} {payee:?} {twice}");
+                        let destructs = destructions(spec, source, held, payee, twice);
+                        assert_eq!(destructs.len(), 1 + twice as usize, "{case}");
+                        for (n, destruct) in destructs.iter().enumerate() {
+                            let rebuilt = destruct.rebuilt();
+                            let held_before = facts(&destruct.before[0]).map(|(info, _)| info.1);
+
+                            assert_eq!(
+                                Some(destruct.balance),
+                                held_before,
+                                "{case} #{n}: the hook sees the source's balance"
+                            );
+                            assert_eq!(
+                                facts(&rebuilt[0]),
+                                facts(&destruct.before[0]),
+                                "{case} #{n}"
+                            );
+                            if destruct.before[1].is_some() {
+                                assert_eq!(
+                                    facts(&rebuilt[1]),
+                                    facts(&destruct.before[1]),
+                                    "{case} #{n}"
+                                );
+                            } else {
+                                assert!(!changed(&rebuilt[1]), "{case} #{n}: loaded unchanged");
+                            }
+                            assert_eq!(
+                                destruct.records(&rebuilt),
+                                destruct.records(&destruct.before),
+                                "{case} #{n}"
+                            );
+                            seen += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(seen, 3 * 3 * 2 * 4 * 3);
+}
+
+/// Worked examples of how a destruction moves the source's and a beneficiary's records, from the
+/// rule that an account is a record while its nonce, balance or code differs from what the
+/// transaction loaded: each row is `(spec, source, held, payee, twice)` and the moves of each
+/// destruction. The first two rows leave the source the same after the write (loaded with 5, now
+/// 0) and report the same result, but one changed it and one did not: only the balance before the
+/// write tells them apart.
+#[test]
+fn test_a_destruction_moves_records_as_its_accounts_changed() {
+    type Row = (SpecId, Source, u8, Payee, bool, &'static [(i8, i8)]);
+    let rows: [Row; 11] = [
+        (
+            SpecId::PRAGUE,
+            Source::Untouched,
+            5,
+            Payee::New,
+            false,
+            &[(1, 1)],
+        ),
+        (
+            SpecId::PRAGUE,
+            Source::Funded,
+            5,
+            Payee::New,
+            false,
+            &[(0, 1)],
+        ),
+        (
+            SpecId::PRAGUE,
+            Source::Funded,
+            0,
+            Payee::New,
+            false,
+            &[(-1, 1)],
+        ),
+        (
+            SpecId::PRAGUE,
+            Source::Untouched,
+            0,
+            Payee::New,
+            false,
+            &[(0, 0)],
+        ),
+        (
+            SpecId::PRAGUE,
+            Source::Untouched,
+            5,
+            Payee::Funded,
+            false,
+            &[(1, 0)],
+        ),
+        (
+            SpecId::PRAGUE,
+            Source::Untouched,
+            5,
+            Payee::Untouched,
+            false,
+            &[(1, 1)],
+        ),
+        (
+            SpecId::PRAGUE,
+            Source::Untouched,
+            5,
+            Payee::Itself,
+            false,
+            &[(0, 0)],
+        ),
+        (
+            SpecId::SHANGHAI,
+            Source::Untouched,
+            5,
+            Payee::Itself,
+            false,
+            &[(1, 0)],
+        ),
+        (
+            SpecId::AMSTERDAM,
+            Source::Created,
+            5,
+            Payee::Itself,
+            false,
+            &[(0, 0)],
+        ),
+        (
+            SpecId::PRAGUE,
+            Source::Created,
+            5,
+            Payee::New,
+            false,
+            &[(0, 1)],
+        ),
+        (
+            SpecId::PRAGUE,
+            Source::Created,
+            5,
+            Payee::New,
+            true,
+            &[(0, 1), (0, 0)],
+        ),
+    ];
+    let mut afters = Vec::new();
+    for (spec, source, held, payee, twice, moves) in rows {
+        let case = format!("{spec:?} {source:?} {held} {payee:?} {twice}");
+        let destructs = destructions(spec, source, held, payee, twice);
+        let seen: Vec<(i8, i8)> = destructs
+            .iter()
+            .map(|destruct| destruct.records(&destruct.rebuilt()))
+            .collect();
+
+        assert_eq!(seen, moves, "{case}");
+        afters.push((facts(&destructs[0].after[0]), destructs[0].result.clone()));
+    }
+    assert_eq!(afters[0], afters[1], "the same after the write");
+    let second = destructions(SpecId::PRAGUE, Source::Created, 5, Payee::New, true);
+    assert!(second[1].result.previously_destroyed);
 }
 
 /// `code` with its last instruction, which drops a result, replaced by `STOP`.

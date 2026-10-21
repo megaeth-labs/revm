@@ -364,6 +364,13 @@ pub fn selfdestruct<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Resu
     let cold_load_gas = context.host.gas_params().selfdestruct_cold_cost();
 
     let skip_cold_load = context.interpreter.gas.remaining() < cold_load_gas;
+    // The account's balance before the write, for the completed-write hook. The account is the
+    // running frame's, which the journal holds, so reading it loads nothing cold.
+    let balance = context
+        .host
+        .load_account_info_skip_cold_load(context.interpreter.input.target_address(), false, false)?
+        .account
+        .balance;
     let res = context.host.selfdestruct(
         context.interpreter.input.target_address(),
         target,
@@ -408,6 +415,7 @@ pub fn selfdestruct<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Resu
     let write = CompletedWrite::SelfDestruct {
         address: context.interpreter.input.target_address(),
         target,
+        balance,
         result: &res.data,
     };
     write_completed(context.interpreter, context.host, write)?;

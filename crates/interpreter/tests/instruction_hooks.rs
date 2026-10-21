@@ -47,7 +47,7 @@ const STOP_OUTPUT: &[u8] = b"stop";
 enum Write {
     Sstore(Address, StorageKey, SStoreResult),
     Log(Address, u8, u64),
-    SelfDestruct(Address, Address, SelfDestructResult),
+    SelfDestruct(Address, Address, U256, SelfDestructResult),
 }
 
 impl Write {
@@ -66,8 +66,9 @@ impl Write {
             CompletedWrite::SelfDestruct {
                 address,
                 target,
+                balance,
                 result,
-            } => Self::SelfDestruct(address, target, result.clone()),
+            } => Self::SelfDestruct(address, target, balance, result.clone()),
         }
     }
 }
@@ -81,7 +82,7 @@ struct HookHost {
     cold: bool,
     /// Every account is empty.
     empty: bool,
-    /// Every account's balance.
+    /// Every account's balance; `SELFDESTRUCT` moves it out.
     balance: U256,
     /// Every account's nonce.
     nonce: u64,
@@ -280,6 +281,8 @@ impl Host for HookHost {
         skip_cold_load: bool,
     ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
         self.refuses_cold(skip_cold_load)?;
+        // The write moves the balance out.
+        self.balance = U256::ZERO;
         Ok(StateLoad::new(self.destruct.clone(), self.cold))
     }
 
@@ -520,8 +523,13 @@ fn write_cases() -> Vec<WriteCase> {
         (
             "SELFDESTRUCT",
             selfdestruct_code(),
-            |spec| HookHost::new(spec).cold().destructs_into_a_new_account(),
-            Write::SelfDestruct(CONTRACT, TARGET, destruct),
+            |spec| {
+                HookHost::new(spec)
+                    .cold()
+                    .destructs_into_a_new_account()
+                    .with_balance(5)
+            },
+            Write::SelfDestruct(CONTRACT, TARGET, U256::from(5), destruct),
             InstructionResult::OutOfGas,
         ),
     ]

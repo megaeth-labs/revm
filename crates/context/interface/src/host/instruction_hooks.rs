@@ -38,11 +38,21 @@ pub enum CompletedWrite<'a> {
         data_len: u64,
     },
     /// `SELFDESTRUCT` destructed `address` in favour of `target`.
+    ///
+    /// The write changes no account's nonce or code, only balances: `address`'s info before it is
+    /// its info after it with [`balance`](CompletedWrite::SelfDestruct::balance) as its balance,
+    /// and `target`'s, when it is another account, its info after it less that balance. With the
+    /// journal at the hook, that gives both accounts' change across the write.
     SelfDestruct {
         /// The account destructed.
         address: Address,
         /// The beneficiary.
         target: Address,
+        /// The balance `address` held before the write. When `target` is another account, the
+        /// write moved all of it to `target`. When `target` is `address`, the write burned it or
+        /// left it, as the spec and EIP-6780 decide, and the account's balance after the write
+        /// tells which.
+        balance: U256,
         /// What the journal reported.
         result: &'a SelfDestructResult,
     },
