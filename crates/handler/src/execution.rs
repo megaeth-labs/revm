@@ -6,7 +6,7 @@ use context_interface::{
 };
 use interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
-    GasTracker, StartCharge,
+    GasTracker,
 };
 use primitives::{Address, TxKind};
 use state::Bytecode;
@@ -132,8 +132,11 @@ pub fn create_init_frame<CTX: ContextTr>(
                 return_memory_offset: 0..0,
                 reservoir: gas.reservoir(),
                 charged_new_account_state_gas,
-                charged_start: StartCharge::default(),
-                bytes_share: u64::MAX,
+                // The transaction's frame gets the whole pool, and the start charge a consumer
+                // declared on the transaction's gas; it gets no allowance, which is a value
+                // call's below the transaction.
+                charged_start: gas.take_start_charge(),
+                bytes_share: forward_whole_pool(gas),
                 history_allowance: 0,
             }))))
         }
@@ -179,9 +182,22 @@ pub fn create_init_frame<CTX: ContextTr>(
             );
             inputs.set_charged_create_state_gas(charged_create_state_gas);
             inputs.set_charged_state_gas_address(charged_state_gas_address);
+            inputs.set_charged_start(gas.take_start_charge());
+            inputs.set_bytes_share(forward_whole_pool(gas));
             Ok(Some(FrameInput::Create(Box::new(inputs))))
         }
     }
+}
+
+/// Takes the whole byte pool out of the transaction-level `gas` for the transaction's frame and
+/// returns it: the frame's pool. The schedule's share applies to the frames below it; the
+/// transaction's frame is the pool's first holder. `last_frame_result` adds back what the frame
+/// leaves, as a caller does.
+#[inline]
+const fn forward_whole_pool(gas: &mut GasTracker) -> u64 {
+    let pool = gas.bytes_remaining();
+    gas.forward_bytes(pool);
+    pool
 }
 
 /// Unwinds the EIP-2780 runtime gas phase after first-frame creation ran out
