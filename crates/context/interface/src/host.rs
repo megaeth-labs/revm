@@ -128,15 +128,17 @@ pub trait Host {
     /// The hook may debit and credit `gas`, and the instruction uses it as the hook left it,
     /// charging nothing after the hook: the frame's input copies its reservoir from `gas`. A
     /// charge the hook makes that fails records as any failed charge does
-    /// ([`GasTracker::failed_charge_remaining`]), whatever the answer. `true` goes on to start the
-    /// frame, which the handler may still refuse or answer without running it. `false` fails the
-    /// instruction out of gas and starts no frame: the forward stays taken unless the hook gave it
-    /// back, and the halt records the regular gas the hook left unless a failed charge already
-    /// did.
+    /// ([`GasTracker::failed_charge_remaining`]), whatever the answer. The part of its charge
+    /// that the frame's failure gives back, the hook declares on `start`
+    /// ([`FrameStart::charge`]). `true` goes on to start the frame, which the handler may still
+    /// refuse or answer without running it, and the frame's input carries the declared charge.
+    /// `false` fails the instruction out of gas and starts no frame: the forward stays taken
+    /// unless the hook gave it back, the declared charge goes with the start, and the halt
+    /// records the regular gas the hook left unless a failed charge already did.
     ///
     /// The default returns `true` and touches nothing.
     #[inline]
-    fn frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool {
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
         let _ = (start, gas);
         true
     }

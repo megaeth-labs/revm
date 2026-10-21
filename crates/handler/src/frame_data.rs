@@ -177,8 +177,9 @@ impl FrameResult {
     /// The start charge to refund, or `None` when there is nothing to refund: the frame
     /// succeeded, or its start charged nothing.
     ///
-    /// The frame-start hook declared the charge on the caller's gas before the frame ran, and it
-    /// rides on the outcome's `charged_start`. The decision is the one
+    /// The frame-start hook charged the caller's gas before the frame ran and declared the charge
+    /// on the start (a consumer declares the transaction frame's on its input), and it rides on
+    /// the outcome's `charged_start`. The decision is the one
     /// [`Self::refundable_state_gas_charge`] makes: a call refunds when it did not succeed, a
     /// creation also when no contract address was deployed. The charge is refunded whole, with
     /// `refill_history` and `refill_bytes`.

@@ -548,9 +548,9 @@ pub trait Handler {
             }
         }
 
-        // Refund the start charge a consumer declared on the transaction's gas for its frame,
-        // whole, on the same condition and with the same halt rule, exactly like
-        // `EthFrame::return_result` refunds the start charges of inner frames.
+        // Refund the start charge a consumer put on the first frame's input for what it charged
+        // the transaction's gas, whole, on the same condition and with the same halt rule,
+        // exactly like `EthFrame::return_result` refunds the start charges of inner frames.
         if let Some(charge) = frame_result.refundable_start_charge() {
             parent_gas.refill_history(charge.history);
             parent_gas.refill_bytes(charge.bytes);

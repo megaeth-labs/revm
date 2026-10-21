@@ -3,23 +3,36 @@
 //! `transact` runs the frames in the handler's loop and `inspect_tx` in the inspector's; both
 //! build frames with `make_call_frame` and `make_create_frame` and settle them with
 //! `return_result`, so a child's share, its start charge and its allowance travel the same way
-//! and settle to the same figures. Each test runs a transaction both ways on the mainnet context
-//! with instructions of the test's own, which stand in for a consumer's hooks, and checks that the
-//! two paths end the same way; an inspector records each frame's input as it starts and its
-//! outcome as it ends, before its caller settles it, and the figures are checked on the inspected
-//! path (the handler's tests check them on the plain one).
+//! and settle to the same figures. Each test runs a transaction both ways on the mainnet context,
+//! with a start hook of the test's own ([`DeclaringContext`]) and instructions of the test's own,
+//! which stand in for a consumer's hooks, and checks that the two paths end the same way; an
+//! inspector records each frame's input as it starts and its outcome as it ends, before its caller
+//! settles it, and the figures are checked on the inspected path (the handler's tests check them
+//! on the plain one).
 
-use context::{result::ResultAndState, Context, Evm, TxEnv};
+use context::{
+    context_interface::{
+        cfg::{GasId, GasParams, StateGasSite},
+        host::{FrameStart, LoadError},
+        journaled_state::AccountInfoLoad,
+    },
+    result::ResultAndState,
+    BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, Evm, Host, Journal,
+    LocalContext, TxEnv,
+};
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use handler::{
     instructions::EthInstructions, EthFrame, EthPrecompiles, ExecuteEvm, MainContext,
     MainnetContext,
 };
 use interpreter::{
-    interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Instruction,
-    InstructionContext, InstructionExecResult, InstructionResult, StartCharge,
+    interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, GasTracker,
+    Instruction, InstructionContext, InstructionExecResult, InstructionResult, SStoreResult,
+    SelfDestructResult, StartCharge, StateLoad,
 };
-use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
+use primitives::{
+    address, hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, TxKind, B256, U256,
+};
 use revm_inspector::{InspectEvm, Inspector};
 use state::{
     bytecode::opcode::{
@@ -29,14 +42,15 @@ use state::{
 };
 
 type Db = CacheDB<EmptyDB>;
-type Ctx = MainnetContext<Db>;
+type DbError = <Db as context::Database>::Error;
+type Ctx = DeclaringContext;
 type PoolEvm = Evm<Ctx, Figures, EthInstructions<EthInterpreter, Ctx>, EthPrecompiles, EthFrame>;
 
 const SPEC: SpecId = SpecId::OSAKA;
 const GAS_LIMIT: u64 = 3_000_000;
 /// What `DRAW` draws.
 const DRAW_BYTES: u64 = 100;
-/// What `DECLARE` charges and declares.
+/// What the start hook charges and declares after `DECLARE`.
 const DECLARED: StartCharge = StartCharge::new(3_520, 160);
 /// What `LOG` charges as history.
 const HISTORY_COST: u64 = 100;
@@ -82,12 +96,9 @@ const fn drain(context: InstructionContext<'_, Ctx, EthInterpreter>) -> Instruct
     }
 }
 
-/// What a consumer's start hook does for the start that follows.
+/// Has the start hook charge and declare [`DECLARED`] at the start that follows.
 const fn declare(context: InstructionContext<'_, Ctx, EthInterpreter>) -> InstructionExecResult {
-    let gas = &mut context.interpreter.gas;
-    assert!(gas.record_history_cost(DECLARED.history));
-    assert!(gas.record_bytes(DECLARED.bytes));
-    gas.set_start_charge(DECLARED);
+    context.host.declare_next = true;
     Ok(())
 }
 
@@ -99,6 +110,200 @@ const fn log(context: InstructionContext<'_, Ctx, EthInterpreter>) -> Instructio
         Ok(())
     } else {
         Err(InstructionResult::OutOfGas)
+    }
+}
+
+/// The mainnet [`Context`] with a start hook that does what a consumer's does for a start
+/// `DECLARE` marked: charges [`DECLARED`] on the caller's gas and declares it on the start.
+struct DeclaringContext {
+    inner: MainnetContext<Db>,
+    /// Set by `DECLARE`, taken by the next start.
+    declare_next: bool,
+}
+
+impl ContextTr for DeclaringContext {
+    type Block = BlockEnv;
+    type Tx = TxEnv;
+    type Cfg = CfgEnv;
+    type Db = Db;
+    type Journal = Journal<Db>;
+    type Chain = ();
+    type Local = LocalContext;
+
+    fn all(
+        &self,
+    ) -> (
+        &Self::Block,
+        &Self::Tx,
+        &Self::Cfg,
+        &Self::Db,
+        &Self::Journal,
+        &Self::Chain,
+        &Self::Local,
+    ) {
+        self.inner.all()
+    }
+
+    fn all_mut(
+        &mut self,
+    ) -> (
+        &Self::Block,
+        &Self::Tx,
+        &Self::Cfg,
+        &mut Self::Journal,
+        &mut Self::Chain,
+        &mut Self::Local,
+    ) {
+        self.inner.all_mut()
+    }
+
+    fn error(&mut self) -> &mut Result<(), ContextError<DbError>> {
+        self.inner.error()
+    }
+}
+
+impl ContextSetters for DeclaringContext {
+    fn set_tx(&mut self, tx: Self::Tx) {
+        self.inner.set_tx(tx);
+    }
+
+    fn set_block(&mut self, block: Self::Block) {
+        self.inner.set_block(block);
+    }
+}
+
+impl Host for DeclaringContext {
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
+        if core::mem::take(&mut self.declare_next) {
+            assert!(gas.record_history_cost(DECLARED.history));
+            assert!(gas.record_bytes(DECLARED.bytes));
+            start.charge = DECLARED;
+        }
+        true
+    }
+
+    fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
+        self.inner.state_gas_price(id, site)
+    }
+
+    fn basefee(&self) -> U256 {
+        self.inner.basefee()
+    }
+
+    fn blob_gasprice(&self) -> U256 {
+        self.inner.blob_gasprice()
+    }
+
+    fn gas_limit(&self) -> U256 {
+        self.inner.gas_limit()
+    }
+
+    fn difficulty(&self) -> U256 {
+        self.inner.difficulty()
+    }
+
+    fn prevrandao(&self) -> Option<U256> {
+        self.inner.prevrandao()
+    }
+
+    fn block_number(&self) -> U256 {
+        self.inner.block_number()
+    }
+
+    fn timestamp(&self) -> U256 {
+        self.inner.timestamp()
+    }
+
+    fn beneficiary(&self) -> Address {
+        self.inner.beneficiary()
+    }
+
+    fn slot_num(&self) -> U256 {
+        self.inner.slot_num()
+    }
+
+    fn chain_id(&self) -> U256 {
+        self.inner.chain_id()
+    }
+
+    fn effective_gas_price(&self) -> U256 {
+        self.inner.effective_gas_price()
+    }
+
+    fn caller(&self) -> Address {
+        self.inner.caller()
+    }
+
+    fn blob_hash(&self, number: usize) -> Option<U256> {
+        self.inner.blob_hash(number)
+    }
+
+    fn max_initcode_size(&self) -> usize {
+        self.inner.max_initcode_size()
+    }
+
+    fn gas_params(&self) -> &GasParams {
+        self.inner.gas_params()
+    }
+
+    fn is_amsterdam_eip8037_enabled(&self) -> bool {
+        self.inner.is_amsterdam_eip8037_enabled()
+    }
+
+    fn block_hash(&mut self, number: u64) -> Option<B256> {
+        self.inner.block_hash(number)
+    }
+
+    fn selfdestruct(
+        &mut self,
+        address: Address,
+        target: Address,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
+        self.inner.selfdestruct(address, target, skip_cold_load)
+    }
+
+    fn log(&mut self, log: Log) {
+        self.inner.log(log)
+    }
+
+    fn sstore_skip_cold_load(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+        value: StorageValue,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SStoreResult>, LoadError> {
+        self.inner
+            .sstore_skip_cold_load(address, key, value, skip_cold_load)
+    }
+
+    fn sload_skip_cold_load(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<StorageValue>, LoadError> {
+        self.inner
+            .sload_skip_cold_load(address, key, skip_cold_load)
+    }
+
+    fn tstore(&mut self, address: Address, key: StorageKey, value: StorageValue) {
+        self.inner.tstore(address, key, value)
+    }
+
+    fn tload(&mut self, address: Address, key: StorageKey) -> StorageValue {
+        self.inner.tload(address, key)
+    }
+
+    fn load_account_info_skip_cold_load(
+        &mut self,
+        address: Address,
+        load_code: bool,
+        skip_cold_load: bool,
+    ) -> Result<AccountInfoLoad<'_>, LoadError> {
+        self.inner
+            .load_account_info_skip_cold_load(address, load_code, skip_cold_load)
     }
 }
 
@@ -268,13 +473,15 @@ impl Run {
             db.insert_account_info(address, info);
         }
         let allowance = self.allowance;
-        let ctx: Ctx = Context::mainnet().with_db(db).modify_cfg_chained(|cfg| {
+        let inner = Context::mainnet().with_db(db).modify_cfg_chained(|cfg| {
             cfg.set_spec_and_mainnet_gas_params(SPEC);
-            cfg.gas_params.override_gas([(
-                context::context_interface::cfg::GasId::call_history_allowance(),
-                allowance,
-            )]);
+            cfg.gas_params
+                .override_gas([(GasId::call_history_allowance(), allowance)]);
         });
+        let ctx = DeclaringContext {
+            inner,
+            declare_next: false,
+        };
         let mut instructions = EthInstructions::new_mainnet_with_spec(SPEC);
         instructions.insert_instruction(DRAW, Instruction::new(draw), 0);
         instructions.insert_instruction(DRAIN, Instruction::new(drain), 0);

@@ -1,9 +1,9 @@
-//! The byte pool, the history allowance and the start charge, on [`Gas`].
+//! The byte pool and the history allowance, on [`Gas`].
 //!
 //! Each method forwards to the [`GasTracker`](super::GasTracker) method of the same name, which
 //! documents it.
 
-use super::{BytesCrossing, Gas, StartCharge};
+use super::{BytesCrossing, Gas};
 
 impl Gas {
     /// The byte pool: what this frame may still draw. Unlimited unless a consumer set a pool.
@@ -104,29 +104,5 @@ impl Gas {
     #[must_use = "the part of the cost the allowance did not cover is still to be charged"]
     pub const fn draw_history_allowance(&mut self, cost: u64) -> u64 {
         self.tracker.draw_history_allowance(cost)
-    }
-
-    /// The start charge the frame-start hook declared and the instruction has not taken yet.
-    ///
-    /// See [`GasTracker::start_charge`](super::GasTracker::start_charge).
-    #[inline]
-    pub const fn start_charge(&self) -> StartCharge {
-        self.tracker.start_charge()
-    }
-
-    /// Declares the start charge of the frame about to start.
-    ///
-    /// See [`GasTracker::set_start_charge`](super::GasTracker::set_start_charge).
-    #[inline]
-    pub const fn set_start_charge(&mut self, charge: StartCharge) {
-        self.tracker.set_start_charge(charge);
-    }
-
-    /// Takes the declared start charge off the tracker, leaving none.
-    ///
-    /// See [`GasTracker::take_start_charge`](super::GasTracker::take_start_charge).
-    #[inline]
-    pub const fn take_start_charge(&mut self) -> StartCharge {
-        self.tracker.take_start_charge()
     }
 }

@@ -44,20 +44,17 @@ fn revert<IT: ITy>(interpreter: &mut Interpreter<IT>, output: Bytes) -> Result {
 }
 
 /// Hands `start`, whose forward the running instruction has taken from `gas`, to
-/// [`Host::frame_starting`], and takes the start charge the hook declared off `gas`, whatever
-/// the answer, so the carrier is empty once the hook has answered. `true` returns the charge for
+/// [`Host::frame_starting`]. `true` returns the start charge the hook declared on `start`, for
 /// the frame's input; `false` fails the instruction out of gas, and the charge goes with the
 /// start it was declared for.
 #[inline]
 pub(crate) fn frame_starting<H: Host + ?Sized>(
     gas: &mut Gas,
     host: &mut H,
-    start: &FrameStart,
+    mut start: FrameStart,
 ) -> core::result::Result<StartCharge, InstructionResult> {
-    let admitted = host.frame_starting(start, gas.tracker_mut());
-    let charged = gas.take_start_charge();
-    if admitted {
-        Ok(charged)
+    if host.frame_starting(&mut start, gas.tracker_mut()) {
+        Ok(start.charge)
     } else {
         cold_path();
         Err(InstructionResult::OutOfGas)

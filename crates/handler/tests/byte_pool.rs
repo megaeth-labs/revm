@@ -6,28 +6,35 @@
 //! what it left: its remaining pool when it succeeded, the whole share when it reverted or halted.
 //! A start charge a hook declared rides on the frame's input and is refunded whole when the frame
 //! fails. The handler here is the mainnet one, observed through overrides that leave its behaviour
-//! alone, and the frames draw the pool through instructions of the test's own, which stand in for
-//! a consumer's hooks: `DRAW` draws bytes, `DECLARE` charges and declares a start charge before
-//! the next start, and `LOG` charges history after drawing the frame's allowance, as a consumer's
-//! write hook would.
+//! alone, on the mainnet context with a start hook of the test's own ([`DeclaringContext`]), and
+//! the frames draw the pool through instructions of the test's own, which stand in for a
+//! consumer's hooks: `DRAW` draws bytes, `DECLARE` has the start hook charge and declare a start
+//! charge at the next start, and `LOG` charges history after drawing the frame's allowance, as a
+//! consumer's write hook would.
 
 use bytecode::opcode::{
     CALL, CREATE, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH3, REVERT, STOP,
 };
 use context::{
     result::{EVMError, ExecutionResult},
-    Context, ContextSetters, Evm, TxEnv,
+    BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, Evm, Journal, LocalContext,
+    TxEnv,
 };
 use context_interface::{
-    cfg::{gas::InitialAndFloorGas, GasId},
-    Database,
+    cfg::{gas::InitialAndFloorGas, GasId, GasParams, StateGasSite},
+    host::{FrameStart, LoadError},
+    journaled_state::AccountInfoLoad,
+    Database, Host,
 };
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use interpreter::{
     interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, GasTracker,
-    Instruction, InstructionContext, InstructionExecResult, InstructionResult, StartCharge,
+    Instruction, InstructionContext, InstructionExecResult, InstructionResult, SStoreResult,
+    SelfDestructResult, StartCharge, StateLoad,
 };
-use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
+use primitives::{
+    address, hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, TxKind, B256, U256,
+};
 use revm_handler::{
     instructions::EthInstructions, EthFrame, EthPrecompiles, EvmTr, FrameResult, Handler,
     ItemOrResult, MainContext, MainnetContext, MainnetEvm, MainnetHandler,
@@ -36,7 +43,7 @@ use state::{AccountInfo, Bytecode};
 
 type Db = CacheDB<EmptyDB>;
 type DbError = <Db as Database>::Error;
-type TestContext = MainnetContext<Db>;
+type TestContext = DeclaringContext;
 type TestEvm = MainnetEvm<TestContext>;
 type TestError = EVMError<DbError>;
 type Mainnet = MainnetHandler<TestEvm, TestError, EthFrame<EthInterpreter>>;
@@ -47,7 +54,7 @@ const GAS_LIMIT: u64 = 3_000_000;
 const POOL: u64 = 1_000;
 /// What `DRAW` draws.
 const DRAW_BYTES: u64 = 100;
-/// What `DECLARE` charges and declares.
+/// What the start hook charges and declares after `DECLARE`.
 const DECLARED: StartCharge = StartCharge::new(3_520, 160);
 /// What `LOG` charges as history.
 const HISTORY_COST: u64 = 100;
@@ -87,15 +94,11 @@ const fn draw(
     }
 }
 
-/// What a consumer's start hook does for the start that follows: charges [`DECLARED`] on the
-/// frame's gas and declares it.
+/// Has the start hook charge and declare [`DECLARED`] at the start that follows.
 const fn declare(
     context: InstructionContext<'_, TestContext, EthInterpreter>,
 ) -> InstructionExecResult {
-    let gas = &mut context.interpreter.gas;
-    assert!(gas.record_history_cost(DECLARED.history));
-    assert!(gas.record_bytes(DECLARED.bytes));
-    gas.set_start_charge(DECLARED);
+    context.host.declare_next = true;
     Ok(())
 }
 
@@ -154,6 +157,200 @@ impl Returned {
     }
 }
 
+/// The mainnet [`Context`] with a start hook that does what a consumer's does for a start
+/// `DECLARE` marked: charges [`DECLARED`] on the caller's gas and declares it on the start.
+struct DeclaringContext {
+    inner: MainnetContext<Db>,
+    /// Set by `DECLARE`, taken by the next start.
+    declare_next: bool,
+}
+
+impl ContextTr for DeclaringContext {
+    type Block = BlockEnv;
+    type Tx = TxEnv;
+    type Cfg = CfgEnv;
+    type Db = Db;
+    type Journal = Journal<Db>;
+    type Chain = ();
+    type Local = LocalContext;
+
+    fn all(
+        &self,
+    ) -> (
+        &Self::Block,
+        &Self::Tx,
+        &Self::Cfg,
+        &Self::Db,
+        &Self::Journal,
+        &Self::Chain,
+        &Self::Local,
+    ) {
+        self.inner.all()
+    }
+
+    fn all_mut(
+        &mut self,
+    ) -> (
+        &Self::Block,
+        &Self::Tx,
+        &Self::Cfg,
+        &mut Self::Journal,
+        &mut Self::Chain,
+        &mut Self::Local,
+    ) {
+        self.inner.all_mut()
+    }
+
+    fn error(&mut self) -> &mut Result<(), ContextError<DbError>> {
+        self.inner.error()
+    }
+}
+
+impl ContextSetters for DeclaringContext {
+    fn set_tx(&mut self, tx: Self::Tx) {
+        self.inner.set_tx(tx);
+    }
+
+    fn set_block(&mut self, block: Self::Block) {
+        self.inner.set_block(block);
+    }
+}
+
+impl Host for DeclaringContext {
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
+        if core::mem::take(&mut self.declare_next) {
+            assert!(gas.record_history_cost(DECLARED.history));
+            assert!(gas.record_bytes(DECLARED.bytes));
+            start.charge = DECLARED;
+        }
+        true
+    }
+
+    fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
+        self.inner.state_gas_price(id, site)
+    }
+
+    fn basefee(&self) -> U256 {
+        self.inner.basefee()
+    }
+
+    fn blob_gasprice(&self) -> U256 {
+        self.inner.blob_gasprice()
+    }
+
+    fn gas_limit(&self) -> U256 {
+        self.inner.gas_limit()
+    }
+
+    fn difficulty(&self) -> U256 {
+        self.inner.difficulty()
+    }
+
+    fn prevrandao(&self) -> Option<U256> {
+        self.inner.prevrandao()
+    }
+
+    fn block_number(&self) -> U256 {
+        self.inner.block_number()
+    }
+
+    fn timestamp(&self) -> U256 {
+        self.inner.timestamp()
+    }
+
+    fn beneficiary(&self) -> Address {
+        self.inner.beneficiary()
+    }
+
+    fn slot_num(&self) -> U256 {
+        self.inner.slot_num()
+    }
+
+    fn chain_id(&self) -> U256 {
+        self.inner.chain_id()
+    }
+
+    fn effective_gas_price(&self) -> U256 {
+        self.inner.effective_gas_price()
+    }
+
+    fn caller(&self) -> Address {
+        self.inner.caller()
+    }
+
+    fn blob_hash(&self, number: usize) -> Option<U256> {
+        self.inner.blob_hash(number)
+    }
+
+    fn max_initcode_size(&self) -> usize {
+        self.inner.max_initcode_size()
+    }
+
+    fn gas_params(&self) -> &GasParams {
+        self.inner.gas_params()
+    }
+
+    fn is_amsterdam_eip8037_enabled(&self) -> bool {
+        self.inner.is_amsterdam_eip8037_enabled()
+    }
+
+    fn block_hash(&mut self, number: u64) -> Option<B256> {
+        self.inner.block_hash(number)
+    }
+
+    fn selfdestruct(
+        &mut self,
+        address: Address,
+        target: Address,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
+        self.inner.selfdestruct(address, target, skip_cold_load)
+    }
+
+    fn log(&mut self, log: Log) {
+        self.inner.log(log)
+    }
+
+    fn sstore_skip_cold_load(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+        value: StorageValue,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SStoreResult>, LoadError> {
+        self.inner
+            .sstore_skip_cold_load(address, key, value, skip_cold_load)
+    }
+
+    fn sload_skip_cold_load(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<StorageValue>, LoadError> {
+        self.inner
+            .sload_skip_cold_load(address, key, skip_cold_load)
+    }
+
+    fn tstore(&mut self, address: Address, key: StorageKey, value: StorageValue) {
+        self.inner.tstore(address, key, value)
+    }
+
+    fn tload(&mut self, address: Address, key: StorageKey) -> StorageValue {
+        self.inner.tload(address, key)
+    }
+
+    fn load_account_info_skip_cold_load(
+        &mut self,
+        address: Address,
+        load_code: bool,
+        skip_cold_load: bool,
+    ) -> Result<AccountInfoLoad<'_>, LoadError> {
+        self.inner
+            .load_account_info_skip_cold_load(address, load_code, skip_cold_load)
+    }
+}
+
 /// The figures of a frame's input as it started: its share, its start charge and its allowance.
 type Started = (u64, StartCharge, u64);
 
@@ -173,13 +370,14 @@ fn started(input: &FrameInput) -> Started {
 /// history gas.
 type Settled = (u64, i64, i64);
 
-/// The mainnet handler with the consumer's part: a pool and a start charge set on the
-/// transaction's gas, and a record of every frame's start and return.
+/// The mainnet handler with the consumer's part: a pool set on the transaction's gas and a start
+/// charge for the transaction's frame, and a record of every frame's start and return.
 struct PoolHandler {
     mainnet: Mainnet,
     /// The pool the transaction's gas gets, if any.
     pool: Option<u64>,
-    /// Whether the transaction's gas is charged [`DECLARED`] for its frame and declares it.
+    /// Whether the transaction's gas is charged [`DECLARED`] for its frame, declared on the
+    /// frame's input.
     declare: bool,
     starts: Vec<Started>,
     returned: Vec<Returned>,
@@ -214,9 +412,25 @@ impl Handler for PoolHandler {
         if self.declare {
             assert!(gas.record_history_cost(DECLARED.history));
             assert!(gas.record_bytes(DECLARED.bytes));
-            gas.set_start_charge(DECLARED);
         }
         gas
+    }
+
+    /// The mainnet input, with the start charge `tx_gas` charged declared on it, if told to.
+    fn first_frame_input(
+        &mut self,
+        evm: &mut TestEvm,
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameInit>, TestError> {
+        let mut init = self.mainnet.first_frame_input(evm, gas)?;
+        if let (true, Some(init)) = (self.declare, &mut init) {
+            match &mut init.frame_input {
+                FrameInput::Call(inputs) => inputs.charged_start = DECLARED,
+                FrameInput::Create(inputs) => inputs.set_charged_start(DECLARED),
+                FrameInput::Empty => unreachable!(),
+            }
+        }
+        Ok(init)
     }
 
     /// The default loop, recording each frame's input as it starts and its result as it
@@ -382,13 +596,17 @@ impl Run {
 
     fn evm(&self) -> TestEvm {
         let allowance = self.allowance;
-        let ctx: TestContext = Context::mainnet()
+        let inner = Context::mainnet()
             .with_db(self.db())
             .modify_cfg_chained(|cfg| {
                 cfg.set_spec_and_mainnet_gas_params(SPEC);
                 cfg.gas_params
                     .override_gas([(GasId::call_history_allowance(), allowance)]);
             });
+        let ctx = DeclaringContext {
+            inner,
+            declare_next: false,
+        };
         let mut instructions = EthInstructions::new_mainnet_with_spec(SPEC);
         instructions.insert_instruction(DRAW, Instruction::new(draw), 0);
         instructions.insert_instruction(DECLARE, Instruction::new(declare), 0);
@@ -499,7 +717,7 @@ fn test_a_failed_draw_halts_the_frame_with_a_record_the_caller_can_read() {
     assert_eq!(handler.settled, Some((50, 100, 0)));
 }
 
-/// A start charge declared before a start rides on the frame's input, and is refunded to the
+/// A start charge the start hook declared rides on the frame's input, and is refunded to the
 /// caller whole when the frame fails: a revert, a halt, a start the handler refused before any
 /// frame ran (a transfer the caller cannot pay), one it answered without a frame (a precompile
 /// out of gas), a creation that reverted and one whose caller's nonce overflowed. A frame that
@@ -564,8 +782,8 @@ fn test_the_start_charge_is_refunded_when_the_frame_fails() {
 }
 
 /// The transaction's frame gets the pool as the consumer left it after the body's charges, and
-/// the start charge the consumer declared, which is refunded whole when the frame reverts or
-/// halts and kept when it succeeds.
+/// the start charge the consumer declared on its input, which is refunded whole when the frame
+/// reverts or halts and kept when it succeeds.
 #[test]
 fn test_the_first_frame_gets_the_pool_and_its_start_charge() {
     for (name, parent, fails) in [

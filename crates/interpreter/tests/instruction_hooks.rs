@@ -192,7 +192,7 @@ impl Host for HookHost {
         self.verdict.clone()
     }
 
-    fn frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool {
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
         self.starts.push((*start, *gas));
         if self.charge > 0 {
             let _ = gas.record_history_cost(self.charge);

@@ -182,7 +182,7 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
         FrameStartKind::Create
     };
     let start = FrameStart::new(kind, create_inputs.caller(), None, value, gas_limit);
-    let charged_start = frame_starting(&mut context.interpreter.gas, context.host, &start)?;
+    let charged_start = frame_starting(&mut context.interpreter.gas, context.host, start)?;
     let bytes_share = forward_bytes(&mut context.interpreter.gas, context.host);
 
     create_inputs.set_gas_limit(gas_limit);
@@ -273,7 +273,7 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
     };
     let transferred = value.transfer().unwrap_or_default();
     let start = FrameStart::new(kind, caller, Some(target_address), transferred, forward);
-    let charged_start = frame_starting(&mut context.interpreter.gas, context.host, &start)?;
+    let charged_start = frame_starting(&mut context.interpreter.gas, context.host, start)?;
     let bytes_share = forward_bytes(&mut context.interpreter.gas, context.host);
 
     // Call host to interact with target contract

@@ -550,9 +550,9 @@ impl EthFrame<EthInterpreter> {
             },
             None => None,
         };
-        // The start charge the frame-start hook declared on this (parent) frame's tracker is
-        // refunded on the same condition, whole, by the same two refills a consumer's own
-        // take-back uses; it needs no price lookup, since the hook declared the amounts.
+        // The start charge the frame-start hook charged this (parent) frame and declared on the
+        // start is refunded on the same condition, whole, by the same two refills a consumer's
+        // own take-back uses; it needs no price lookup, since the hook declared the amounts.
         let refund_start_charge = result.refundable_start_charge();
 
         // Insert result to the top frame.

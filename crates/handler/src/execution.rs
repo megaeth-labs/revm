@@ -6,7 +6,7 @@ use context_interface::{
 };
 use interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
-    GasTracker,
+    GasTracker, StartCharge,
 };
 use primitives::{Address, TxKind};
 use state::Bytecode;
@@ -132,10 +132,11 @@ pub fn create_init_frame<CTX: ContextTr>(
                 return_memory_offset: 0..0,
                 reservoir: gas.reservoir(),
                 charged_new_account_state_gas,
-                // The transaction's frame gets the whole pool, and the start charge a consumer
-                // declared on the transaction's gas; it gets no allowance, which is a value
-                // call's below the transaction.
-                charged_start: gas.take_start_charge(),
+                // The transaction's frame gets the whole pool. It has no start charge until a
+                // consumer that charged the transaction's gas for it puts one on this input
+                // (`Handler::first_frame_input`), and no allowance, which is a value call's below
+                // the transaction.
+                charged_start: StartCharge::new(0, 0),
                 bytes_share: forward_whole_pool(gas),
                 history_allowance: 0,
             }))))
@@ -182,7 +183,6 @@ pub fn create_init_frame<CTX: ContextTr>(
             );
             inputs.set_charged_create_state_gas(charged_create_state_gas);
             inputs.set_charged_state_gas_address(charged_state_gas_address);
-            inputs.set_charged_start(gas.take_start_charge());
             inputs.set_bytes_share(forward_whole_pool(gas));
             Ok(Some(FrameInput::Create(Box::new(inputs))))
         }

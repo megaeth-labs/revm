@@ -188,7 +188,7 @@ impl Host for HookContext {
         self.hooks.verdict.clone()
     }
 
-    fn frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool {
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
         self.hooks.starts.push((*start, *gas));
         if self.hooks.starts.len() == 1 && self.hooks.first_start_charge > 0 {
             assert!(gas.record_history_cost(self.hooks.first_start_charge));

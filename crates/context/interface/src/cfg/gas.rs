@@ -52,11 +52,10 @@ pub use withheld::WithheldCrossing;
 /// spendable part, so a consumer that caps a creating frame must not release before
 /// `return_create`, or those charges escape the cap.
 ///
-/// Beside the gas, the tracker carries three figures of the fork that are inert until a consumer
+/// Beside the gas, the tracker carries two figures of the fork that are inert until a consumer
 /// uses them: the byte pool ([`bytes_remaining`](Self::bytes_remaining), unlimited by default,
-/// forwarded to a child frame and settled with its gas), the history allowance
-/// ([`history_allowance`](Self::history_allowance), zero by default) and the start charge the
-/// frame-start hook declares ([`start_charge`](Self::start_charge), zero outside the hook).
+/// forwarded to a child frame and settled with its gas) and the history allowance
+/// ([`history_allowance`](Self::history_allowance), zero by default).
 ///
 /// The net counters (`state_gas_spent`, `history_gas_spent`) are `i64`, while charges and refills
 /// take `u64` amounts and convert them with saturation. The tracker assumes that the transaction
@@ -175,11 +174,6 @@ pub struct GasTracker {
     /// Encodings made before this field existed decode it as zero.
     #[cfg_attr(feature = "serde", serde(default))]
     history_allowance: u64,
-    /// The start charge the frame-start hook declared and the instruction has not yet taken
-    /// ([`start_charge`](Self::start_charge)). A carrier between the hook and the instruction,
-    /// zero at every other time, so it is not part of an encoded tracker.
-    #[cfg_attr(feature = "serde", serde(skip))]
-    start_charge: StartCharge,
 }
 
 /// The pool a tracker starts with, and an encoding that predates the pool decodes to.
@@ -215,7 +209,6 @@ impl GasTracker {
             bytes_spent: 0,
             bytes_crossing: None,
             history_allowance: 0,
-            start_charge: StartCharge::new(0, 0),
         }
     }
 

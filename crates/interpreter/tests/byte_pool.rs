@@ -1,12 +1,12 @@
 //! The byte pool, the start charge and the history allowance at the call and creation
 //! instructions.
 //!
-//! Once [`Host::frame_starting`] has answered, the instruction takes the start charge the hook
-//! declared off the caller's gas and puts it on the frame's input, takes the child's share of the
-//! caller's byte pool out of the pool and puts it on the input too, and, for a value call, gives
-//! the input the schedule's history allowance. Each test runs one frame on [`PoolHost`], whose
-//! start hook draws bytes from the gas it is handed, declares a start charge, and admits or
-//! refuses the start as the test tells it.
+//! Once [`Host::frame_starting`] has answered, the instruction copies the start charge the hook
+//! declared on the start onto the frame's input, takes the child's share of the caller's byte pool
+//! out of the pool and puts it on the input too, and, for a value call, gives the input the
+//! schedule's history allowance. Each test runs one frame on [`PoolHost`], whose start hook draws
+//! bytes from the gas it is handed, declares a start charge, and admits or refuses the start as
+//! the test tells it.
 
 use bytecode::{opcode::*, Bytecode};
 use context_interface::{
@@ -46,7 +46,8 @@ const PERCENT: u64 = 98;
 const ALLOWANCE: u64 = 160;
 
 /// A [`DummyHost`] whose start hook draws [`PoolHost::draw`] bytes from the gas it is handed,
-/// declares [`PoolHost::declare`], records what it saw, and answers [`PoolHost::admit`].
+/// declares [`PoolHost::declare`] on the start, records what it saw, and answers
+/// [`PoolHost::admit`].
 struct PoolHost {
     dummy: DummyHost,
     spec: SpecId,
@@ -54,7 +55,8 @@ struct PoolHost {
     draw: u64,
     declare: StartCharge,
     admit: bool,
-    /// Every start the hook saw, with the gas as the hook found it, and whether its draw paid.
+    /// Every start the hook saw and the gas, both as the hook found them, and whether its draw
+    /// paid.
     starts: Vec<(FrameStart, GasTracker, bool)>,
 }
 
@@ -108,11 +110,11 @@ impl Host for PoolHost {
         WriteVerdict::Continue
     }
 
-    fn frame_starting(&mut self, start: &FrameStart, gas: &mut GasTracker) -> bool {
-        let found = *gas;
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
+        let found = (*start, *gas);
         let paid = gas.record_bytes(self.draw);
-        gas.set_start_charge(self.declare);
-        self.starts.push((*start, found, paid));
+        start.charge = self.declare;
+        self.starts.push((found.0, found.1, paid));
         self.admit && paid
     }
 
@@ -339,7 +341,6 @@ fn test_every_start_forwards_the_whole_pool_by_default() {
             "{kind:?}: the caller keeps nothing"
         );
         assert_eq!(gas.bytes_spent(), 0, "{kind:?}: a forward is not a draw");
-        assert!(gas.start_charge().is_zero(), "{kind:?}");
         assert_eq!(gas.bytes_crossing(), None, "{kind:?}");
     }
 }
@@ -386,26 +387,22 @@ fn test_the_share_follows_the_schedule_after_the_hooks_draw() {
     }
 }
 
-/// The start charge the hook declares rides on the frame's input, and the carrier on the
-/// caller's gas is empty again once the instruction has taken it.
+/// A start reaches the hook with nothing declared, and the start charge the hook declares on it
+/// rides on the frame's input.
 #[test]
-fn test_the_declared_start_charge_rides_on_the_input_and_leaves_the_tracker() {
+fn test_the_declared_start_charge_rides_on_the_input() {
     for (kind, code) in start_cases() {
         let mut host = PoolHost::new(SpecId::OSAKA).declaring(DECLARED);
-        let (action, gas) = run(&code, Some(POOL), &mut host);
+        let (action, _) = run(&code, Some(POOL), &mut host);
         let (_, charged, _) = figures(&started(action));
 
+        assert!(host.start().0.charge.is_zero(), "{kind:?}: none at first");
         assert_eq!(charged, DECLARED, "{kind:?}");
-        assert!(
-            gas.start_charge().is_zero(),
-            "{kind:?}: the carrier is taken"
-        );
     }
 }
 
 /// A start the hook refuses fails out of gas and starts no frame: the hook's draw stays, as the
-/// forward of regular gas does, no share is taken, and the declared charge is discarded with the
-/// start rather than left on the caller's gas.
+/// forward of regular gas does, no share is taken, and the declared charge goes with the start.
 #[test]
 fn test_a_refused_start_forwards_no_bytes_and_discards_the_declared_charge() {
     for (kind, code) in start_cases() {
@@ -422,10 +419,6 @@ fn test_a_refused_start_forwards_no_bytes_and_discards_the_declared_charge() {
             "{kind:?}: no share taken"
         );
         assert_eq!(gas.bytes_spent(), 200, "{kind:?}");
-        assert!(
-            gas.start_charge().is_zero(),
-            "{kind:?}: the carrier is taken"
-        );
         assert_eq!(gas.bytes_crossing(), None, "{kind:?}");
     }
 }
