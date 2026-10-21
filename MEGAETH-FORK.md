@@ -179,22 +179,27 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 
 ### Code-deposit admission
 
-- **API.** `ContextTr::admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes>`, whose default admits.
+- **API.** `ContextTr::admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>, gas: &mut GasTracker) -> Result<(), Bytes>`, whose default admits and leaves `gas` alone.
   `CodeDeposit` carries `address`, `code`, `gas_before` and `gas_after`; `regular_gas`, `state_gas` and `history_gas` read the deposit's charges off the two trackers.
   It is `#[non_exhaustive]` and built with `CodeDeposit::new`, so a later field is not a breaking change.
 - **Contract.** `return_create` calls it once for every creation it deploys, on the plain and the inspected path: after the code passed every check and every deposit charge is recorded, before the journal checkpoint is committed.
   A creation `return_create` fails itself, out of gas on a deposit charge included, is never offered.
   Before Homestead a deposit the frame cannot pay does not fail: `return_create` deploys empty code instead, and offers that deposit with empty code and no charge.
   If the failed charge was a crossing of the frame's withheld gas, `gas_after` carries its crossing record and `gas_before` does not, so an admitted deposit keeps the record and a refusal discards it.
-  `Err(output)` refuses: the checkpoint is reverted, the frame's gas is put back to `gas_before`, and the creation ends as a `Revert` with `output`, settling as a creation whose init code reverted.
+  `gas` is the creating frame's tracker, which `gas_after` reads a copy of: the hook may debit and credit it, for instance draw the deployed code's bytes from the frame's pool (see The byte pool), and a charge it makes that fails records as any failed charge does.
+  `Ok(())` admits, and the frame returns with `gas` as the hook left it.
+  `Err(output)` refuses: the checkpoint is reverted, the frame's gas is put back to `gas_before`, which undoes whatever the hook did to `gas`, a crossing its failed draw recorded included, and the creation ends as a `Revert` with `output`, settling as a creation whose init code reverted.
   A hook that fails fatally records the cause in the context error and refuses; the transaction returns the error.
   The deposit's charges, and with them its state-gas price lookup through `Host::state_gas_price`, are made before it is offered, so that lookup is made whether or not the deposit is admitted; a refusal does not undo what the lookup recorded.
 - **Reach.** The hook is on the context `return_create` is called with, so a consumer that wraps `EthFrame`, runs `process_next_action` from its own `frame_run`, or customises `Handler` reaches it by implementing `ContextTr` for its context.
   A context that wraps another and implements `ContextTr` by hand must forward the method, or it gets the admitting default.
-- **Consumer.** mega-evm refuses a deposit its own rules reject, after revm's checks and charges and before the creation commits. That point is inside `return_create`, between its last charge and the checkpoint commit.
+- **Consumer.** mega-evm refuses a deposit its own rules reject, after revm's checks and charges and before the creation commits, and holds the deployed code to the creating frame's byte budget there. That point is inside `return_create`, between its last charge and the checkpoint commit, and no other hook is lent the frame's gas between the two.
 - **Removal.** When upstream has an equivalent admission point, or when mega-evm stops refusing deposits.
 - **Default.** `return_create` compiles to the same code, on its own and inlined into the handler on the plain and the inspected path.
   Inlined into a consumer's own function, the admitting default may shift its block layout; where measured, that cost one unconditional branch on one out-of-gas path and changed no success path.
+  Where measured (callgrind, the fork's release profile), lending `gas` costs nothing: a top-level creation runs the same instruction count as without it, and a nested `CREATE` 0.06 fewer.
+  The `gas` parameter changed this released hook's signature, an exception to rule 1 (`api:exception`): an override does not compile until it takes the parameter.
+  mega-evm's `MegaContext::admit_code_deposit` is the one override found; alloy-evm 0.36, revm-inspectors 0.40, the op-revm fork and mega-reth do not override it, and nothing built against upstream revm can, since the hook is the fork's.
 
 ### revm 40.0.3's journal semantics
 
@@ -239,7 +244,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 ### The byte pool
 
 - **API.** On `GasTracker`, forwarded on `Gas`: `bytes_remaining`, `set_bytes_remaining`, `bytes_spent`, `set_bytes_spent`, `record_bytes`, `refill_bytes`, `bytes_crossing`, `clear_bytes_crossing`, `set_bytes_crossing`.
-  On `GasTracker` alone, the fork's own plumbing: `add_bytes_spent`, `forward_bytes`, `absorb_returned_bytes`.
+  On `GasTracker` alone, the fork's own plumbing: `add_bytes_spent`, `forward_bytes`, `absorb_returned_bytes`, `adopt_bytes_share`.
   `GasId::bytes_forward_percent` and `GasParams::bytes_forward_share(pool)`.
   `bytes_share` on `CallInputs` (a field) and `CreateInputs` (`bytes_share`, `set_bytes_share`).
 - **Contract.** The pool is a budget of bytes a frame may append, beside its gas: `bytes_remaining` is what the frame may still draw, `bytes_spent` its net draw, signed as `history_gas_spent` is.
@@ -247,6 +252,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
   The crossing is a bit: it says that a draw failed, not what the draw asked for, which the hook that drew knows when it fails.
   No halt touches the pool, so a halted frame's result still reads the pool as the failed draw found it, until its caller settles it.
   `refill_bytes(n)` gives bytes back and lowers the net, below zero when the draw was a caller's.
+  A consumer draws deployed code's bytes where the deposit is admitted: `ContextTr::admit_code_deposit` is lent the creating frame's tracker (see Code-deposit admission).
   The transaction's frame gets the whole pool of the transaction's tracker, set by a consumer at `tx_gas` or in pre-execution.
   At every `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, after `frame_starting` has answered, the instruction takes `bytes_forward_share` of the caller's pool out of it and puts it on the frame's input as `bytes_share`: the child's pool when it starts, on the frame the handler runs and on an answer it gives without one (a precompile, a refused start).
   `bytes_forward_share` is `bytes_forward_percent` per cent of the pool, rounded down; a hundred or more forwards the whole pool.
@@ -255,14 +261,16 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
   The child's net merges into the caller's on success only, as the history net does, so a caller's rollback undoes its children's draws too.
   `rollback_state_gas` rolls the pool back with state and history gas, so a consumer that rolls a frame back by hand rolls the pool back with it.
   The first frame's return settles into the transaction's tracker the same way (`last_frame_result`), whose `bytes_spent` is then the transaction's net draw.
-  An outcome a consumer or an inspector builds itself carries whatever pool its gas was built with, an unlimited one by default, and the settlement absorbs it as it is; a consumer that answers a start itself sets the answer's pool to the share it was given.
+  A precompile's answer adopts the share as the pool it started with (`adopt_bytes_share`): its pool is the share less what its provider drew on it, so its pool and net add up to the share as a frame's do; a provider that draws on its answer starts the answer's pool at the input's `bytes_share` first, so a draw the share cannot pay fails.
+  An outcome an inspector builds to answer a start carries whatever pool its gas was built with, an unlimited one with `CallOutcome::new` and `CreateOutcome::new`, and the settlement absorbs it as it is.
+  A consumer that answers a start itself, without a frame or a provider, sets the answer's pool to the share it was given.
   The pool is not reported on `ResultGas`.
 - **Consumer.** mega-evm keeps a per-frame budget of the bytes a transaction appends to the state and the history, which a failed frame gives back and a successful one hands to its caller. That is what the tracker does for the reservoir, and only the tracker's forward and settlement can carry a figure that moves with a frame's gas.
 - **Removal.** When upstream carries an equivalent per-frame budget on its gas, or when mega-evm stops limiting bytes per frame.
 - **Default.** Every tracker starts with an unlimited pool (`u64::MAX`), every schedule forwards the whole pool, and nothing in the workspace draws it, so every figure of the pool is the unlimited pool going out and coming back and every result is upstream's.
   The tracker is 112 bytes, 88 without the pool: the pool and its net take a word each, the allowance (see The history allowance) a third, and the crossing a bit in the word the failed-charge record's flag takes (see The failed-charge record); encodings that predate the fields decode with an unlimited pool, no crossing and zero for the rest.
   `Gas` is 128 bytes (104), `InterpreterResult` 168 (144), `CallOutcome` and `FrameResult` 248 (208), `CreateOutcome` 232 (192), the outcomes with the start charge's two words.
-  Where measured (callgrind, the fork's release profile, against the base without the pool, the start charge and the allowance), the three figures together cost a transfer 122 instructions (+2.3%), a creation 144 (+0.8%), a `SELFDESTRUCT` transaction 152 (+1.9%) and each `CALL` about 139 (+6.3% on a transaction of 64 calls), most of it in moving the larger frame results; snailtracer is unchanged.
+  Where measured (callgrind, the fork's release profile, against the base without the pool, the start charge and the allowance), the three figures together cost a transfer 120 instructions (+2.2%), a creation 144 (+0.8%), a `SELFDESTRUCT` transaction 151 (+1.9%), a transaction that calls a precompile 135 (+0.04%; 10 of them the answer's adopted share) and each `CALL` about 139 (+6.3% on a transaction of 64 calls), most of it in moving the larger frame results; snailtracer is unchanged.
 
 ### The start charge
 
@@ -274,10 +282,16 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
   The transaction's frame has no start hook: a consumer that charges the transaction's tracker for it in pre-execution puts the refundable part on the first frame's input (`charged_start`), from `Handler::first_frame_input`.
   The charge rides from the input to the outcome, and `return_result` refunds it to the caller whole, with `refill_history` and `refill_bytes`, on the condition `refundable_state_gas_charge` uses: a call that did not succeed, a creation that did not succeed or deployed no address; `last_frame_result` refunds the first frame's the same way, and after a halt consumes the regular gas the refill credited, as it does for the state refund.
   A frame that succeeds keeps the charge.
+  A precompile's answer and a start the handler refuses before any frame (call depth, balance) carry the input's charge, so they refund as a frame does.
+  An outcome an inspector builds to answer a start carries no charge unless the inspector copies the input's (`CallOutcome::new` and `CreateOutcome::new` carry none), so the caller keeps the charge, as revm keeps its own upfront state charge on an outcome a tool builds; an outcome the inspector rewrites at `call_end` or `create_end` keeps the frame's charge, so a success rewritten into a failure is refunded.
+  An answer a consumer builds itself, such as an interceptor's, is refunded by the same rule: it carries the charge the consumer puts on it, and none when built with `new`.
 - **Consumer.** mega-evm charges a start's write records to the caller at the hook, after the forward and before the frame's input copies the reservoir, and must give them back when the frame fails. The refund belongs where the fork refunds the upfront state charge.
 - **Removal.** When upstream carries an equivalent refundable start charge, or when mega-evm stops charging frame starts.
 - **Default.** The hook declares nothing, so the fields and the refund are zero.
-  This entry breaks rule 1 (`api:exception`): `CallInputs`, `CallOutcome` and `CreateOutcome` are constructible by literal and gain fields (`charged_start`, and `CallInputs` also `bytes_share` and `history_allowance`), so a consumer that constructs them by literal does not compile until it names the new fields. alloy-evm 0.36, revm-inspectors 0.40 and the op-revm fork construct them with `new` and are unaffected; `CreateInputs` has private fields and is unaffected.
+  This entry breaks rule 1 (`api:exception`): `CallInputs`, `CallOutcome` and `CreateOutcome` are constructible by literal and gain fields (`charged_start`, and `CallInputs` also `bytes_share` and `history_allowance`), so a consumer that constructs them by literal does not compile until it names the new fields.
+  alloy-evm 0.36, revm-inspectors 0.40 and the op-revm fork construct them with `new` and are unaffected; `CreateInputs` has private fields and is unaffected.
+  Foundry constructs `CallOutcome` and `CreateOutcome` by literal in its cheatcodes and its inspector stack, and mega-reth's oracle executor constructs a `CallOutcome` by literal; both already fail against the fork's base, whose outcomes carry the earlier EIP-8037 field `charged_state_gas_address` that no upstream release has, so the outcomes' new field breaks no literal that compiled against the fork before.
+  Foundry also constructs `CallInputs` once by literal in its cheatcodes; the base's `CallInputs` has upstream's fields, so that literal is broken by this entry for the first time, in a file its outcome literals already break.
 
 ### The history allowance
 

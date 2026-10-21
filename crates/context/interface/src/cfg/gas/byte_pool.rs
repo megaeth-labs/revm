@@ -56,8 +56,8 @@ impl GasTracker {
     /// Draws `cost` bytes from the pool.
     ///
     /// Returns `false` if the pool cannot pay, leaving it untouched and setting the crossing
-    /// ([`bytes_crossing`](Self::bytes_crossing)). A draw of zero always succeeds. The draw is counted on [`bytes_spent`](Self::bytes_spent), so a rollback gives
-    /// it back.
+    /// ([`bytes_crossing`](Self::bytes_crossing)). A draw of zero always succeeds. The draw is
+    /// counted on [`bytes_spent`](Self::bytes_spent), so a rollback gives it back.
     #[inline]
     #[must_use = "a draw the pool cannot pay is the consumer's stop"]
     pub const fn record_bytes(&mut self, cost: u64) -> bool {
