@@ -1,6 +1,6 @@
 use crate::{
     instructions::{
-        instruction_hooks::write_completed,
+        instruction_hooks::{running_account, write_completed},
         utility::{IntoAddress, IntoU256},
     },
     interpreter_types::{InputsTr, InterpreterTypes as ITy, MemoryTr, RuntimeFlag, StackTr},
@@ -364,13 +364,8 @@ pub fn selfdestruct<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Resu
     let cold_load_gas = context.host.gas_params().selfdestruct_cold_cost();
 
     let skip_cold_load = context.interpreter.gas.remaining() < cold_load_gas;
-    // The account's balance before the write, for the completed-write hook. The account is the
-    // running frame's, which the journal holds, so reading it loads nothing cold.
-    let balance = context
-        .host
-        .load_account_info_skip_cold_load(context.interpreter.input.target_address(), false, false)?
-        .account
-        .balance;
+    // The account's balance before the write, for the completed-write hook.
+    let (balance, _) = running_account(context.host, context.interpreter.input.target_address())?;
     let res = context.host.selfdestruct(
         context.interpreter.input.target_address(),
         target,

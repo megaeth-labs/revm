@@ -7,7 +7,7 @@ use crate::{
     InterpreterAction, StartCharge,
 };
 use context_interface::host::{CompletedWrite, FrameStart, WriteVerdict};
-use primitives::{constants::CALL_STACK_LIMIT, hints_util::cold_path, Bytes};
+use primitives::{constants::CALL_STACK_LIMIT, hints_util::cold_path, Address, Bytes, U256};
 
 /// Hands `write`, which the running instruction completed after its last charge, to
 /// [`Host::write_completed`] with the frame's gas, and applies the verdict: the instruction goes
@@ -65,23 +65,32 @@ pub(crate) fn frame_starting<H: Host + ?Sized>(
 /// when EIP-8037 is off; with it on, the creation instruction's EIP-8037 branch computes it. It does
 /// so after the checks that branch makes, so a creation the handler fails before it takes an
 /// address gets none: an endowment above the caller's balance, a caller's nonce at its maximum, or
-/// a creating frame at `depth` the depth limit. The handler builds the frame from the cache, so the
-/// address and a `CREATE2`'s init-code hash are computed once. The caller is the running frame's
-/// account, which the journal holds, so reading its nonce loads nothing cold.
+/// a creating frame (at `depth`) at the depth limit. The handler builds the frame from the cache,
+/// so the address and a `CREATE2`'s init-code hash are computed once.
 #[inline]
 pub(crate) fn cache_created_address<H: Host + ?Sized>(
     host: &mut H,
     inputs: &CreateInputs,
     depth: usize,
 ) -> Result {
-    let caller = host
-        .load_account_info_skip_cold_load(inputs.caller(), false, false)?
-        .account;
-    let (balance, nonce) = (caller.balance, caller.nonce);
+    let (balance, nonce) = running_account(host, inputs.caller())?;
     if balance >= inputs.value() && nonce != u64::MAX && depth < CALL_STACK_LIMIT as usize {
         inputs.created_address(nonce);
     }
     Ok(())
+}
+
+/// The balance and nonce of `address`, the running frame's own account, for a hook's facts. The
+/// journal holds that account warm, so reading it loads nothing cold.
+#[inline]
+pub(crate) fn running_account<H: Host + ?Sized>(
+    host: &mut H,
+    address: Address,
+) -> core::result::Result<(U256, u64), InstructionResult> {
+    let account = host
+        .load_account_info_skip_cold_load(address, false, false)?
+        .account;
+    Ok((account.balance, account.nonce))
 }
 
 /// Takes the child's share of the caller's byte pool out of `gas`, by the schedule's
