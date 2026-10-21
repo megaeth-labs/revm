@@ -170,7 +170,7 @@ Each entry's **Consumer** says who needs it and why it cannot be done outside th
 - **Coverage.** Every precompile the crate defines carries its price function, so every precompile of every set `Precompiles::new` returns answers.
   A precompile built with `Precompile::new` carries none and answers `None`.
   A precompile that wraps a built-in must price itself from the price function of the run it wraps, and price its own refusals at `0`; `with_required_gas`'s documentation shows the pattern, and such a wrapper needs a differential test against its own run.
-  Outstanding: the port to the op-revm fork. At `v20.0.0-mega.2` its nine size-limited wrappers (the BN254 pairing and the BLS12-381 G1 MSM, G2 MSM and pairing, across its hardforks) are built with `Precompile::new` and answer `None`.
+  A precompile defined outside this repository that wraps a revm run must price itself from the run it wraps, as the op-revm fork's size-limited wrappers do; that fork's `MEGAETH-FORK.md` ("Precompile prices") carries their guard.
 - **Guard.** `ecrecover`, `sha256`, `ripemd160` and `blake2f` repeat literals their runs keep private; the differential test `required_gas_matches_every_builtin_run`, run under every backend, fails when a run's gas changes and its price does not.
 - **Consumer.** mega-evm holds a precompile call to an allowance below its forward and must tell a crossing from a plain out-of-gas without running it. A precompile's gas rule is private to its run.
 - **Removal.** When upstream exposes a precompile's price before the run, or when mega-evm stops holding precompile calls to an allowance.
