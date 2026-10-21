@@ -8,7 +8,8 @@
 //! which stand in for a consumer's hooks, and checks that the two paths end the same way; an
 //! inspector records each frame's input as it starts and its outcome as it ends, before its caller
 //! settles it, and the figures are checked on the inspected path (the handler's tests check them
-//! on the plain one).
+//! on the plain one). Two tests run on the inspected path alone: an outcome the inspector builds
+//! or rewrites itself has no counterpart on the plain path.
 
 use context::{
     context_interface::{
@@ -26,9 +27,9 @@ use handler::{
     MainnetContext,
 };
 use interpreter::{
-    interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, GasTracker,
-    Instruction, InstructionContext, InstructionExecResult, InstructionResult, SStoreResult,
-    SelfDestructResult, StartCharge, StateLoad,
+    interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Gas,
+    GasTracker, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
+    InterpreterResult, SStoreResult, SelfDestructResult, StartCharge, StateLoad,
 };
 use primitives::{
     address, hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, TxKind, B256, U256,
@@ -58,6 +59,8 @@ const HISTORY_COST: u64 = 100;
 const ALLOWANCE: u64 = 160;
 /// The pool nobody set.
 const UNLIMITED: u64 = u64::MAX;
+/// The pool `LIMIT` sets.
+const LIMITED: u64 = 1_000;
 
 /// The account the transaction calls.
 const PARENT: Address = address!("0x00000000000000000000000000000000000c0de0");
@@ -79,6 +82,7 @@ const DRAW: u8 = 0x0c;
 const DECLARE: u8 = 0x0d;
 const LOG: u8 = 0x0e;
 const DRAIN: u8 = 0x0f;
+const LIMIT: u8 = 0x10;
 
 const fn draw(context: InstructionContext<'_, Ctx, EthInterpreter>) -> InstructionExecResult {
     if context.interpreter.gas.record_bytes(DRAW_BYTES) {
@@ -94,6 +98,12 @@ const fn drain(context: InstructionContext<'_, Ctx, EthInterpreter>) -> Instruct
     } else {
         Err(InstructionResult::OutOfGas)
     }
+}
+
+/// Sets the frame's pool to [`LIMITED`], as a consumer sets the transaction's.
+const fn limit(context: InstructionContext<'_, Ctx, EthInterpreter>) -> InstructionExecResult {
+    context.interpreter.gas.set_bytes_remaining(LIMITED);
+    Ok(())
 }
 
 /// Has the start hook charge and declare [`DECLARED`] at the start that follows.
@@ -337,16 +347,31 @@ impl Ended {
     }
 }
 
+/// What the inspector does with a call to [`OK`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Answer {
+    /// Lets the frame run.
+    #[default]
+    Runs,
+    /// Answers the start with a revert built by `CallOutcome::new`, as a tool builds one.
+    AsBuilt,
+    /// Answers the start with a revert that carries the input's share and start charge.
+    WithShareAndCharge,
+    /// Lets the frame run, and rewrites its success into a revert at `call_end`.
+    RewrittenIntoRevert,
+}
+
 /// Every frame's input as it started (share, start charge, allowance) and its outcome as it
-/// ended.
+/// ended; and what the inspector does with a call to [`OK`].
 #[derive(Default)]
 struct Figures {
     starts: Vec<(u64, StartCharge, u64)>,
     ends: Vec<Ended>,
+    answer: Answer,
 }
 
 impl Figures {
-    fn end(&mut self, result: InstructionResult, gas: &interpreter::Gas, charged: StartCharge) {
+    fn end(&mut self, result: InstructionResult, gas: &Gas, charged: StartCharge) {
         self.ends.push(Ended {
             result,
             pool: gas.bytes_remaining(),
@@ -366,7 +391,21 @@ impl Inspector<Ctx, EthInterpreter> for Figures {
             inputs.charged_start,
             inputs.history_allowance,
         ));
-        None
+        let answers = matches!(self.answer, Answer::AsBuilt | Answer::WithShareAndCharge);
+        if !answers || inputs.target_address != OK {
+            return None;
+        }
+        let revert = InterpreterResult::new(
+            InstructionResult::Revert,
+            Bytes::new(),
+            Gas::new(inputs.gas_limit),
+        );
+        let mut outcome = CallOutcome::new(revert, inputs.return_memory_offset.clone());
+        if self.answer == Answer::WithShareAndCharge {
+            outcome.result.gas.set_bytes_remaining(inputs.bytes_share);
+            outcome.charged_start = inputs.charged_start;
+        }
+        Some(outcome)
     }
 
     fn create(&mut self, _context: &mut Ctx, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
@@ -375,7 +414,10 @@ impl Inspector<Ctx, EthInterpreter> for Figures {
         None
     }
 
-    fn call_end(&mut self, _context: &mut Ctx, _inputs: &CallInputs, outcome: &mut CallOutcome) {
+    fn call_end(&mut self, _context: &mut Ctx, inputs: &CallInputs, outcome: &mut CallOutcome) {
+        if self.answer == Answer::RewrittenIntoRevert && inputs.target_address == OK {
+            outcome.result.result = InstructionResult::Revert;
+        }
         self.end(
             *outcome.instruction_result(),
             &outcome.result.gas,
@@ -485,6 +527,7 @@ impl Run {
         let mut instructions = EthInstructions::new_mainnet_with_spec(SPEC);
         instructions.insert_instruction(DRAW, Instruction::new(draw), 0);
         instructions.insert_instruction(DRAIN, Instruction::new(drain), 0);
+        instructions.insert_instruction(LIMIT, Instruction::new(limit), 0);
         instructions.insert_instruction(DECLARE, Instruction::new(declare), 0);
         instructions.insert_instruction(LOG, Instruction::new(log), 0);
         Evm::new_with_inspector(
@@ -516,6 +559,15 @@ impl Run {
             .expect("the transaction runs");
         assert_eq!(inspected_outcome, transacted, "both paths end the same way");
         (transacted, inspected.inspector)
+    }
+
+    /// The transaction with `inspect_tx` alone, the inspector doing `answer` with a call to
+    /// [`OK`]. Returns the outcome and the figures the inspector saw.
+    fn inspected(&self, answer: Answer) -> (ResultAndState, Figures) {
+        let mut evm = self.evm();
+        evm.inspector.answer = answer;
+        let outcome = evm.inspect_tx(Self::tx()).expect("the transaction runs");
+        (outcome, evm.inspector)
     }
 }
 
@@ -650,4 +702,92 @@ fn test_both_paths_give_a_value_calls_child_the_allowance() {
             },
         ]
     );
+}
+
+/// [`PARENT`] limits its pool to [`LIMITED`] and calls [`OK`] with a start charge declared, on
+/// the inspected path alone, the inspector doing `answer`. Returns the share the call was given,
+/// [`OK`]'s outcome as the inspector left it, and [`PARENT`]'s pool, net and history after the
+/// settlement.
+fn limited_call_to_ok(answer: Answer) -> (u64, Ended, (u64, i64, i64)) {
+    let parent = ends([vec![LIMIT, DECLARE], call(OK, 0)].concat());
+    let (outcome, figures) = Run::new(parent).inspected(answer);
+
+    assert!(
+        outcome.result.is_success(),
+        "{answer:?}: {:?}",
+        outcome.result
+    );
+    let [ok, parent_end] = &figures.ends[..] else {
+        panic!("{answer:?}: {} ends", figures.ends.len());
+    };
+    assert_eq!(figures.starts[1].1, DECLARED, "{answer:?}");
+    (
+        figures.starts[1].0,
+        ok.clone(),
+        (parent_end.pool, parent_end.spent, parent_end.history),
+    )
+}
+
+/// An outcome the inspector builds to answer a start settles as built, as revm settles its own
+/// upfront state charge on such an outcome. `CallOutcome::new` carries no start charge and an
+/// unlimited pool, so a caller whose start the inspector answers with a revert keeps the start
+/// charge, and its limited pool, plus the unlimited one absorbed, saturates to `u64::MAX`. An
+/// answer that carries the input's share and charge settles as the frame's own revert would: the
+/// caller gets the share and the charge back.
+#[test]
+fn test_an_outcome_the_inspector_builds_settles_as_built() {
+    let share = LIMITED - DECLARED.bytes;
+    for (answer, answered, kept) in [
+        (
+            Answer::AsBuilt,
+            Ended::with(InstructionResult::Revert, UNLIMITED, 0),
+            (UNLIMITED, DECLARED.bytes as i64, DECLARED.history as i64),
+        ),
+        (
+            Answer::WithShareAndCharge,
+            Ended {
+                charged_start: DECLARED,
+                ..Ended::with(InstructionResult::Revert, share, 0)
+            },
+            (LIMITED, 0, 0),
+        ),
+    ] {
+        assert_eq!(
+            limited_call_to_ok(answer),
+            (share, answered, kept),
+            "{answer:?}: the share, the answer as built, the caller after the settlement"
+        );
+    }
+}
+
+/// A frame's outcome carries its input's start charge, so a success the inspector rewrites into a
+/// revert at `call_end` refunds the charge and rolls the frame's draws back, as the frame's own
+/// revert would; the frame left alone keeps both.
+#[test]
+fn test_a_success_the_inspector_rewrites_into_a_revert_refunds_the_start_charge() {
+    let share = LIMITED - DECLARED.bytes;
+    let drawn = DECLARED.bytes + DRAW_BYTES;
+    for (answer, result, kept) in [
+        (
+            Answer::Runs,
+            InstructionResult::Stop,
+            (LIMITED - drawn, drawn as i64, DECLARED.history as i64),
+        ),
+        (
+            Answer::RewrittenIntoRevert,
+            InstructionResult::Revert,
+            (LIMITED, 0, 0),
+        ),
+    ] {
+        let ended = Ended {
+            charged_start: DECLARED,
+            ..Ended::with(result, share - DRAW_BYTES, DRAW_BYTES as i64)
+        };
+        assert_eq!(
+            limited_call_to_ok(answer),
+            (share, ended, kept),
+            "{answer:?}: the share, the frame's outcome as the inspector left it, the caller after \
+             the settlement"
+        );
+    }
 }

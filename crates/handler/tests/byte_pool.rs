@@ -35,8 +35,8 @@ use interpreter::{
     SStoreResult, SelfDestructResult, StartCharge, StateLoad,
 };
 use primitives::{
-    address, hardfork::SpecId, Address, AddressSet, Bytes, Log, StorageKey, StorageValue, TxKind,
-    B256, U256,
+    address, constants::CALL_STACK_LIMIT, hardfork::SpecId, Address, AddressSet, Bytes, Log,
+    StorageKey, StorageValue, TxKind, B256, U256,
 };
 use revm_handler::{
     instructions::EthInstructions, EthFrame, EthPrecompiles, EvmTr, FrameResult, Handler,
@@ -452,6 +452,9 @@ struct PoolHandler {
     /// Whether the transaction's gas is charged [`DECLARED`] for its frame, declared on the
     /// frame's input.
     declare: bool,
+    /// Whether every frame below the transaction's starts one past the call-stack limit, where a
+    /// 1,025th nested start would.
+    too_deep: bool,
     starts: Vec<Started>,
     returned: Vec<Returned>,
     settled: Option<Settled>,
@@ -463,6 +466,7 @@ impl PoolHandler {
             mainnet: Mainnet::default(),
             pool,
             declare: false,
+            too_deep: false,
             starts: Vec::new(),
             returned: Vec::new(),
             settled: None,
@@ -507,7 +511,8 @@ impl Handler for PoolHandler {
     }
 
     /// The default loop, recording each frame's input as it starts and its result as it
-    /// returns, before its caller settles it.
+    /// returns, before its caller settles it, and starting the frames below the transaction's
+    /// past the call-stack limit if told to.
     fn run_exec_loop(
         &mut self,
         evm: &mut TestEvm,
@@ -520,8 +525,11 @@ impl Handler for PoolHandler {
         }
         loop {
             let result = match evm.frame_run()? {
-                ItemOrResult::Item(init) => {
+                ItemOrResult::Item(mut init) => {
                     self.starts.push(started(&init.frame_input));
+                    if self.too_deep {
+                        init.depth = CALL_STACK_LIMIT as usize + 1;
+                    }
                     match evm.frame_init(init)? {
                         ItemOrResult::Item(_) => continue,
                         ItemOrResult::Result(result) => result,
@@ -602,7 +610,8 @@ fn ends(mut code: Vec<u8>) -> Vec<u8> {
     code
 }
 
-/// A transaction to [`PARENT`], holding `parent`, on the accounts every test knows.
+/// A transaction on the accounts every test knows: a call to [`PARENT`], which holds `parent`, or
+/// a creation with `parent` as its init code ([`Run::creation`]).
 struct Run {
     parent: Vec<u8>,
     parent_balance: u64,
@@ -612,6 +621,10 @@ struct Run {
     deposit: Deposit,
     /// What the precompile provider draws on each answer.
     precompile_draw: u64,
+    /// `bytes_forward_percent` in the schedule, if not the default.
+    forward_percent: Option<u64>,
+    /// Whether the transaction creates a contract from `parent` instead of calling [`PARENT`].
+    creates: bool,
 }
 
 impl Run {
@@ -623,7 +636,21 @@ impl Run {
             allowance: 0,
             deposit: Deposit::Untouched,
             precompile_draw: 0,
+            forward_percent: None,
+            creates: false,
         }
+    }
+
+    /// A transaction that creates a contract from `initcode`.
+    const fn creation(initcode: Vec<u8>) -> Self {
+        let mut run = Self::new(initcode);
+        run.creates = true;
+        run
+    }
+
+    const fn forward_percent(mut self, percent: u64) -> Self {
+        self.forward_percent = Some(percent);
+        self
     }
 
     const fn precompile_draw(mut self, draw: u64) -> Self {
@@ -684,12 +711,17 @@ impl Run {
 
     fn evm(&self) -> TestEvm {
         let allowance = self.allowance;
+        let forward_percent = self.forward_percent;
         let inner = Context::mainnet()
             .with_db(self.db())
             .modify_cfg_chained(|cfg| {
                 cfg.set_spec_and_mainnet_gas_params(SPEC);
                 cfg.gas_params
                     .override_gas([(GasId::call_history_allowance(), allowance)]);
+                if let Some(percent) = forward_percent {
+                    cfg.gas_params
+                        .override_gas([(GasId::bytes_forward_percent(), percent)]);
+                }
             });
         let ctx = DeclaringContext {
             inner,
@@ -705,9 +737,15 @@ impl Run {
             draw: self.precompile_draw,
         };
         let mut evm: TestEvm = Evm::new(ctx, instructions, precompiles);
+        let (kind, data) = if self.creates {
+            (TxKind::Create, Bytes::from(self.parent.clone()))
+        } else {
+            (TxKind::Call(PARENT), Bytes::new())
+        };
         evm.ctx.set_tx(
             TxEnv::builder_for_bench()
-                .kind(TxKind::Call(PARENT))
+                .kind(kind)
+                .data(data)
                 .gas_price(0)
                 .gas_limit(GAS_LIMIT)
                 .build_fill(),
@@ -876,20 +914,30 @@ fn test_the_start_charge_is_refunded_when_the_frame_fails() {
 
 /// The transaction's frame gets the pool as the consumer left it after the body's charges, and
 /// the start charge the consumer declared on its input, which is refunded whole when the frame
-/// reverts or halts and kept when it succeeds.
+/// reverts or halts and kept when it succeeds: a call's frame and a creation's alike.
 #[test]
 fn test_the_first_frame_gets_the_pool_and_its_start_charge() {
-    for (name, parent, fails) in [
+    let cases = [
         ("stops", vec![DRAW, STOP], false),
         ("reverts", vec![DRAW, PUSH0, PUSH0, REVERT], true),
         ("halts", vec![DRAW, INVALID], true),
-    ] {
+    ];
+    let calls = cases
+        .clone()
+        .map(|(name, code, fails)| (name, Run::new(code), fails));
+    let creations = cases.map(|(name, code, fails)| (name, Run::creation(code), fails));
+    for (name, run, fails) in calls.into_iter().chain(creations) {
+        let name = format!(
+            "{} {name}",
+            if run.creates { "a creation" } else { "a call" }
+        );
+        let name = name.as_str();
         let mut handler = PoolHandler::new(Some(POOL));
         handler.declare = true;
 
-        let (result, handler) = Run::new(parent).with(handler);
+        let (result, handler) = run.with(handler);
 
-        assert_eq!(result.is_success(), name == "stops", "{name}: {result:?}");
+        assert_eq!(result.is_success(), !fails, "{name}: {result:?}");
         assert_eq!(
             handler.starts,
             [(POOL - DECLARED.bytes, DECLARED, 0)],
@@ -1055,4 +1103,76 @@ fn test_a_precompile_answer_keeps_what_its_provider_drew() {
         assert_eq!(handler.returned[0], returned, "{name}");
         assert_eq!(handler.settled, Some(settled), "{name}");
     }
+}
+
+/// A start the handler refuses for the call depth gives its caller the whole share and the start
+/// charge back, as any start that fails does, for a call and a creation alike. The handler's loop
+/// starts the frame one past the call-stack limit, where a 1,025th nested start would be.
+#[test]
+fn test_a_start_refused_for_the_depth_gives_the_share_and_the_start_charge_back() {
+    for (name, start) in [("a call", call(OK, 0)), ("a creation", create(&[STOP]))] {
+        let mut parent = vec![DRAW, DECLARE];
+        parent.extend(start);
+        let mut handler = PoolHandler::new(Some(POOL));
+        handler.too_deep = true;
+
+        let (result, handler) = Run::new(ends(parent)).with(handler);
+
+        assert!(result.is_success(), "{name}: {result:?}");
+        let share = POOL - DRAW_BYTES - DECLARED.bytes;
+        assert_eq!(handler.starts[1], (share, DECLARED, 0), "{name}");
+        assert_eq!(
+            handler.returned[0],
+            Returned::ended(InstructionResult::CallTooDeep, share, 0),
+            "{name}"
+        );
+        assert_eq!(
+            handler.settled,
+            Some((POOL - DRAW_BYTES, DRAW_BYTES as i64, 0)),
+            "{name}: the start charge refunded, PARENT's own draw kept"
+        );
+    }
+}
+
+/// With `bytes_forward_percent` at 98, every start forwards 98% of its caller's pool, rounded
+/// down, and the caller keeps the rest; what a child hands back adds to what its caller kept, so
+/// the transaction ends with the figures the whole-pool forward gives.
+#[test]
+fn test_a_share_below_the_whole_pool_is_forwarded_and_settled_at_depth() {
+    let (result, handler) = at_depth()
+        .forward_percent(98)
+        .with(PoolHandler::new(Some(POOL)));
+
+    assert!(result.is_success(), "{result:?}");
+    let share = |pool| (pool, StartCharge::default(), 0);
+    assert_eq!(
+        handler.starts,
+        [
+            // The transaction's frame takes the whole pool.
+            share(POOL),
+            // PARENT drew 100: 98% of 900, PARENT keeps 18.
+            share(882),
+            // OK left 782, PARENT holds 800 again: 98% of 800, PARENT keeps 16.
+            share(784),
+            share(784),
+            share(784),
+            // NESTER drew 100 of its 784: 98% of 684 is 670.32, NESTER keeps 14.
+            share(670),
+        ]
+    );
+    assert_eq!(
+        handler.returned,
+        [
+            Returned::stopped(782, 100),
+            Returned::ended(InstructionResult::Revert, 684, 100),
+            Returned::ended(InstructionResult::InvalidFEOpcode, 684, 100),
+            // OK inside NESTER.
+            Returned::stopped(570, 100),
+            // NESTER: the 14 it kept and the 570 OK left, before its rollback.
+            Returned::ended(InstructionResult::Revert, 584, 200),
+            // PARENT: 16 kept and the whole 784 NESTER gave back.
+            Returned::stopped(800, 200),
+        ]
+    );
+    assert_eq!(handler.settled, Some((800, 200, 0)));
 }
