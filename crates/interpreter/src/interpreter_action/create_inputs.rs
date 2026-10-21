@@ -26,21 +26,24 @@ pub struct CreateInputs {
     /// EIP-8037: the account `charged_create_state_gas` was priced for, so the refund re-prices
     /// the same address. Meaningless while `charged_create_state_gas` is `false`.
     ///
-    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     charged_state_gas_address: Address,
     /// What the frame-start hook charged the caller for this creation and the creation's failure
     /// gives back: history gas and bytes of the pool, refunded to the caller by `return_result`
     /// when the creation fails, as `charged_create_state_gas` is.
     ///
-    /// Encodings made before this field existed decode it as no charge.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as no charge.
     #[cfg_attr(feature = "serde", serde(default))]
     charged_start: StartCharge,
     /// The share of the caller's byte pool the creation receives: its pool when it starts. Taken
     /// out of the caller's pool by the creation instruction, by the schedule's
     /// `bytes_forward_percent`, and given back with what the creation left of it when it returns.
     ///
-    /// Encodings made before this field existed decode it as unlimited.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as unlimited.
     #[cfg_attr(feature = "serde", serde(default = "unlimited_bytes"))]
     bytes_share: u64,
     /// Cached created address. This is computed lazily and cached to avoid
@@ -54,7 +57,8 @@ pub struct CreateInputs {
     cached_init_code_hash: OnceCell<B256>,
 }
 
-/// The share an encoding that predates the byte pool decodes to.
+/// The share an encoding that predates the byte pool decodes to in a format that carries field
+/// names.
 #[cfg(feature = "serde")]
 const fn unlimited_bytes() -> u64 {
     u64::MAX

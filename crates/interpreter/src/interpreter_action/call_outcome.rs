@@ -36,14 +36,16 @@ pub struct CallOutcome {
     /// was taken even when the price varies per account. Meaningless while
     /// `charged_new_account_state_gas` is `false`.
     ///
-    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_state_gas_address: Address,
     /// Copied from `CallInputs::charged_start`: what the frame-start hook charged the caller for
     /// this call and the call's failure gives back, so the parent can refund it when the call
     /// does not succeed.
     ///
-    /// Encodings made before this field existed decode it as no charge.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as no charge.
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_start: StartCharge,
 }

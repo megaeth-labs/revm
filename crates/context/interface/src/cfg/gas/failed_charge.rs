@@ -363,11 +363,11 @@ mod tests {
         assert_eq!(tracker.failed_charge_remaining(), None);
     }
 
-    /// The record round-trips, a zero included, and encodings made before it existed decode with
-    /// none.
+    /// The record round-trips, a zero included, and JSON encodings made before it existed decode
+    /// with none.
     #[cfg(feature = "serde")]
     #[test]
-    fn test_serde_round_trip_and_older_payloads() {
+    fn test_serde_round_trip_and_older_json_payloads() {
         for regular in [0, 400] {
             let mut tracker = GasTracker::new(1_000, regular, 0);
             fail(&mut tracker, regular + 1, false);

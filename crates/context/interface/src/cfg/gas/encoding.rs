@@ -4,11 +4,17 @@
 //! byte pool's crossing. Encoded, the tracker keeps the fields, names and order the derived
 //! encoding had: the failed-charge record is an optional number in its place, and the crossing a
 //! `bool` in its own.
+//!
+//! A format that carries field names, such as JSON, decodes an encoding made before a field
+//! existed with the field's default. A format that encodes by position, such as bincode, does not:
+//! the fields that predate the pool keep their places, but an encoding made before the pool's
+//! fields were added lacks them and cannot be read (see [`GasTracker`]).
 
 use super::{GasTracker, WithheldCrossing};
 
 /// A [`GasTracker`] as it is encoded: its fields in their order, with the defaults an encoding
-/// made before a field existed decodes to. Each field of the tracker documents its own.
+/// made before a field existed decodes to in a format that carries field names. Each field of the
+/// tracker documents its own.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename = "GasTracker")]
 pub(super) struct Encoded {
@@ -36,7 +42,8 @@ pub(super) struct Encoded {
     history_allowance: u64,
 }
 
-/// The pool a tracker starts with, and an encoding that predates the pool decodes to.
+/// The pool a tracker starts with, and the pool an encoding that predates it decodes to in a
+/// format that carries field names.
 const fn unlimited_bytes() -> u64 {
     u64::MAX
 }
@@ -107,8 +114,10 @@ mod tests {
     }
 
     /// The encoding has the fields, the names and the order it had before the failed-charge
-    /// record and the crossing shared a word, so a format that encodes by position reads it as
-    /// before; the failed-charge record is an optional number, and the crossing a `bool`.
+    /// record and the crossing shared a word, so a format that encodes by position finds every
+    /// field in the place it had then; the failed-charge record is an optional number, and the
+    /// crossing a `bool`. Such a format still cannot read an encoding made before the pool's
+    /// fields were added, which lacks them.
     #[test]
     fn test_the_encoding_keeps_its_fields_and_their_order() {
         assert_eq!(

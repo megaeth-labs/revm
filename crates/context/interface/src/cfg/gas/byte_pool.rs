@@ -467,11 +467,11 @@ mod tests {
         }
     }
 
-    /// Encodings made before the pool existed decode with an unlimited pool, nothing drawn and no
-    /// record; the pool's own encoding round-trips.
+    /// JSON encodings made before the pool existed decode with an unlimited pool, nothing drawn and
+    /// no record; the pool's own encoding round-trips.
     #[cfg(feature = "serde")]
     #[test]
-    fn test_serde_round_trip_and_older_payloads() {
+    fn test_serde_round_trip_and_older_json_payloads() {
         let mut tracker = pool_1000();
         assert!(tracker.record_bytes(300));
         assert!(!tracker.record_bytes(800));

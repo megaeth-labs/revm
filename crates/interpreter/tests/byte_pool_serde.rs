@@ -1,9 +1,11 @@
 //! Serde encoding of the byte-pool fields on the frame inputs and outcomes: the child's share,
 //! the start charge and a call's history allowance.
 //!
-//! New encodings carry the fields. Encodings made before they existed lack them and still decode:
-//! to an unlimited share, no start charge and no allowance, which is what a frame of a consumer
-//! that uses none of them carries.
+//! New encodings carry the fields. In a format that carries field names, such as the JSON these
+//! tests use, encodings made before they existed lack them and still decode: to an unlimited
+//! share, no start charge and no allowance, which is what a frame of a consumer that uses none of
+//! them carries. A format that encodes a struct by position, such as bincode, cannot read an
+//! encoding made before they existed, as with upstream's own field additions.
 #![cfg(feature = "serde")]
 
 use core::fmt::Debug;
@@ -51,7 +53,7 @@ const fn interpreter_result() -> InterpreterResult {
 }
 
 #[test]
-fn test_call_inputs_decode_with_and_without_the_pool_fields() {
+fn test_call_inputs_decode_from_json_with_and_without_the_pool_fields() {
     let inputs = |share, charge, allowance| CallInputs {
         input: CallInput::Bytes(Bytes::from_static(b"in")),
         return_memory_offset: 0..8,
@@ -78,7 +80,7 @@ fn test_call_inputs_decode_with_and_without_the_pool_fields() {
 }
 
 #[test]
-fn test_create_inputs_decode_with_and_without_the_pool_fields() {
+fn test_create_inputs_decode_from_json_with_and_without_the_pool_fields() {
     let inputs = |share, charge| {
         let mut inputs = CreateInputs::new(
             address!("0x00000000000000000000000000000000000c0de0"),
@@ -102,7 +104,7 @@ fn test_create_inputs_decode_with_and_without_the_pool_fields() {
 }
 
 #[test]
-fn test_call_outcome_decodes_with_and_without_the_start_charge() {
+fn test_call_outcome_decodes_from_json_with_and_without_the_start_charge() {
     let outcome = |charge| {
         let mut outcome = CallOutcome::new(interpreter_result(), 0..8);
         outcome.charged_start = charge;
@@ -117,7 +119,7 @@ fn test_call_outcome_decodes_with_and_without_the_start_charge() {
 }
 
 #[test]
-fn test_create_outcome_decodes_with_and_without_the_start_charge() {
+fn test_create_outcome_decodes_from_json_with_and_without_the_start_charge() {
     let outcome = |charge| {
         let mut outcome = CreateOutcome::new(interpreter_result(), None);
         outcome.charged_start = charge;

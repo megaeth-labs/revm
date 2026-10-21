@@ -646,10 +646,10 @@ mod tests {
         assert_eq!(parts(&tracker), (650, 250, 900));
     }
 
-    /// Encodings made before the withheld part existed decode with nothing withheld.
+    /// JSON encodings made before the withheld part existed decode with nothing withheld.
     #[cfg(feature = "serde")]
     #[test]
-    fn test_serde_round_trip_and_older_payloads() {
+    fn test_serde_round_trip_and_older_json_payloads() {
         let mut tracker = withheld_600();
         assert!(!tracker.record_regular_cost(401));
         let encoded = serde_json::to_value(tracker).unwrap();

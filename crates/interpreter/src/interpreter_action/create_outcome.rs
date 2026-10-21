@@ -23,14 +23,16 @@ pub struct CreateOutcome {
     /// was taken even when the price varies per account. Meaningless while
     /// `charged_create_state_gas` is `false`.
     ///
-    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_state_gas_address: Address,
     /// Copied from `CreateInputs::charged_start`: what the frame-start hook charged the caller
     /// for this creation and the creation's failure gives back, so the parent can refund it when
     /// the creation fails.
     ///
-    /// Encodings made before this field existed decode it as no charge.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as no charge.
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_start: StartCharge,
 }

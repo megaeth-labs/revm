@@ -74,6 +74,13 @@ pub use withheld::WithheldCrossing;
 /// Encoded, the tracker has a field per figure, in the order below; the failed-charge record and
 /// the byte pool's crossing, which share a word in memory, are encoded as an optional number and
 /// a `bool` in their own places.
+///
+/// A field the fork added decodes with its default from an encoding made before it existed only
+/// in a format that carries field names, such as JSON, as each field says. A format that encodes
+/// a struct by position, such as bincode, cannot read an encoding made before a field was added,
+/// as with upstream's own field additions: it reads the old fields in their places and then
+/// looks for the new ones, so a tracker persisted in such a format must not cross an upgrade of
+/// this crate that adds a field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(
     feature = "serde",
@@ -128,7 +135,8 @@ pub struct GasTracker {
     /// `code_deposit_history_gas` a price, so a chain that does not price history bytes behaves
     /// exactly as it did before this field existed.
     ///
-    /// Encodings made before this field existed decode it as zero.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
     history_gas_spent: i64,
     /// Refunded gas. Used to refund the gas to the caller at the end of execution.
     refunded: i64,
@@ -139,7 +147,8 @@ pub struct GasTracker {
     /// but never by a regular charge. Zero unless a consumer withholds gas; while it is zero, every
     /// method behaves as it did before this field existed.
     ///
-    /// Encodings made before this field existed decode it as zero.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
     withheld: u64,
     /// The record of the last failed regular charge the withheld part would have paid
     /// ([`withheld_crossing`](Self::withheld_crossing)): the regular gas left before that
@@ -157,7 +166,8 @@ pub struct GasTracker {
     /// failed ([`failed_charge_remaining`](Self::failed_charge_remaining)), if
     /// `failed_charge_recorded` is set, and zero otherwise.
     ///
-    /// Encodings made before this field existed decode it as `None`.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as `None`.
     failed_charge_remaining: u64,
     /// Whether `failed_charge_remaining` holds a record. A flag apart from the record rather than
     /// an `Option`, whose tag would take a word of its own, so it shares a word with
@@ -166,24 +176,28 @@ pub struct GasTracker {
     /// The byte pool ([`bytes_remaining`](Self::bytes_remaining)): what this frame may still
     /// draw. Unlimited unless a consumer sets a pool; nothing in this workspace draws it.
     ///
-    /// Encodings made before this field existed decode it as unlimited.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as unlimited.
     bytes_remaining: u64,
     /// The frame's net draw of the pool ([`bytes_spent`](Self::bytes_spent)), signed as
     /// `history_gas_spent` is, so a rollback can give it back and a merge can hand it on.
     ///
-    /// Encodings made before this field existed decode it as zero.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
     bytes_spent: i64,
     /// Whether a draw failed that the pool could not pay
     /// ([`bytes_crossing`](Self::bytes_crossing)). A bit, in the word `failed_charge_recorded`
     /// takes.
     ///
-    /// Encodings made before this field existed decode it as `false`.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as `false`.
     bytes_crossing: bool,
     /// History gas this frame may spend before it charges its budget
     /// ([`history_allowance`](Self::history_allowance)). Zero unless the schedule gives a value
     /// call's child one.
     ///
-    /// Encodings made before this field existed decode it as zero.
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
     history_allowance: u64,
 }
 

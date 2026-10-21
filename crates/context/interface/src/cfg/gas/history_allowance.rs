@@ -79,10 +79,10 @@ mod tests {
         assert_eq!(tracker.history_gas_spent(), 0);
     }
 
-    /// Encodings made before the allowance existed decode with none.
+    /// JSON encodings made before the allowance existed decode with none.
     #[cfg(feature = "serde")]
     #[test]
-    fn test_serde_round_trip_and_older_payloads() {
+    fn test_serde_round_trip_and_older_json_payloads() {
         let mut tracker = GasTracker::new(1_000, 1_000, 0);
         tracker.set_history_allowance(160);
         let encoded = serde_json::to_value(tracker).unwrap();
