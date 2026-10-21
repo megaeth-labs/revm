@@ -3,9 +3,14 @@
 use crate::{cfg::gas_params, cfg::GasParams, Transaction};
 use primitives::hardfork::SpecId;
 
+mod byte_pool;
 mod failed_charge;
+mod history_allowance;
+mod start_charge;
 mod withheld;
 
+pub use byte_pool::BytesCrossing;
+pub use start_charge::StartCharge;
 pub use withheld::WithheldCrossing;
 
 /// Tracker for gas during execution.
@@ -47,6 +52,12 @@ pub use withheld::WithheldCrossing;
 /// spendable part, so a consumer that caps a creating frame must not release before
 /// `return_create`, or those charges escape the cap.
 ///
+/// Beside the gas, the tracker carries three figures of the fork that are inert until a consumer
+/// uses them: the byte pool ([`bytes_remaining`](Self::bytes_remaining), unlimited by default,
+/// forwarded to a child frame and settled with its gas), the history allowance
+/// ([`history_allowance`](Self::history_allowance), zero by default) and the start charge the
+/// frame-start hook declares ([`start_charge`](Self::start_charge), zero outside the hook).
+///
 /// The net counters (`state_gas_spent`, `history_gas_spent`) are `i64`, while charges and refills
 /// take `u64` amounts and convert them with saturation. The tracker assumes that the transaction
 /// gas limit, and so any single charge or refill and the state plus history net a rollback adds
@@ -55,7 +66,7 @@ pub use withheld::WithheldCrossing;
 /// checks it. Above it, a rollback no longer restores the reservoir exactly and can burn or mint
 /// gas at the boundary. Reaching it takes a transaction gas limit above `i64::MAX`
 /// (about 9.2 × 10^18).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GasTracker {
     /// Gas Limit,
@@ -139,6 +150,50 @@ pub struct GasTracker {
     /// Encodings made before this field existed decode it as `None`.
     #[cfg_attr(feature = "serde", serde(default))]
     failed_charge_remaining: Option<u64>,
+    /// The byte pool ([`bytes_remaining`](Self::bytes_remaining)): what this frame may still
+    /// draw. Unlimited unless a consumer sets a pool; nothing in this workspace draws it.
+    ///
+    /// Encodings made before this field existed decode it as unlimited.
+    #[cfg_attr(feature = "serde", serde(default = "unlimited_bytes"))]
+    bytes_remaining: u64,
+    /// The frame's net draw of the pool ([`bytes_spent`](Self::bytes_spent)), signed as
+    /// `history_gas_spent` is, so a rollback can give it back and a merge can hand it on.
+    ///
+    /// Encodings made before this field existed decode it as zero.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bytes_spent: i64,
+    /// The record of the last draw the pool could not pay
+    /// ([`bytes_crossing`](Self::bytes_crossing)). One word, since a failed draw is never zero.
+    ///
+    /// Encodings made before this field existed decode it as `None`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    bytes_crossing: Option<BytesCrossing>,
+    /// History gas this frame may spend before it charges its budget
+    /// ([`history_allowance`](Self::history_allowance)). Zero unless the schedule gives a value
+    /// call's child one.
+    ///
+    /// Encodings made before this field existed decode it as zero.
+    #[cfg_attr(feature = "serde", serde(default))]
+    history_allowance: u64,
+    /// The start charge the frame-start hook declared and the instruction has not yet taken
+    /// ([`start_charge`](Self::start_charge)). A carrier between the hook and the instruction,
+    /// zero at every other time, so it is not part of an encoded tracker.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    start_charge: StartCharge,
+}
+
+/// The pool a tracker starts with, and an encoding that predates the pool decodes to.
+#[cfg(feature = "serde")]
+const fn unlimited_bytes() -> u64 {
+    u64::MAX
+}
+
+impl Default for GasTracker {
+    /// A tracker with no gas, as [`new`](Self::new) builds it, so the pool starts unlimited.
+    #[inline]
+    fn default() -> Self {
+        Self::new(0, 0, 0)
+    }
 }
 
 impl GasTracker {
@@ -156,6 +211,11 @@ impl GasTracker {
             withheld: 0,
             withheld_crossing: None,
             failed_charge_remaining: None,
+            bytes_remaining: u64::MAX,
+            bytes_spent: 0,
+            bytes_crossing: None,
+            history_allowance: 0,
+            start_charge: StartCharge::new(0, 0),
         }
     }
 
@@ -444,6 +504,11 @@ impl GasTracker {
     /// pays for bytes the failing frame no longer appends. The term is zero on any chain that
     /// never calls [`record_history_cost`](Self::record_history_cost).
     ///
+    /// The byte pool unwinds here too: the frame's net draw ([`bytes_spent`](Self::bytes_spent))
+    /// goes back to the pool, which then reads as the pool the frame started with, for the same
+    /// reason, and the term is zero on any chain that never calls
+    /// [`record_bytes`](Self::record_bytes).
+    ///
     /// On revert the resulting `remaining` (including the refilled spill) is
     /// returned to the parent; on halt the caller additionally zeroes `remaining`
     /// so the spilled gas is consumed while the reservoir is left untouched.
@@ -461,6 +526,7 @@ impl GasTracker {
         self.state_gas_spent = 0;
         self.state_gas_spilled = 0;
         self.history_gas_spent = 0;
+        self.rollback_bytes();
     }
 
     /// Refills the reservoir with state gas that is returned by 0→x→0 storage
