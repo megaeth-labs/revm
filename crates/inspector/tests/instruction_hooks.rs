@@ -807,6 +807,9 @@ fn test_a_creation_start_shows_whether_its_account_was_changed() {
 const DESTRUCTOR: Address = address!("0x00000000000000000000000000000000000de57e");
 /// An account with a balance of 4 that a destruction pays.
 const PAYEE: Address = address!("0x00000000000000000000000000000000000ba1ee");
+/// An account with a balance of 5 whose code self-destructs in favour of [`PARENT`], which a
+/// destruction then pays.
+const DRAINED: Address = address!("0x00000000000000000000000000000000000d4a1d");
 
 /// The account a destruction destructs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -828,6 +831,9 @@ enum Payee {
     Funded,
     /// [`BENEFICIARY`], which does not exist.
     New,
+    /// [`DRAINED`], which the transaction drained first by calling it, so a destruction that pays
+    /// it 5 puts it back as it was loaded.
+    Drained,
     /// The destructed account itself.
     Itself,
 }
@@ -959,6 +965,7 @@ fn destructions(
     let pays = match payee {
         Payee::Untouched | Payee::Funded => Some(PAYEE),
         Payee::New => Some(BENEFICIARY),
+        Payee::Drained => Some(DRAINED),
         Payee::Itself => None,
     };
     let code = destructor(pays);
@@ -973,6 +980,9 @@ fn destructions(
     if payee == Payee::Funded {
         parent.extend(call(CALL, PAYEE, 0, 1));
     }
+    if payee == Payee::Drained {
+        parent.extend(call(CALL, DRAINED, u32::MAX, 0));
+    }
     if source == Source::Funded {
         parent.extend(call_source(2));
     }
@@ -983,7 +993,10 @@ fn destructions(
     }
     parent.push(STOP);
 
-    let mut run = Run::new(spec, parent).with(PAYEE, Vec::new(), 4);
+    let mut run =
+        Run::new(spec, parent)
+            .with(PAYEE, Vec::new(), 4)
+            .with(DRAINED, selfdestruct(PARENT), 5);
     run.accounts[0].2 = 100;
     if source != Source::Created {
         run = run.with(DESTRUCTOR, code, u64::from(held));
@@ -1033,11 +1046,18 @@ fn test_a_destruction_hands_the_hook_what_rebuilds_both_accounts() {
     for spec in [SpecId::SHANGHAI, SpecId::PRAGUE, SpecId::AMSTERDAM] {
         for source in [Source::Untouched, Source::Funded, Source::Created] {
             for held in [0, 5] {
-                for payee in [Payee::Untouched, Payee::Funded, Payee::New, Payee::Itself] {
+                for payee in [
+                    Payee::Untouched,
+                    Payee::Funded,
+                    Payee::New,
+                    Payee::Drained,
+                    Payee::Itself,
+                ] {
                     for twice in [false, true] {
                         let case = format!("{spec:?} {source:?} {held} {payee:?} {twice}");
                         let destructs = destructions(spec, source, held, payee, twice);
-                        assert_eq!(destructs.len(), 1 + twice as usize, "{case}");
+                        let drains = (payee == Payee::Drained) as usize;
+                        assert_eq!(destructs.len(), drains + 1 + twice as usize, "{case}");
                         for (n, destruct) in destructs.iter().enumerate() {
                             let rebuilt = destruct.rebuilt();
                             let held_before = facts(&destruct.before[0]).map(|(info, _)| info.1);
@@ -1073,7 +1093,9 @@ fn test_a_destruction_hands_the_hook_what_rebuilds_both_accounts() {
             }
         }
     }
-    assert_eq!(seen, 3 * 3 * 2 * 4 * 3);
+    // Per spec, source and balance: three destructions for each of five beneficiaries, and the
+    // drained one's own two.
+    assert_eq!(seen, 3 * 3 * 2 * (5 * 3 + 2));
 }
 
 /// Worked examples of how a destruction moves the source's and a beneficiary's records, from the
@@ -1081,11 +1103,11 @@ fn test_a_destruction_hands_the_hook_what_rebuilds_both_accounts() {
 /// transaction loaded: each row is `(spec, source, held, payee, twice)` and the moves of each
 /// destruction. The first two rows leave the source the same after the write (loaded with 5, now
 /// 0) and report the same result, but one changed it and one did not: only the balance before the
-/// write tells them apart.
+/// write tells them apart. A beneficiary the write puts back as loaded takes its record back.
 #[test]
 fn test_a_destruction_moves_records_as_its_accounts_changed() {
     type Row = (SpecId, Source, u8, Payee, bool, &'static [(i8, i8)]);
-    let rows: [Row; 11] = [
+    let rows: [Row; 13] = [
         (
             SpecId::PRAGUE,
             Source::Untouched,
@@ -1173,6 +1195,24 @@ fn test_a_destruction_moves_records_as_its_accounts_changed() {
             Payee::New,
             true,
             &[(0, 1), (0, 0)],
+        ),
+        // The drained account's own destruction first, then one that puts it back as loaded, or
+        // pays it nothing and leaves it changed.
+        (
+            SpecId::PRAGUE,
+            Source::Untouched,
+            5,
+            Payee::Drained,
+            false,
+            &[(1, 1), (1, -1)],
+        ),
+        (
+            SpecId::PRAGUE,
+            Source::Untouched,
+            0,
+            Payee::Drained,
+            false,
+            &[(1, 1), (0, 0)],
         ),
     ];
     let mut afters = Vec::new();
