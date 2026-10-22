@@ -829,15 +829,21 @@ impl GasParams {
         percent_of(remaining, self.get(GasId::pool_forward_percent(pool)))
     }
 
-    /// The share of a caller's EIP-8037 `reservoir` a child frame receives when it starts:
-    /// [`reservoir_forward_percent`](GasId::reservoir_forward_percent) per cent of it, rounded
-    /// down. The caller keeps the rest while the child runs.
+    /// The share of a caller's EIP-8037 `reservoir` a child frame receives when it starts: all
+    /// but the caller's part, which is `100 - `[`reservoir_forward_percent`](GasId::reservoir_forward_percent)
+    /// per cent of the reservoir, rounded down, and which the caller keeps while the child runs.
     ///
-    /// A hundred or more, which every schedule here sets, forwards the whole reservoir, as
-    /// EIP-8037 does.
+    /// The child's share is taken as [`call_stipend_reduction`](Self::call_stipend_reduction) takes
+    /// regular gas, by subtracting the caller's part: at 98 it is `reservoir - reservoir * 2 / 100`,
+    /// so a reservoir of 99 forwards 98. A hundred or more, which every schedule here sets,
+    /// forwards the whole reservoir, as EIP-8037 does.
     #[inline]
     pub fn reservoir_forward_share(&self, reservoir: u64) -> u64 {
-        percent_of(reservoir, self.get(GasId::reservoir_forward_percent()))
+        let percent = self.get(GasId::reservoir_forward_percent());
+        if percent >= 100 {
+            return reservoir;
+        }
+        reservoir - percent_of(reservoir, 100 - percent)
     }
 
     /// History gas a value call's child may spend before it charges its budget
@@ -1686,9 +1692,10 @@ impl GasId {
     }
 
     /// The share of a caller's EIP-8037 reservoir a child frame receives when it starts, in per
-    /// cent of the reservoir, rounded down ([`GasParams::reservoir_forward_share`]). A hundred,
-    /// the whole reservoir as EIP-8037 forwards it, on every schedule defined here; a chain that
-    /// keeps part of the reservoir for the caller while the child runs lowers it.
+    /// cent of the reservoir: the caller keeps the rest, rounded down, and the child receives all
+    /// but that ([`GasParams::reservoir_forward_share`]). A hundred, the whole reservoir as
+    /// EIP-8037 forwards it, on every schedule defined here; a chain that keeps part of the
+    /// reservoir for the caller while the child runs lowers it.
     ///
     /// A fork id, allocated from the top of the table below
     /// [`code_deposit_history_gas`](Self::code_deposit_history_gas).
@@ -1867,16 +1874,34 @@ mod tests {
                 PoolId::ALL.map(|pool| params.pool_forward_share(pool, amount)),
             )
         };
+        // A pool's share is its percentage rounded down; the reservoir's is what is left once the
+        // caller's 2% is taken, rounded down, as regular gas's forward takes its part: 98% of 99
+        // is 97.02, so a pool forwards 97 and the reservoir 99 - 1 = 98.
         assert_eq!(share(0), (0, [0, 0, 0]));
-        assert_eq!(share(1), (0, [0, 0, 0]));
+        assert_eq!(share(1), (1, [0, 0, 0]));
+        assert_eq!(share(99), (98, [97, 49, 0]));
         assert_eq!(share(100), (98, [98, 50, 0]));
-        assert_eq!(share(149), (146, [146, 74, 0]), "rounded down");
+        assert_eq!(share(149), (147, [146, 74, 0]));
         assert_eq!(share(1_000), (980, [980, 500, 0]));
         let max_98 = (u64::MAX as u128 * 98 / 100) as u64;
+        let max_less_2 = u64::MAX - (u64::MAX as u128 * 2 / 100) as u64;
         assert_eq!(
             share(u64::MAX),
-            (max_98, [max_98, u64::MAX / 2, 0]),
+            (max_less_2, [max_98, u64::MAX / 2, 0]),
             "no overflow"
+        );
+        for reservoir in (0..10_000).chain([u64::MAX - 1, u64::MAX]) {
+            assert_eq!(
+                params.reservoir_forward_share(reservoir),
+                (reservoir as u128 - reservoir as u128 * 2 / 100) as u64,
+                "the reservoir's share is `reservoir - reservoir * 2 / 100`"
+            );
+        }
+        params.override_gas([(GasId::reservoir_forward_percent(), 0)]);
+        assert_eq!(
+            params.reservoir_forward_share(1_000),
+            0,
+            "the caller keeps all"
         );
 
         params.override_gas([(GasId::reservoir_forward_percent(), 250)]);
@@ -1909,27 +1934,28 @@ mod tests {
         }
     }
 
-    /// REX's forward of regular gas to a child, `remaining - remaining * 2 / 100` rounded down, is
-    /// upstream's `call_stipend_reduction` with the quotient 50 in place of EIP-150's 64: the two
-    /// agree on every amount, so a chain that forwards 98/100 of its regular gas needs no fork
-    /// change, only the schedule entry.
+    /// A forward of 98/100 of the regular gas to a child, `remaining - remaining * 2 / 100` rounded
+    /// down, is upstream's `call_stipend_reduction` with the quotient 50 in place of EIP-150's 64:
+    /// the two agree on every amount, so a chain that forwards 98/100 of its regular gas needs no
+    /// fork change, only the schedule entry.
     #[test]
     fn test_a_call_stipend_reduction_of_50_forwards_98_per_cent() {
         let mut params = GasParams::new_spec(SpecId::OSAKA);
         params.override_gas([(GasId::call_stipend_reduction(), 50)]);
-        let rex = |remaining: u64| (remaining as u128 - remaining as u128 * 2 / 100) as u64;
+        let ninety_eight =
+            |remaining: u64| (remaining as u128 - remaining as u128 * 2 / 100) as u64;
         let amounts = (0..10_000)
             .chain([1_000_000, 16_777_216, 30_000_000, 1 << 40])
             .chain([u64::MAX - 49, u64::MAX - 1, u64::MAX]);
         for remaining in amounts {
             assert_eq!(
                 params.call_stipend_reduction(remaining),
-                rex(remaining),
+                ninety_eight(remaining),
                 "{remaining}"
             );
         }
-        // Worked examples: 98% of 1,000 is 980; of 1,049 is 1,028.02, kept as 1,029 by REX's
-        // rule, which takes 2% rounded down (20) away.
+        // Worked examples: 98% of 1,000 is 980; of 1,049 is 1,028.02, and the rule keeps 1,029: it
+        // takes 2% rounded down (20) away.
         assert_eq!(params.call_stipend_reduction(1_000), 980);
         assert_eq!(params.call_stipend_reduction(1_049), 1_029);
         assert_eq!(params.call_stipend_reduction(99), 98);

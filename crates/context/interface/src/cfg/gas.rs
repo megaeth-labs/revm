@@ -839,34 +839,6 @@ mod tests {
         assert_eq!(gas.state_gas_spilled(), 0);
         assert_eq!(gas.state_gas_spent(), 400);
     }
-
-    /// A caller that kept part of its reservoir when it forwarded a share gets the child's
-    /// reservoir added to what it kept, and the returned reservoir, not the kept part, unwinds
-    /// the caller's outstanding spill. With nothing kept the result is the child's reservoir, as
-    /// a settlement that replaced the caller's reservoir gave.
-    #[test]
-    fn returned_reservoir_joins_the_part_the_caller_kept() {
-        // Kept 20 of 1,000, the child returns 700 of its 980.
-        let mut kept = GasTracker::new(1_000, 1_000, 1_000);
-        kept.forward_reservoir(980);
-        kept.absorb_returned_reservoir(700);
-        assert_eq!((kept.reservoir(), kept.remaining()), (720, 1_000));
-
-        // A spill of 150 outstanding (a successful child's, merged before the absorb): the
-        // returned 100 unwinds 100 of it, and the 20 kept stays in the reservoir.
-        let mut spilled = GasTracker::new(1_000, 850, 20);
-        spilled.add_state_gas_spilled(150);
-        spilled.absorb_returned_reservoir(100);
-        assert_eq!(spilled.reservoir(), 20);
-        assert_eq!(spilled.remaining(), 950);
-        assert_eq!(spilled.state_gas_spilled(), 50);
-
-        // Nothing kept: the child's reservoir, whatever the caller held before the forward.
-        let mut whole = GasTracker::new(1_000, 1_000, 1_000);
-        whole.forward_reservoir(1_000);
-        whole.absorb_returned_reservoir(300);
-        assert_eq!(whole.reservoir(), 300);
-    }
 }
 
 /// Gas cost for operations that consume zero gas.

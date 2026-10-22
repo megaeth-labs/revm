@@ -95,7 +95,7 @@ const fn charge(
 /// its net state gas.
 type Returned = (InstructionResult, u64, i64);
 
-fn returned(result: &FrameResult) -> Returned {
+const fn returned(result: &FrameResult) -> Returned {
     let gas = result.gas();
     (
         result.instruction_result(),
@@ -338,9 +338,9 @@ fn at_depth() -> Run {
     Run::new(ends(parent))
 }
 
-/// 98% of `reservoir`, rounded down.
+/// The share at 98: `reservoir` less the caller's 2%, rounded down.
 const fn share(reservoir: u64) -> u64 {
-    reservoir * PERCENT / 100
+    reservoir - reservoir * (100 - PERCENT) / 100
 }
 
 /// Every start forwards 98% of its caller's reservoir, rounded down, and the caller keeps the
@@ -359,9 +359,10 @@ fn test_the_reservoir_is_forwarded_by_its_share_and_settled_at_depth() {
     // OK returns 978,020, so PARENT holds 19,980 + 978,020 = 998,000 for each later start.
     let before_each = after_parent - CHARGED;
     assert_eq!(share(before_each), 978_040);
-    // NESTER charged 1,000 of its 978,040 before calling OK: 98% of 977,040 is 957,499.2.
+    // NESTER charged 1,000 of its 978,040 before calling OK: it keeps 2% of 977,040 rounded
+    // down, 19,540, where 98% rounded down would have forwarded 957,499.
     let nester_after = share(before_each) - CHARGED;
-    assert_eq!(share(nester_after), 957_499);
+    assert_eq!(share(nester_after), 957_500);
     assert_eq!(
         handler.starts,
         [
@@ -392,13 +393,13 @@ fn test_the_reservoir_is_forwarded_by_its_share_and_settled_at_depth() {
                 share(before_each) - CHARGED,
                 charged
             ),
-            // OK under NESTER: 957,499 less its charge.
+            // OK under NESTER: 957,500 less its charge.
             (
                 InstructionResult::Stop,
                 share(nester_after) - CHARGED,
                 charged
             ),
-            // NESTER kept 19,541 and got back 956,499: 976,040, two charges net.
+            // NESTER kept 19,540 and got back 956,500: 976,040, two charges net.
             (InstructionResult::Revert, 976_040, 2 * charged),
             (
                 InstructionResult::Stop,

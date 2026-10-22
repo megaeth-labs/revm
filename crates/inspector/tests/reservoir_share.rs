@@ -34,8 +34,8 @@ const RESERVOIR: u64 = 1_000_000;
 const SLOT: u64 = 97_920;
 /// What [`PARENT`] holds when it calls [`OK`].
 const BEFORE_THE_CALL: u64 = RESERVOIR - SLOT;
-/// 98% of it, rounded down: 884,038.4.
-const SHARE: u64 = 884_038;
+/// Its share at 98: all but the caller's 2%, rounded down (18,041.6 → 18,041).
+const SHARE: u64 = 884_039;
 
 /// Writes a new slot, calls [`OK`] and stops.
 const PARENT: Address = address!("0x00000000000000000000000000000000000c0de0");
