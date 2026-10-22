@@ -13,7 +13,8 @@
 //! as it starts, and as it returns before its caller settles it.
 
 use bytecode::opcode::{
-    CALL, DELEGATECALL, INVALID, POP, PUSH0, PUSH1, PUSH20, PUSH3, REVERT, SSTORE, STOP,
+    CALL, CREATE, DELEGATECALL, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH2, PUSH20, PUSH3, REVERT,
+    SSTORE, STOP,
 };
 use context::{
     result::{EVMError, ExecutionResult},
@@ -126,6 +127,10 @@ struct ShareHandler {
     returned: Vec<Returned>,
     /// The transaction's reservoir and net state gas after the first frame settled into it.
     settled: Option<(u64, i64)>,
+    /// The reservoir of the last gas `tx_gas` built.
+    tx_reservoir: core::cell::Cell<Option<u64>>,
+    /// The transaction's reservoir once the first frame's input was built.
+    after_first_input: Option<u64>,
 }
 
 impl ShareHandler {
@@ -137,6 +142,8 @@ impl ShareHandler {
             starts: Vec::new(),
             returned: Vec::new(),
             settled: None,
+            tx_reservoir: core::cell::Cell::new(None),
+            after_first_input: None,
         }
     }
 }
@@ -152,7 +159,18 @@ impl Handler for ShareHandler {
             gas.set_remaining(gas.remaining() - reservoir);
             gas.set_reservoir(reservoir);
         }
+        self.tx_reservoir.set(Some(gas.reservoir()));
         gas
+    }
+
+    fn first_frame_input(
+        &mut self,
+        evm: &mut TestEvm,
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameInit>, TestError> {
+        let input = self.mainnet.first_frame_input(evm, gas)?;
+        self.after_first_input = Some(gas.reservoir());
+        Ok(input)
     }
 
     /// The default loop, recording each frame's reservoir as it starts and its figures as it
@@ -234,6 +252,12 @@ struct Run {
     parent_balance: u64,
     /// `reservoir_forward_percent` in the schedule, if not the default.
     percent: Option<u64>,
+    /// The transaction, if not a call to [`PARENT`] with [`GAS_LIMIT`].
+    tx: Option<TxEnv>,
+    /// The regular cap, if not [`RESERVOIR`] below [`GAS_LIMIT`].
+    cap: Option<u64>,
+    /// An account with code at [`PARENT`]'s first created address, where a `CREATE` collides.
+    occupied: bool,
 }
 
 impl Run {
@@ -242,11 +266,33 @@ impl Run {
             parent,
             parent_balance: 10,
             percent: None,
+            tx: None,
+            cap: None,
+            occupied: false,
         }
     }
 
     const fn percent(mut self, percent: u64) -> Self {
         self.percent = Some(percent);
+        self
+    }
+
+    /// A transaction that creates a contract from `initcode`.
+    fn creation(initcode: Vec<u8>) -> Self {
+        let mut run = Self::new(Vec::new());
+        run.tx = Some(
+            TxEnv::builder_for_bench()
+                .kind(TxKind::Create)
+                .data(Bytes::from(initcode))
+                .gas_price(0)
+                .gas_limit(GAS_LIMIT)
+                .build_fill(),
+        );
+        run
+    }
+
+    const fn occupied(mut self) -> Self {
+        self.occupied = true;
         self
     }
 
@@ -288,16 +334,25 @@ impl Run {
                 .with_code(Bytecode::new_raw(Bytes::from(code)));
             db.insert_account_info(address, info);
         }
+        if self.occupied {
+            db.insert_account_info(
+                PARENT.create(1),
+                AccountInfo::default()
+                    .with_nonce(1)
+                    .with_code(Bytecode::new_raw(Bytes::from_static(&[STOP]))),
+            );
+        }
         db
     }
 
     fn evm(&self) -> TestEvm {
         let percent = self.percent;
+        let cap = self.cap.unwrap_or(GAS_LIMIT - RESERVOIR);
         let ctx = Context::mainnet()
             .with_db(self.db())
             .modify_cfg_chained(|cfg| {
                 cfg.set_spec_and_mainnet_gas_params(SPEC);
-                cfg.tx_gas_limit_cap = Some(GAS_LIMIT - RESERVOIR);
+                cfg.tx_gas_limit_cap = Some(cap);
                 if let Some(percent) = percent {
                     cfg.gas_params
                         .override_gas([(GasId::reservoir_forward_percent(), percent)]);
@@ -306,13 +361,13 @@ impl Run {
         let mut instructions = EthInstructions::new_mainnet_with_spec(SPEC);
         instructions.insert_instruction(CHARGE, Instruction::new(charge), 0);
         let mut evm: TestEvm = Evm::new(ctx, instructions, EthPrecompiles::new(SPEC));
-        evm.ctx.set_tx(
+        evm.ctx.set_tx(self.tx.clone().unwrap_or_else(|| {
             TxEnv::builder_for_bench()
                 .kind(TxKind::Call(PARENT))
                 .gas_price(0)
                 .gas_limit(GAS_LIMIT)
-                .build_fill(),
-        );
+                .build_fill()
+        }));
         evm
     }
 
@@ -669,4 +724,121 @@ fn test_the_schedule_forwards_the_whole_reservoir() {
             .get(GasId::reservoir_forward_percent()),
         100
     );
+}
+
+/// `CREATE` of the two bytes `CHARGE STOP`, endowed with nothing, dropping the address.
+fn create_charging() -> Vec<u8> {
+    vec![
+        PUSH2, CHARGE, STOP, PUSH0, MSTORE, PUSH1, 2, PUSH1, 30, PUSH0, CREATE, POP,
+    ]
+}
+
+/// A creation's frame gets its share like a call's, after the creation instruction's own state
+/// charge for the account it creates, and settles it back; a creation that lands on an occupied
+/// address fails before any frame and hands the share back whole.
+#[test]
+fn test_a_creation_forwards_its_share_and_a_collision_hands_it_back() {
+    let account = Run::new(Vec::new())
+        .evm()
+        .ctx
+        .cfg()
+        .gas_params()
+        .get(GasId::create_state_gas());
+    let mut parent = vec![CHARGE];
+    parent.extend(create_charging());
+    let after_parent = RESERVOIR - CHARGED;
+
+    let (result, handler) = Run::new(ends(parent.clone())).percent(PERCENT).run();
+    assert!(result.is_success(), "{result:?}");
+    let before = after_parent - account;
+    assert_eq!(handler.starts, [RESERVOIR, share(before)]);
+    assert_eq!(
+        handler.returned[0],
+        (
+            InstructionResult::Return,
+            share(before) - CHARGED,
+            CHARGED as i64
+        ),
+        "the creation's own charge is on its frame"
+    );
+    assert_eq!(
+        handler.settled,
+        Some((before - CHARGED, (2 * CHARGED + account) as i64))
+    );
+
+    let (result, handler) = Run::new(ends(parent)).percent(PERCENT).occupied().run();
+    assert!(result.is_success(), "{result:?}");
+    assert_eq!(
+        handler.starts,
+        [RESERVOIR, share(after_parent)],
+        "no charge for an occupied address"
+    );
+    assert_eq!(
+        handler.returned[0],
+        (InstructionResult::CreateCollision, share(after_parent), 0)
+    );
+    assert_eq!(handler.settled, Some((after_parent, CHARGED as i64)));
+}
+
+/// A creation transaction's frame takes the whole reservoir the transaction has left, whatever
+/// the schedule, and settles back into it.
+#[test]
+fn test_a_creation_transaction_takes_the_whole_reservoir() {
+    for percent in [None, Some(PERCENT)] {
+        let mut run = Run::creation(vec![CHARGE, STOP]);
+        run.percent = percent;
+        let (result, handler) = run.run();
+
+        assert!(result.is_success(), "{percent:?}: {result:?}");
+        assert_eq!(
+            handler.after_first_input,
+            Some(0),
+            "{percent:?}: all of it taken"
+        );
+        let first = handler.starts[0];
+        assert!(first > 0, "{percent:?}");
+        assert_eq!(
+            handler.settled.map(|(reservoir, _)| reservoir),
+            Some(first - CHARGED)
+        );
+    }
+}
+
+/// A transaction whose EIP-2780 runtime phase runs out of gas skips execution and is settled
+/// from a stand-in for its first frame: all regular gas consumed and the reservoir returned once.
+#[test]
+fn test_a_runtime_out_of_gas_returns_the_reservoir_once() {
+    const LIMIT: u64 = 130_000;
+    const CAP: u64 = 30_000;
+    for percent in [None, Some(PERCENT)] {
+        // A value transfer to an account that does not exist, whose new-account state gas the
+        // reservoir and the regular gas left together cannot pay.
+        let mut run = Run::new(Vec::new());
+        run.percent = percent;
+        run.cap = Some(CAP);
+        run.tx = Some(
+            TxEnv::builder_for_bench()
+                .kind(TxKind::Call(address!(
+                    "0x00000000000000000000000000000000000e3970"
+                )))
+                .value(U256::from(1))
+                .gas_price(0)
+                .gas_limit(LIMIT)
+                .build_fill(),
+        );
+        let (result, handler) = run.run();
+
+        assert!(
+            matches!(result, ExecutionResult::Halt { .. }),
+            "{percent:?}: {result:?}"
+        );
+        let reservoir = handler.tx_reservoir.get().expect("tx_gas ran");
+        assert!(reservoir > 0, "{percent:?}");
+        assert_eq!(handler.settled, Some((reservoir, 0)), "{percent:?}");
+        assert_eq!(
+            result.gas().total_gas_spent(),
+            LIMIT - reservoir,
+            "{percent:?}: every regular gas spent, the reservoir returned"
+        );
+    }
 }
