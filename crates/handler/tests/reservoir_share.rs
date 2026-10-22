@@ -138,6 +138,8 @@ struct ShareHandler {
     /// A reservoir to give the transaction's gas, as a consumer that splits a system call's gas
     /// does; mainnet gives a system call none.
     system_reservoir: Option<u64>,
+    /// Pools to give the transaction's gas, as a consumer that limits its figures does.
+    tx_pools: Option<PoolAmounts>,
     starts: Vec<u64>,
     returned: Vec<Returned>,
     /// The transaction's reservoir and net state gas after the first frame settled into it.
@@ -158,6 +160,7 @@ impl ShareHandler {
             mainnet: Mainnet::default(),
             too_deep: false,
             system_reservoir: None,
+            tx_pools: None,
             starts: Vec::new(),
             returned: Vec::new(),
             settled: None,
@@ -181,6 +184,9 @@ impl Handler for ShareHandler {
             gas.set_reservoir(reservoir);
             // And pools, as a consumer that limits a system call's figures sets them.
             gas.set_pools_remaining(SYSTEM_POOLS);
+        }
+        if let Some(pools) = self.tx_pools {
+            gas.set_pools_remaining(pools);
         }
         self.tx_reservoir.set(Some(gas.reservoir()));
         gas
@@ -867,6 +873,47 @@ fn test_a_runtime_out_of_gas_returns_the_reservoir_once() {
         let reservoir = handler.tx_reservoir.get().expect("tx_gas ran");
         assert!(reservoir > 0, "{percent:?}");
         assert_eq!(handler.settled, Some((reservoir, 0)), "{percent:?}");
+        assert_eq!(
+            result.gas().total_gas_spent(),
+            LIMIT - reservoir,
+            "{percent:?}: every regular gas spent, the reservoir returned"
+        );
+    }
+}
+
+/// The same for a creation transaction, whose runtime phase charges the account it would create,
+/// on a transaction's gas a consumer gave finite pools: the stand-in takes the whole reservoir
+/// and every pool, and both settle back once.
+#[test]
+fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_and_the_pools_once() {
+    const LIMIT: u64 = 160_000;
+    const CAP: u64 = 60_000;
+    for percent in [None, Some(PERCENT)] {
+        // A creation whose account's state gas the reservoir and the regular gas left together
+        // cannot pay.
+        let mut run = Run::new(Vec::new());
+        run.percent = percent;
+        run.cap = Some(CAP);
+        run.tx = Some(
+            TxEnv::builder_for_bench()
+                .kind(TxKind::Create)
+                .gas_price(0)
+                .gas_limit(LIMIT)
+                .build_fill(),
+        );
+        let mut handler = ShareHandler::new();
+        handler.tx_pools = Some(SYSTEM_POOLS);
+
+        let (result, handler) = run.with(handler);
+
+        assert!(
+            matches!(result, ExecutionResult::Halt { .. }),
+            "{percent:?}: {result:?}"
+        );
+        let reservoir = handler.tx_reservoir.get().expect("tx_gas ran");
+        assert!(reservoir > 0, "{percent:?}");
+        assert_eq!(handler.settled, Some((reservoir, 0)), "{percent:?}");
+        assert_eq!(handler.settled_pools, Some(SYSTEM_POOLS), "{percent:?}");
         assert_eq!(
             result.gas().total_gas_spent(),
             LIMIT - reservoir,

@@ -7,6 +7,10 @@
 //! the caller is left with none, as upstream's settlement, which put the answer's reservoir in
 //! place of the caller's, leaves it; with 98% forwarded, the caller is left with the 2% it kept.
 //! An answer that carries the input's reservoir gives the caller back what it forwarded.
+//!
+//! A creation's answer settles through the same arm as a call's: the caller also paid the
+//! creation's upfront state charge before the forward, which an answer that copies the input's
+//! charge gives back and one built with `CreateOutcome::new` does not.
 
 use context::{context_interface::cfg::GasId, Context, Evm, TxEnv};
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
@@ -14,12 +18,13 @@ use handler::{
     instructions::EthInstructions, EthFrame, EthPrecompiles, MainContext, MainnetContext,
 };
 use interpreter::{
-    interpreter::EthInterpreter, CallInputs, CallOutcome, Gas, InstructionResult, InterpreterResult,
+    interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Gas,
+    InstructionResult, InterpreterResult,
 };
 use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
 use revm_inspector::{InspectEvm, Inspector};
 use state::{
-    bytecode::opcode::{CALL, POP, PUSH0, PUSH1, PUSH20, PUSH3, SSTORE, STOP},
+    bytecode::opcode::{CALL, CREATE, POP, PUSH0, PUSH1, PUSH20, PUSH3, SSTORE, STOP},
     AccountInfo, Bytecode,
 };
 
@@ -37,7 +42,15 @@ const BEFORE_THE_CALL: u64 = RESERVOIR - SLOT;
 /// Its share at 98: all but the caller's 2%, rounded down (18,041.6 → 18,041).
 const SHARE: u64 = 884_039;
 
-/// Writes a new slot, calls [`OK`] and stops.
+/// The state charge a creation's start pays for its account on Amsterdam's schedule, before the
+/// forward.
+const ACCOUNT: u64 = 183_600;
+/// What [`PARENT`] holds when it creates, once the creation's charge is paid.
+const BEFORE_THE_CREATION: u64 = BEFORE_THE_CALL - ACCOUNT;
+/// Its share at 98: all but the caller's 2%, rounded down (14,369.6 → 14,369).
+const CREATION_SHARE: u64 = 704_111;
+
+/// Writes a new slot, calls [`OK`] (or creates a contract with empty init code) and stops.
 const PARENT: Address = address!("0x00000000000000000000000000000000000c0de0");
 /// Stops, when it runs.
 const OK: Address = address!("0x0000000000000000000000000000000000000c00");
@@ -53,8 +66,8 @@ enum Answer {
     WithTheShares,
 }
 
-/// Answers the call to [`OK`] as told, and records the reservoir the call was given and
-/// [`PARENT`]'s reservoir as its frame returned, before the transaction settled it.
+/// Answers the call to [`OK`], or the creation, as told, and records the reservoir the start was
+/// given and [`PARENT`]'s reservoir as its frame returned, before the transaction settled it.
 struct Answering {
     answer: Answer,
     given: Option<u64>,
@@ -83,6 +96,30 @@ impl Inspector<Ctx, EthInterpreter> for Answering {
         ))
     }
 
+    fn create(&mut self, _: &mut Ctx, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        self.given = Some(inputs.reservoir());
+        let gas = match self.answer {
+            Answer::Runs => return None,
+            Answer::AsBuilt => Gas::new(inputs.gas_limit()),
+            Answer::WithTheShares => {
+                let mut gas =
+                    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit(), inputs.reservoir());
+                gas.tracker_mut().set_pools_remaining(inputs.pool_shares());
+                gas
+            }
+        };
+        let mut outcome = CreateOutcome::new(
+            InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
+            None,
+        );
+        if let Answer::WithTheShares = self.answer {
+            outcome.charged_create_state_gas = inputs.charged_create_state_gas();
+            outcome.charged_state_gas_address = inputs.charged_state_gas_address();
+            outcome.charged_start = inputs.charged_start();
+        }
+        Some(outcome)
+    }
+
     fn call_end(&mut self, _: &mut Ctx, inputs: &CallInputs, outcome: &mut CallOutcome) {
         if inputs.target_address == PARENT {
             self.parent_returned = Some(outcome.result.gas.reservoir());
@@ -91,9 +128,9 @@ impl Inspector<Ctx, EthInterpreter> for Answering {
 }
 
 /// [`PARENT`]'s reservoir as its frame returned, and the reservoir the call to [`OK`] was given,
-/// with `percent` per cent of a caller's reservoir forwarded: the schedule's
-/// `reservoir_kept_percent` is the rest.
-fn run(answer: Answer, percent: Option<u64>) -> (u64, u64) {
+/// or the creation if [`PARENT`] `creates`, with `percent` per cent of a caller's reservoir
+/// forwarded: the schedule's `reservoir_kept_percent` is the rest.
+fn run(answer: Answer, percent: Option<u64>, creates: bool) -> (u64, u64) {
     let mut db = Db::default();
     db.insert_account_info(
         BENCH_CALLER,
@@ -102,8 +139,14 @@ fn run(answer: Answer, percent: Option<u64>) -> (u64, u64) {
     let mut parent = vec![
         PUSH1, 1, PUSH0, SSTORE, PUSH0, PUSH0, PUSH0, PUSH0, PUSH0, PUSH20,
     ];
-    parent.extend_from_slice(OK.as_slice());
-    parent.extend_from_slice(&[PUSH3, 0x01, 0x86, 0xa0, CALL, POP, STOP]);
+    if creates {
+        // `CREATE(0, 0, 0)` in place of the call's last five pushes and the call.
+        parent.truncate(4);
+        parent.extend_from_slice(&[PUSH0, PUSH0, PUSH0, CREATE, POP, STOP]);
+    } else {
+        parent.extend_from_slice(OK.as_slice());
+        parent.extend_from_slice(&[PUSH3, 0x01, 0x86, 0xa0, CALL, POP, STOP]);
+    }
     for (address, code) in [(PARENT, parent), (OK, vec![STOP])] {
         db.insert_account_info(
             address,
@@ -159,13 +202,36 @@ fn test_an_answer_the_inspector_builds_settles_its_reservoir_as_built() {
         (Answer::WithTheShares, BEFORE_THE_CALL, BEFORE_THE_CALL),
     ] {
         assert_eq!(
-            run(answer, None),
+            run(answer, None, false),
             (whole, BEFORE_THE_CALL),
             "{answer:?}, the whole reservoir forwarded"
         );
         assert_eq!(
-            run(answer, Some(98)),
+            run(answer, Some(98), false),
             (kept_98, SHARE),
+            "{answer:?}, 98% forwarded"
+        );
+    }
+}
+
+/// A creation's answer settles as a call's: as built, the caller keeps its kept part and the
+/// creation's charge; with the shares and the input's charges, the caller gets back what it held
+/// before the creation's start.
+#[test]
+fn test_an_answer_the_inspector_builds_for_a_creation_settles_its_reservoir_as_built() {
+    for (answer, whole, kept_98) in [
+        (Answer::Runs, BEFORE_THE_CREATION, BEFORE_THE_CREATION),
+        (Answer::AsBuilt, 0, BEFORE_THE_CREATION - CREATION_SHARE),
+        (Answer::WithTheShares, BEFORE_THE_CALL, BEFORE_THE_CALL),
+    ] {
+        assert_eq!(
+            run(answer, None, true),
+            (whole, BEFORE_THE_CREATION),
+            "{answer:?}, the whole reservoir forwarded"
+        );
+        assert_eq!(
+            run(answer, Some(98), true),
+            (kept_98, CREATION_SHARE),
             "{answer:?}, 98% forwarded"
         );
     }
