@@ -27,7 +27,7 @@ use context_interface::{
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use interpreter::{
     interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, GasTracker,
-    Instruction, InstructionContext, InstructionExecResult, InstructionResult,
+    Instruction, InstructionContext, InstructionExecResult, InstructionResult, PoolAmounts, PoolId,
 };
 use primitives::{
     address, constants::CALL_STACK_LIMIT, hardfork::SpecId, Address, Bytes, TxKind, U256,
@@ -105,6 +105,20 @@ const fn returned(result: &FrameResult) -> Returned {
     )
 }
 
+fn pool_shares_of(input: &FrameInput) -> PoolAmounts {
+    match input {
+        FrameInput::Call(inputs) => inputs.pool_shares,
+        FrameInput::Create(inputs) => inputs.pool_shares(),
+        FrameInput::Empty => unreachable!(),
+    }
+}
+
+/// The pools a system call's gas gets in [`ShareHandler::tx_gas`].
+const SYSTEM_POOLS: PoolAmounts = PoolAmounts::ZERO
+    .with(PoolId::new(0), 1_000)
+    .with(PoolId::new(1), 500)
+    .with(PoolId::new(2), 100);
+
 fn reservoir_of(input: &FrameInput) -> u64 {
     match input {
         FrameInput::Call(inputs) => inputs.reservoir,
@@ -131,6 +145,10 @@ struct ShareHandler {
     tx_reservoir: core::cell::Cell<Option<u64>>,
     /// The transaction's reservoir once the first frame's input was built.
     after_first_input: Option<u64>,
+    /// Every frame's pool shares as it started.
+    pool_starts: Vec<PoolAmounts>,
+    /// The transaction's pools after the first frame settled into them.
+    settled_pools: Option<PoolAmounts>,
 }
 
 impl ShareHandler {
@@ -144,6 +162,8 @@ impl ShareHandler {
             settled: None,
             tx_reservoir: core::cell::Cell::new(None),
             after_first_input: None,
+            pool_starts: Vec::new(),
+            settled_pools: None,
         }
     }
 }
@@ -158,6 +178,8 @@ impl Handler for ShareHandler {
         if let Some(reservoir) = self.system_reservoir {
             gas.set_remaining(gas.remaining() - reservoir);
             gas.set_reservoir(reservoir);
+            // And pools, as a consumer that limits a system call's figures sets them.
+            gas.set_pools_remaining(SYSTEM_POOLS);
         }
         self.tx_reservoir.set(Some(gas.reservoir()));
         gas
@@ -183,6 +205,8 @@ impl Handler for ShareHandler {
     ) -> Result<FrameResult, TestError> {
         self.starts
             .push(reservoir_of(&first_frame_input.frame_input));
+        self.pool_starts
+            .push(pool_shares_of(&first_frame_input.frame_input));
         if let ItemOrResult::Result(result) = evm.frame_init(first_frame_input)? {
             self.returned.push(returned(&result));
             return Ok(result);
@@ -191,6 +215,7 @@ impl Handler for ShareHandler {
             let result = match evm.frame_run()? {
                 ItemOrResult::Item(mut init) => {
                     self.starts.push(reservoir_of(&init.frame_input));
+                    self.pool_starts.push(pool_shares_of(&init.frame_input));
                     if self.too_deep {
                         init.depth = CALL_STACK_LIMIT as usize + 1;
                     }
@@ -217,6 +242,7 @@ impl Handler for ShareHandler {
     ) -> Result<(), TestError> {
         self.mainnet.last_frame_result(evm, frame_result, gas)?;
         self.settled = Some((gas.reservoir(), gas.state_gas_spent()));
+        self.settled_pools = Some(gas.pools_remaining());
         Ok(())
     }
 }
@@ -678,7 +704,7 @@ fn test_an_answer_without_a_frame_hands_the_share_back() {
 }
 
 /// A system call's frame takes the whole reservoir its gas holds, a consumer's split of the
-/// system call's gas, and its children their shares, as a transaction's do.
+/// system call's gas, and every whole pool, and its children their shares, as a transaction's do.
 #[test]
 fn test_a_system_call_forwards_and_settles_its_reservoir() {
     for percent in [None, Some(PERCENT)] {
@@ -710,6 +736,10 @@ fn test_a_system_call_forwards_and_settles_its_reservoir() {
             Some((RESERVOIR - CHARGED, CHARGED as i64)),
             "{percent:?}"
         );
+        // The pools go the same way: the system call's frame takes them whole, the schedule
+        // forwards them whole, and they come back as they were, nothing drawn.
+        assert_eq!(handler.pool_starts, [SYSTEM_POOLS; 2], "{percent:?}");
+        assert_eq!(handler.settled_pools, Some(SYSTEM_POOLS), "{percent:?}");
     }
 }
 
