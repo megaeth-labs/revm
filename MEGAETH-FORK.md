@@ -396,7 +396,7 @@ An id the fork once used for an entry with another default is left unused rather
   A run that starts with no action set runs as upstream's: the inspector's `step` comes before each instruction, and an action the inspector sets in `step` ends the run after that `step`, as upstream's does.
   A frame whose action is set when it is built is not handed to `initialize_interp`, and runs no `step` before that action: the action `frame_init` set is the frame's, which no inspector can replace, and the inspector sees the frame's start and end, as it sees a precompile's answer.
   If that action starts a child and the frame resumes with no action set, the frame runs its code with a `step` before each instruction, never having been handed to `initialize_interp`.
-  An action an inspector sets in `initialize_interp` on any other frame is pending when the run starts, so it is returned the same way, without a `step`; upstream's inspected run calls `step` once before returning it.
+  An action an inspector sets in `initialize_interp` on any other frame is pending when the run starts, so it is returned the same way, without a `step`; upstream's inspected run calls `step` once before returning it, and returns the action as that `step` left it (see Baseline behaviour the fork changes).
   One action at a time: `set_action` asserts in a debug build that none is pending, so a consumer sets an action only on a frame that has none.
 - **Consumer.** mega-evm makes some of a frame's actions outside an instruction: the creation and the answer of a system contract's call, and the stop of a frame that a child left over a limit when it returns. They come back through the frame's run, so the loop starts the next frame or ends the frame, and an inspector sees the frame end.
   Without the check, the plain run executes the frame's code before it returns the action, so mega-evm overrides `frame_run`, and the inspected run shows an inspector a `step` of an instruction that never runs.
@@ -428,15 +428,18 @@ An id the fork once used for an entry with another default is left unused rather
 Picked upstream fixes change revm 40.0.3's results where 40.0.3 was wrong; that is why they are taken (see Tracking upstream), and each pick's pull request says what it changes.
 A pick that changes what the journal records lands with a switch back to the base line (see revm 40.0.3's journal semantics).
 One pick changes what the top-level entry points do with the journal, and has no switch.
-One hook changes what an inspector that sets an action itself sees, and has no switch either:
+One hook changes what an inspector that sets an action before a frame runs sees and gets, and has no switch either:
 
 - **The journal is finalized on an error.** `ExecuteCommitEvm::transact_commit`, `ExecuteEvm::replay`, `InspectEvm::inspect_tx` and `inspect`, `InspectCommitEvm::inspect_tx_commit` and `inspect_commit`, and the four `inspect_system_call` variants clear the journal when execution returns an error.
   revm 40.0.3 left it holding the failed transaction's warm set and touched accounts, which leaked into the next transaction run on the same EVM.
   Upstream #3780, carried verbatim with the EIP-8037 / EIP-2780 gas core.
   There is no switch: a consumer that must keep the journal after an error uses the entry points that do not finalize (`transact_one`, `inspect_one_tx`, `system_call_one`) and finalizes itself.
-- **An action an inspector sets in `initialize_interp` is returned without a `step`.** The inspected run returns an action pending when it starts before its first `Inspector::step` (see The pending action), so an inspector that halts a frame, or sets its next action, in `initialize_interp` sees no `step` of that frame's run.
-  revm 40.0.3 called `step` once first, at the frame's first instruction, and then returned the action without running it.
-  Results do not change: the run returns the same action, and no instruction runs on either.
+- **An action an inspector sets in `initialize_interp` is returned without a `step`.** The inspected run returns an action pending when it starts before its first `Inspector::step` (see The pending action).
+  Only an inspector that sets an action before a frame runs, by halting the frame or setting its next action in `initialize_interp`, is affected: it loses that run's first `step`, and with it whatever that `step` would have done.
+  revm 40.0.3 called `step` once first, at the frame's first instruction, and then returned the action as that `step` left it, without running the instruction.
+  An inspector whose `step` only observes sees one `step` fewer and gets the same result, since no instruction runs on either.
+  An inspector whose `step` edits the pending action (`LoopControl::action`), or changes the context or the state, gets a different result: the frame returns the action `initialize_interp` set, and the `step`'s changes are not made.
+  An inspector that sets no action before a frame runs sees every `step` and gets every result revm 40.0.3 gives it.
 
 ## Tracking upstream
 
