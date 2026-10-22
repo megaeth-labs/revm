@@ -319,11 +319,17 @@ pub trait Handler {
         // reservoir.
         *gas = self.tx_gas(evm, init_and_floor_gas);
         let tx_gas_limit = evm.ctx().tx().gas_limit();
-        let reservoir = gas.reservoir();
+        // The stand-in takes the whole reservoir and every pool out of the transaction's gas, as
+        // the first frame would (`create_init_frame`), so the settle adds them back once.
+        let shares = gas.forward_all_to_child();
         let mut frame_result = match evm.ctx().tx().kind() {
-            TxKind::Call(_) => FrameResult::new_call_oog(tx_gas_limit, 0..0, reservoir),
-            TxKind::Create => FrameResult::new_create_oog(tx_gas_limit, reservoir),
+            TxKind::Call(_) => FrameResult::new_call_oog(tx_gas_limit, 0..0, shares.reservoir),
+            TxKind::Create => FrameResult::new_create_oog(tx_gas_limit, shares.reservoir),
         };
+        frame_result
+            .gas_mut()
+            .tracker_mut()
+            .set_pools_remaining(shares.pools);
         self.last_frame_result(evm, &mut frame_result, gas)?;
         Ok(frame_result)
     }
