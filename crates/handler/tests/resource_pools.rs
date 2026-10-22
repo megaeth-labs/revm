@@ -1,7 +1,7 @@
-//! The byte pool, the start charge and the history allowance, as the mainnet handler forwards
+//! The resource pools, the start charge and the history allowance, as the mainnet handler forwards
 //! and settles them.
 //!
-//! A consumer sets the transaction's pool on the gas `tx_gas` returns; every frame then starts
+//! A consumer sets the transaction's pools on the gas `tx_gas` returns; every frame then starts
 //! with the share its caller's instruction forwarded, and `handle_reservoir_remaining_gas` settles
 //! what it left: its remaining pool when it succeeded, the whole share when it reverted or halted.
 //! A start charge a hook declared rides on the frame's input and is refunded whole when the frame
@@ -1216,7 +1216,7 @@ fn test_a_start_refused_for_the_depth_gives_the_share_and_the_start_charge_back(
     }
 }
 
-/// With `bytes_forward_percent` at 98, every start forwards 98% of its caller's pool, rounded
+/// With [`FIRST`]'s `pool_forward_percent` at 98, every start forwards 98% of its caller's pool, rounded
 /// down, and the caller keeps the rest; what a child hands back adds to what its caller kept, so
 /// the transaction ends with the figures the whole-pool forward gives.
 #[test]

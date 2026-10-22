@@ -6,7 +6,7 @@
 //! output, or fails fatally. Each case is compared with a twin: an admitting context against
 //! [`Context`] itself, and a refused deposit against the same creation whose init code reverts.
 //! Two tests call `return_create` directly: on a frame whose regular gas is partly withheld, and
-//! on a frame with a byte pool the hook draws the deposit from.
+//! on a frame with a pool the hook draws the deposit from.
 
 use bytecode::opcode::{
     CREATE, MSTORE, MSTORE8, PUSH0, PUSH1, PUSH3, PUSH4, RETURN, RETURNDATASIZE, REVERT, SSTORE,

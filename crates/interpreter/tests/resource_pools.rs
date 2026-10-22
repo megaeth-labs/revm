@@ -1,12 +1,12 @@
-//! The byte pool, the start charge and the history allowance at the call and creation
-//! instructions.
+//! The resource pools, the reservoir share, the start charge and the history allowance at the call
+//! and creation instructions.
 //!
 //! Once [`Host::frame_starting`] has answered, the instruction copies the start charge the hook
-//! declared on the start onto the frame's input, takes the child's share of the caller's byte pool
-//! out of the pool and puts it on the input too, and, for a value call, gives the input the
-//! schedule's history allowance. Each test runs one frame on [`PoolHost`], whose start hook draws
-//! bytes from the gas it is handed, declares a start charge, and admits or refuses the start as
-//! the test tells it.
+//! declared on the start onto the frame's input, takes the child's shares of the caller's
+//! reservoir and pools out of them and puts them on the input too, and, for a value call, gives
+//! the input the schedule's history allowance. Each test runs one frame on [`PoolHost`], whose
+//! start hook draws from a pool of the gas it is handed, declares a start charge, and admits or
+//! refuses the start as the test tells it.
 
 use bytecode::{opcode::*, Bytecode};
 use context_interface::{
@@ -232,7 +232,7 @@ impl Host for PoolHost {
     }
 }
 
-/// Runs `code` as [`CONTRACT`], called by [`CALLER`], with [`AMPLE`] gas and a byte pool of
+/// Runs `code` as [`CONTRACT`], called by [`CALLER`], with [`AMPLE`] gas and [`FIRST`] at
 /// `pool`, if given, and returns what the frame asked for and its gas.
 fn run(code: &[u8], pool: Option<u64>, host: &mut PoolHost) -> (InterpreterAction, Gas) {
     run_on(code, host, |gas| {

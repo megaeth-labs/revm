@@ -1,4 +1,5 @@
-//! The byte pool, the start charge and the history allowance on the plain and the inspected path.
+//! The resource pools, the start charge and the history allowance on the plain and the inspected
+//! path.
 //!
 //! `transact` runs the frames in the handler's loop and `inspect_tx` in the inspector's; both
 //! build frames with `make_call_frame` and `make_create_frame` and settle them with

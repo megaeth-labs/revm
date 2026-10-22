@@ -258,16 +258,15 @@ impl GasTracker {
     }
 
     /// Settles every pool of a returning child into this, its caller's, tracker: the child's nets
-    /// merge into this tracker's when `kept` (the child succeeded), and what the child left of
-    /// each pool is absorbed back whatever its end, as
-    /// [`absorb_returned_pool`](Self::absorb_returned_pool) says. A child that failed has already
-    /// rolled its draws back.
+    /// merge into this tracker's when the child `succeeded`, and what the child left of each pool
+    /// is absorbed back whatever its end, as [`absorb_returned_pool`](Self::absorb_returned_pool)
+    /// says. A child that failed has already rolled its draws back.
     #[inline]
-    pub const fn absorb_returned_pools(&mut self, child: &Self, kept: bool) {
+    pub const fn absorb_returned_pools(&mut self, child: &Self, succeeded: bool) {
         let mut index = 0;
         while index < PoolId::COUNT {
             let pool = PoolId::ALL[index];
-            if kept {
+            if succeeded {
                 self.add_pool_spent(pool, child.pools_spent[index]);
             }
             self.absorb_returned_pool(pool, child.pools_remaining[index]);

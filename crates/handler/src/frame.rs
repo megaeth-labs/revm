@@ -598,7 +598,7 @@ impl EthFrame<EthInterpreter> {
                 }
 
                 // Settle the child's gas and merge it into the parent (returns
-                // unused regular gas, adopts the reservoir, and propagates state
+                // unused regular gas, adds back the reservoir, and propagates state
                 // gas / refunds on success).
                 handle_reservoir_remaining_gas(
                     ins_result,
@@ -629,7 +629,7 @@ impl EthFrame<EthInterpreter> {
                 let mut create_gas = *outcome.gas();
 
                 // Settle the child's gas and merge it into the parent (returns
-                // unused regular gas, adopts the reservoir, and propagates state
+                // unused regular gas, adds back the reservoir, and propagates state
                 // gas / refunds on success).
                 handle_reservoir_remaining_gas(
                     instruction_result,
@@ -649,7 +649,7 @@ impl EthFrame<EthInterpreter> {
         }
 
         // Refund the upfront state charge after the child's gas is settled
-        // (the settle overwrites the reservoir with the child's).
+        // (the settle adds the child's reservoir to what the parent kept).
         if let Some(charge) = refund_state_gas {
             self.interpreter.gas.refill_reservoir(charge);
         }

@@ -837,7 +837,7 @@ fn input_gas(input: &FrameInput) -> (u64, u64) {
 
 /// Each frame-starting instruction hands its start to the hook once the forward is taken, and
 /// charges nothing after it: the instruction leaves the gas the hook was handed, apart from the
-/// byte pool, whose share goes to the frame after the hook, and the frame's input carries the
+/// reservoir and the pools, whose shares go to the frame after the hook, and the frame's input carries the
 /// forward, with a value call's stipend on top.
 #[test]
 fn test_a_start_reaches_the_hook_with_the_forward_taken() {
