@@ -235,6 +235,19 @@ impl Host for PoolHost {
 /// Runs `code` as [`CONTRACT`], called by [`CALLER`], with [`AMPLE`] gas and a byte pool of
 /// `pool`, if given, and returns what the frame asked for and its gas.
 fn run(code: &[u8], pool: Option<u64>, host: &mut PoolHost) -> (InterpreterAction, Gas) {
+    run_on(code, host, |gas| {
+        if let Some(pool) = pool {
+            gas.set_pool_remaining(FIRST, pool);
+        }
+    })
+}
+
+/// Runs `code` as [`run`] does, on the gas `prepare` leaves.
+fn run_on(
+    code: &[u8],
+    host: &mut PoolHost,
+    prepare: impl FnOnce(&mut Gas),
+) -> (InterpreterAction, Gas) {
     let spec = host.spec;
     let mut interpreter = Interpreter::<EthInterpreter>::new(
         SharedMemory::new(),
@@ -248,9 +261,7 @@ fn run(code: &[u8], pool: Option<u64>, host: &mut PoolHost) -> (InterpreterActio
         spec,
         AMPLE,
     );
-    if let Some(pool) = pool {
-        interpreter.gas.set_pool_remaining(FIRST, pool);
-    }
+    prepare(&mut interpreter.gas);
     let table = instruction_table::<EthInterpreter, PoolHost>();
     let action = interpreter.run_plain(&table, &gas_table_spec(spec), host);
     (action, interpreter.gas)
@@ -480,5 +491,98 @@ fn test_the_history_allowance_is_set_on_a_value_call_only() {
         let (action, _) = run(code, Some(POOL), &mut host);
         let (_, _, found) = figures(&started(action));
         assert_eq!(found, 0, "{name}: none on the default schedule");
+    }
+}
+
+/// The pools a frame holds in the tests of every pool, and its reservoir.
+const POOLS: [u64; PoolId::COUNT] = [1_000, 500, 100];
+const RESERVOIR: u64 = 1_000;
+
+/// The reservoir and every pool's share of a started frame's input.
+fn shares(input: &FrameInput) -> (u64, PoolAmounts) {
+    match input {
+        FrameInput::Call(inputs) => (inputs.reservoir, inputs.pool_shares),
+        FrameInput::Create(inputs) => (inputs.reservoir(), inputs.pool_shares()),
+        FrameInput::Empty => unreachable!(),
+    }
+}
+
+/// [`POOLS`] and [`RESERVOIR`] on the frame's gas.
+fn with_pools(gas: &mut Gas) {
+    for (pool, amount) in PoolId::ALL.into_iter().zip(POOLS) {
+        gas.set_pool_remaining(pool, amount);
+    }
+    gas.set_reservoir(RESERVOIR);
+}
+
+/// `(reservoir, pools)` of `gas`.
+fn held(gas: &GasTracker) -> (u64, [u64; PoolId::COUNT]) {
+    (
+        gas.reservoir(),
+        PoolId::ALL.map(|pool| gas.pool_remaining(pool)),
+    )
+}
+
+/// By default every start forwards the whole reservoir and every whole pool, each taken out of
+/// the caller, which holds none of them while the child runs; with the reservoir and each pool
+/// given its own percentage, each is forwarded by its own share, rounded down, and the caller
+/// keeps the rest of each.
+#[test]
+fn test_every_start_forwards_the_reservoir_and_each_pool_by_its_own_share() {
+    for (kind, code) in start_cases() {
+        let mut host = PoolHost::new(SpecId::OSAKA);
+        let (action, gas) = run_on(&code, &mut host, with_pools);
+        let (reservoir, pools) = shares(&started(action));
+        assert_eq!(
+            (reservoir, PoolId::ALL.map(|pool| pools.get(pool))),
+            (RESERVOIR, POOLS),
+            "{kind:?}: everything forwarded"
+        );
+        assert_eq!(
+            held(gas.tracker()),
+            (0, [0; 3]),
+            "{kind:?}: the caller holds none"
+        );
+        assert_eq!(
+            held(&host.start().1),
+            (RESERVOIR, POOLS),
+            "{kind:?}: the hook found all"
+        );
+
+        let mut host = PoolHost::new(SpecId::OSAKA);
+        host.params.override_gas([
+            (GasId::reservoir_forward_percent(), 98),
+            (GasId::pool_forward_percent(PoolId::new(0)), 98),
+            (GasId::pool_forward_percent(PoolId::new(1)), 50),
+            (GasId::pool_forward_percent(PoolId::new(2)), 0),
+        ]);
+        let (action, gas) = run_on(&code, &mut host, with_pools);
+        let (reservoir, pools) = shares(&started(action));
+        assert_eq!(
+            (reservoir, PoolId::ALL.map(|pool| pools.get(pool))),
+            (980, [980, 250, 0]),
+            "{kind:?}: each by its share"
+        );
+        assert_eq!(
+            held(gas.tracker()),
+            (20, [20, 250, 100]),
+            "{kind:?}: the caller keeps the rest"
+        );
+    }
+}
+
+/// A start the hook refuses takes no share of the reservoir or of any pool.
+#[test]
+fn test_a_refused_start_forwards_no_reservoir_and_no_pool() {
+    for (kind, code) in start_cases() {
+        let mut host = PoolHost::new(SpecId::OSAKA).refusing();
+        let (action, gas) = run_on(&code, &mut host, with_pools);
+
+        assert_eq!(returned(action), InstructionResult::OutOfGas, "{kind:?}");
+        assert_eq!(
+            held(gas.tracker()),
+            (RESERVOIR, POOLS),
+            "{kind:?}: nothing taken"
+        );
     }
 }

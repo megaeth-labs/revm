@@ -98,11 +98,18 @@ const LOG: u8 = 0x0e;
 const fn draw(
     context: InstructionContext<'_, TestContext, EthInterpreter>,
 ) -> InstructionExecResult {
-    if context.interpreter.gas.record_pool(FIRST, DRAW_BYTES) {
-        Ok(())
-    } else {
-        Err(InstructionResult::OutOfGas)
+    let mut index = 0;
+    while index < PoolId::COUNT {
+        if !context
+            .interpreter
+            .gas
+            .record_pool(PoolId::ALL[index], DRAW_BYTES)
+        {
+            return Err(InstructionResult::OutOfGas);
+        }
+        index += 1;
     }
+    Ok(())
 }
 
 /// Has the start hook charge and declare [`DECLARED`] at the start that follows.
@@ -431,6 +438,15 @@ impl PrecompileProvider<TestContext> for DrawingPrecompiles {
 /// The figures of a frame's input as it started: its share, its start charge and its allowance.
 type Started = (u64, StartCharge, u64);
 
+/// Every pool's share on a frame's input.
+fn pool_shares(input: &FrameInput) -> PoolAmounts {
+    match input {
+        FrameInput::Call(inputs) => inputs.pool_shares,
+        FrameInput::Create(inputs) => inputs.pool_shares(),
+        FrameInput::Empty => unreachable!(),
+    }
+}
+
 fn started(input: &FrameInput) -> Started {
     match input {
         FrameInput::Call(inputs) => (
@@ -462,6 +478,11 @@ struct PoolHandler {
     starts: Vec<Started>,
     returned: Vec<Returned>,
     settled: Option<Settled>,
+    /// Every pool's share as each frame started.
+    pool_starts: Vec<PoolAmounts>,
+    /// Every pool of the transaction's gas, `(remaining, spent)`, after the first frame settled
+    /// into it.
+    settled_pools: Option<[(u64, i64); PoolId::COUNT]>,
 }
 
 impl PoolHandler {
@@ -474,6 +495,8 @@ impl PoolHandler {
             starts: Vec::new(),
             returned: Vec::new(),
             settled: None,
+            pool_starts: Vec::new(),
+            settled_pools: None,
         }
     }
 }
@@ -488,7 +511,9 @@ impl Handler for PoolHandler {
     fn tx_gas(&self, evm: &mut TestEvm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
         let mut gas = self.mainnet.tx_gas(evm, init_and_floor_gas);
         if let Some(pool) = self.pool {
-            gas.set_pool_remaining(FIRST, pool);
+            for each in PoolId::ALL {
+                gas.set_pool_remaining(each, pool);
+            }
         }
         if self.declare {
             assert!(gas.record_history_cost(DECLARED.history));
@@ -523,6 +548,8 @@ impl Handler for PoolHandler {
         first_frame_input: FrameInit,
     ) -> Result<FrameResult, TestError> {
         self.starts.push(started(&first_frame_input.frame_input));
+        self.pool_starts
+            .push(pool_shares(&first_frame_input.frame_input));
         if let ItemOrResult::Result(result) = evm.frame_init(first_frame_input)? {
             self.returned.push(Returned::of(&result));
             return Ok(result);
@@ -531,6 +558,7 @@ impl Handler for PoolHandler {
             let result = match evm.frame_run()? {
                 ItemOrResult::Item(mut init) => {
                     self.starts.push(started(&init.frame_input));
+                    self.pool_starts.push(pool_shares(&init.frame_input));
                     if self.too_deep {
                         init.depth = CALL_STACK_LIMIT as usize + 1;
                     }
@@ -565,6 +593,11 @@ impl Handler for PoolHandler {
                 gas.history_gas_spent(),
             )))
         });
+        SETTLED_POOLS.with(|settled| {
+            settled.set(Some(
+                PoolId::ALL.map(|pool| (gas.pool_remaining(pool), gas.pool_spent(pool))),
+            ))
+        });
         self.mainnet
             .post_execution(evm, exec_result, init_and_floor_gas, eip7702_refund)
     }
@@ -572,6 +605,8 @@ impl Handler for PoolHandler {
 
 thread_local! {
     static SETTLED: core::cell::Cell<Option<Settled>> = const { core::cell::Cell::new(None) };
+    static SETTLED_POOLS: core::cell::Cell<Option<[(u64, i64); PoolId::COUNT]>> =
+        const { core::cell::Cell::new(None) };
 }
 
 /// `CALL(100_000, to, value, 0, 0, 0, 0)`, dropping the success flag.
@@ -625,8 +660,10 @@ struct Run {
     deposit: Deposit,
     /// What the precompile provider draws on each answer.
     precompile_draw: u64,
-    /// `bytes_forward_percent` in the schedule, if not the default.
+    /// [`FIRST`]'s `pool_forward_percent` in the schedule, if not the default.
     forward_percent: Option<u64>,
+    /// Every pool's `pool_forward_percent` in the schedule, if not the default.
+    pool_percents: Option<[u64; PoolId::COUNT]>,
     /// Whether the transaction creates a contract from `parent` instead of calling [`PARENT`].
     creates: bool,
 }
@@ -641,6 +678,7 @@ impl Run {
             deposit: Deposit::Untouched,
             precompile_draw: 0,
             forward_percent: None,
+            pool_percents: None,
             creates: false,
         }
     }
@@ -650,6 +688,11 @@ impl Run {
         let mut run = Self::new(initcode);
         run.creates = true;
         run
+    }
+
+    const fn pool_percents(mut self, percents: [u64; PoolId::COUNT]) -> Self {
+        self.pool_percents = Some(percents);
+        self
     }
 
     const fn forward_percent(mut self, percent: u64) -> Self {
@@ -716,12 +759,19 @@ impl Run {
     fn evm(&self) -> TestEvm {
         let allowance = self.allowance;
         let forward_percent = self.forward_percent;
+        let pool_percents = self.pool_percents;
         let inner = Context::mainnet()
             .with_db(self.db())
             .modify_cfg_chained(|cfg| {
                 cfg.set_spec_and_mainnet_gas_params(SPEC);
                 cfg.gas_params
                     .override_gas([(GasId::call_history_allowance(), allowance)]);
+                if let Some(percents) = pool_percents {
+                    for (pool, percent) in PoolId::ALL.into_iter().zip(percents) {
+                        cfg.gas_params
+                            .override_gas([(GasId::pool_forward_percent(pool), percent)]);
+                    }
+                }
                 if let Some(percent) = forward_percent {
                     cfg.gas_params
                         .override_gas([(GasId::pool_forward_percent(FIRST), percent)]);
@@ -761,8 +811,10 @@ impl Run {
     /// recorded.
     fn with(&self, mut handler: PoolHandler) -> (ExecutionResult, PoolHandler) {
         SETTLED.with(|settled| settled.set(None));
+        SETTLED_POOLS.with(|settled| settled.set(None));
         let result = handler.run(&mut self.evm()).expect("the transaction runs");
         handler.settled = SETTLED.with(|settled| settled.get());
+        handler.settled_pools = SETTLED_POOLS.with(|settled| settled.get());
         (result, handler)
     }
 
@@ -1205,4 +1257,41 @@ fn test_a_share_below_the_whole_pool_is_forwarded_and_settled_at_depth() {
         ]
     );
     assert_eq!(handler.settled, Some((800, 200, 0)));
+}
+
+/// Each pool is forwarded by its own share and settles alone: with the pools' percentages at 98,
+/// 50 and 100, every start forwards that much of what its caller has left of each pool, rounded
+/// down, and the caller keeps the rest of each; what a child hands back of each pool adds to what
+/// its caller kept, so every pool ends where the whole-pool forward ends it.
+#[test]
+fn test_each_pool_is_forwarded_by_its_own_share_and_settled_at_depth() {
+    let (result, handler) = at_depth()
+        .pool_percents([98, 50, 100])
+        .with(PoolHandler::new(Some(POOL)));
+
+    assert!(result.is_success(), "{result:?}");
+    // PARENT drew 100 of each pool before each start; OK drew 100 and handed back the rest, so
+    // PARENT holds 800 of each for the later starts. NESTER drew 100 of each of its shares (784,
+    // 400, 800) before calling OK.
+    let each = |shares: [u64; PoolId::COUNT]| {
+        PoolAmounts::ZERO
+            .with(PoolId::new(0), shares[0])
+            .with(PoolId::new(1), shares[1])
+            .with(PoolId::new(2), shares[2])
+    };
+    assert_eq!(
+        handler.pool_starts,
+        [
+            each([POOL; 3]),
+            // 98%, 50% and 100% of 900.
+            each([882, 450, 900]),
+            // Of 800.
+            each([784, 400, 800]),
+            each([784, 400, 800]),
+            each([784, 400, 800]),
+            // Of 684, 300 and 700: 98% of 684 is 670.32.
+            each([670, 150, 700]),
+        ]
+    );
+    assert_eq!(handler.settled_pools, Some([(800, 200); 3]));
 }
