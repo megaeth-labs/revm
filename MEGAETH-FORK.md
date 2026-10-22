@@ -389,18 +389,21 @@ An id the fork once used for an entry with another default is left unused rather
 
 ### The pending action
 
-- **API.** No new item: upstream's `LoopControl::set_action` on a frame's interpreter, which `Interpreter::run_plain` (and `run_plain_as_output`) and `revm_inspector::inspect_instructions` honour before their first instruction.
+- **API.** No new item: upstream's `LoopControl::set_action` on a frame's interpreter, which `Interpreter::run_plain` (and `run_plain_as_output`) and `revm_inspector::inspect_instructions` honour before their first instruction, and which `InspectorEvmTr::inspect_frame_init` reads before it hands a new frame to `Inspector::initialize_interp`.
 - **Contract.** An action set on a frame's interpreter before the frame runs is what the run returns, before any instruction runs. That is an action set once `frame_init` built the frame, or once `frame_return_result` put a child's result into its caller.
   The plain and the inspected run return it alike: no instruction executes, so the frame's gas, stack, memory and program counter are as they were when it was set, and the inspected run calls neither `Inspector::step` nor `step_end` for that run.
   The handler then processes it as any instruction's action (`process_next_action`): a `NewFrame` starts a child, a `Return` ends the frame on its result, as an instruction's return would.
   A run that starts with no action set runs as upstream's: the inspector's `step` comes before each instruction, and an action the inspector sets in `step` ends the run after that `step`, as upstream's does.
-  An action an inspector sets in `initialize_interp` is pending when the run starts, so it is returned the same way, without a `step`; upstream's inspected run calls `step` once before returning it.
-  One action at a time: `set_action` asserts in a debug build that none is pending, so a consumer sets an action only on a frame that has none, and an inspector's `initialize_interp` or `step` must not set one on a frame that has one.
+  A frame whose action is set when it is built is not handed to `initialize_interp`, and runs no `step` before that action: the action `frame_init` set is the frame's, which no inspector can replace, and the inspector sees the frame's start and end, as it sees a precompile's answer.
+  If that action starts a child and the frame resumes with no action set, the frame runs its code with a `step` before each instruction, never having been handed to `initialize_interp`.
+  An action an inspector sets in `initialize_interp` on any other frame is pending when the run starts, so it is returned the same way, without a `step`; upstream's inspected run calls `step` once before returning it.
+  One action at a time: `set_action` asserts in a debug build that none is pending, so a consumer sets an action only on a frame that has none.
 - **Consumer.** mega-evm makes some of a frame's actions outside an instruction: the creation and the answer of a system contract's call, and the stop of a frame that a child left over a limit when it returns. They come back through the frame's run, so the loop starts the next frame or ends the frame, and an inspector sees the frame end.
   Without the check, the plain run executes the frame's code before it returns the action, so mega-evm overrides `frame_run`, and the inspected run shows an inspector a `step` of an instruction that never runs.
-- **Removal.** When upstream's runs check for a pending action before their first instruction, or when mega-evm makes no action outside an instruction.
-- **Default.** revm sets no action before a run, so the check finds none and every run is upstream's, callbacks included, for a consumer and an inspector that set none.
-  Where measured (callgrind, the fork's release profile), the check costs about three instructions per frame run on the plain path: 6.03 per `CALL` (+0.23% on a transaction of 64 calls) and 6.12 per nested `CREATE`, which each run two frames (the child, and the caller's resume); 2 or 3 for a transaction whose one frame runs code; nothing for a transfer to an account without code or a precompile's answer, which run no frame. The inspected run was not measured.
+  Without the `initialize_interp` rule, an inspector that halts the frame of a system contract's call there trips `set_action`'s assertion in a debug build, and in a release build replaces the creation mega-evm set with its halt.
+- **Removal.** When upstream's runs check for a pending action before their first instruction and its inspected frame start does not hand a frame with one to `initialize_interp`, or when mega-evm makes no action outside an instruction.
+- **Default.** revm sets no action before a run, so the check finds none, every frame revm builds is handed to `initialize_interp`, and every run is upstream's, callbacks included, for a consumer and an inspector that set none.
+  Where measured (callgrind, the fork's release profile), the check costs about three instructions per frame run on the plain path: 6.03 per `CALL` (+0.23% on a transaction of 64 calls) and 6.12 per nested `CREATE`, which each run two frames (the child, and the caller's resume); 2 or 3 for a transaction whose one frame runs code; nothing for a transfer to an account without code or a precompile's answer, which run no frame. The inspected path, which also reads the action once per new frame before `initialize_interp`, was not measured.
 
 ### Frame-run result hook
 
