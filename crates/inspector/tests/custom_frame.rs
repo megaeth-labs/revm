@@ -9,7 +9,7 @@
 
 use context::{
     result::{EVMError, ExecutionResult, HaltReason},
-    Context, ContextSetters, Evm, FrameStack, TxEnv,
+    Context, ContextSetters, Evm, FrameStack, OutFrame, TxEnv,
 };
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use handler::{
@@ -32,7 +32,7 @@ use std::convert::Infallible;
 type Db = CacheDB<EmptyDB>;
 type Ctx = MainnetContext<Db>;
 type Instructions = EthInstructions<EthInterpreter, Ctx>;
-type Inner = Evm<Ctx, Recorder, Instructions, EthPrecompiles, Frame>;
+type Inner = Evm<Ctx, Recorder, Instructions, EthPrecompiles, HiddenOnceFinished>;
 type Error = EVMError<Infallible>;
 
 const SPEC: SpecId = SpecId::OSAKA;
@@ -45,14 +45,14 @@ const CHILD: Address = address!("0x00000000000000000000000000000000000c0de1");
 
 /// revm's frame, which the inspector is given only while it has not finished.
 #[derive(Debug, Default)]
-struct Frame(EthFrame);
+struct HiddenOnceFinished(EthFrame);
 
-impl FrameTr for Frame {
+impl FrameTr for HiddenOnceFinished {
     type FrameInit = FrameInit;
     type FrameResult = FrameResult;
 }
 
-impl InspectorFrame for Frame {
+impl InspectorFrame for HiddenOnceFinished {
     type IT = EthInterpreter;
 
     fn eth_frame(&mut self) -> Option<&mut EthFrame> {
@@ -100,18 +100,27 @@ impl Inspector<Ctx> for Recorder {
     }
 }
 
-/// revm's EVM on [`Frame`]: its frame start, run and return are revm's own, on the [`EthFrame`]
-/// inside.
-struct Consumer(Inner);
+/// revm's EVM on [`HiddenOnceFinished`]: its frame start, run and return are revm's own, on the
+/// [`EthFrame`] inside.
+struct Consumer {
+    evm: Inner,
+}
 
 impl EvmTr for Consumer {
     type Context = Ctx;
     type Instructions = Instructions;
     type Precompiles = EthPrecompiles;
-    type Frame = Frame;
+    type Frame = HiddenOnceFinished;
 
-    fn all(&self) -> (&Ctx, &Instructions, &EthPrecompiles, &FrameStack<Frame>) {
-        let evm = &self.0;
+    fn all(
+        &self,
+    ) -> (
+        &Ctx,
+        &Instructions,
+        &EthPrecompiles,
+        &FrameStack<HiddenOnceFinished>,
+    ) {
+        let evm = &self.evm;
         (
             &evm.ctx,
             &evm.instruction,
@@ -126,9 +135,9 @@ impl EvmTr for Consumer {
         &mut Ctx,
         &mut Instructions,
         &mut EthPrecompiles,
-        &mut FrameStack<Frame>,
+        &mut FrameStack<HiddenOnceFinished>,
     ) {
-        let evm = &mut self.0;
+        let evm = &mut self.evm;
         (
             &mut evm.ctx,
             &mut evm.instruction,
@@ -140,21 +149,21 @@ impl EvmTr for Consumer {
     fn frame_init(
         &mut self,
         frame_input: FrameInit,
-    ) -> Result<FrameInitResult<'_, Frame>, ContextDbError<Ctx>> {
+    ) -> Result<FrameInitResult<'_, HiddenOnceFinished>, ContextDbError<Ctx>> {
         let Evm {
             ctx,
             precompiles,
             frame_stack,
             ..
-        } = &mut self.0;
+        } = &mut self.evm;
         let is_first_init = frame_stack.index().is_none();
         let mut slot = if is_first_init {
             frame_stack.start_init()
         } else {
             frame_stack.get_next()
         };
-        let frame = &mut slot.get(Frame::default).0;
-        let out = context::OutFrame::new_init(frame);
+        let frame = &mut slot.get(HiddenOnceFinished::default).0;
+        let out = OutFrame::new_init(frame);
         if let ItemOrResult::Result(result) =
             EthFrame::init_with_context(out, ctx, precompiles, frame_input)?
         {
@@ -172,13 +181,13 @@ impl EvmTr for Consumer {
         Ok(ItemOrResult::Item(frame_stack.get()))
     }
 
-    fn frame_run(&mut self) -> Result<FrameInitOrResult<Frame>, ContextDbError<Ctx>> {
+    fn frame_run(&mut self) -> Result<FrameInitOrResult<HiddenOnceFinished>, ContextDbError<Ctx>> {
         let Evm {
             ctx,
             instruction,
             frame_stack,
             ..
-        } = &mut self.0;
+        } = &mut self.evm;
         let frame = &mut frame_stack.get().0;
         let action = frame.interpreter.run_plain(
             instruction.instruction_table(),
@@ -198,7 +207,7 @@ impl EvmTr for Consumer {
     ) -> Result<Option<FrameResult>, ContextDbError<Ctx>> {
         let Evm {
             ctx, frame_stack, ..
-        } = &mut self.0;
+        } = &mut self.evm;
         if frame_stack.get().0.is_finished() {
             frame_stack.pop();
         }
@@ -222,10 +231,10 @@ impl InspectorEvmTr for Consumer {
         &Ctx,
         &Instructions,
         &EthPrecompiles,
-        &FrameStack<Frame>,
+        &FrameStack<HiddenOnceFinished>,
         &Recorder,
     ) {
-        let evm = &self.0;
+        let evm = &self.evm;
         (
             &evm.ctx,
             &evm.instruction,
@@ -241,10 +250,10 @@ impl InspectorEvmTr for Consumer {
         &mut Ctx,
         &mut Instructions,
         &mut EthPrecompiles,
-        &mut FrameStack<Frame>,
+        &mut FrameStack<HiddenOnceFinished>,
         &mut Recorder,
     ) {
-        let evm = &mut self.0;
+        let evm = &mut self.evm;
         (
             &mut evm.ctx,
             &mut evm.instruction,
@@ -299,13 +308,15 @@ fn consumer() -> Consumer {
             .gas_limit(GAS_LIMIT)
             .build_fill(),
     );
-    Consumer(Evm {
-        ctx,
-        inspector: Recorder::default(),
-        instruction: Instructions::new_mainnet_with_spec(SPEC),
-        precompiles: EthPrecompiles::new(SPEC),
-        frame_stack: FrameStack::new(),
-    })
+    Consumer {
+        evm: Evm {
+            ctx,
+            inspector: Recorder::default(),
+            instruction: Instructions::new_mainnet_with_spec(SPEC),
+            precompiles: EthPrecompiles::new(SPEC),
+            frame_stack: FrameStack::new(),
+        },
+    }
 }
 
 /// The inspector sees each frame's end, though the frame's accessor gives it no finished frame,
@@ -318,7 +329,7 @@ fn test_a_frame_hidden_once_finished_gets_its_end_callbacks() {
         .expect("the transaction runs");
 
     assert_eq!(
-        inspected.0.inspector.events,
+        inspected.evm.inspector.events,
         [
             "call PARENT",
             "call CHILD",

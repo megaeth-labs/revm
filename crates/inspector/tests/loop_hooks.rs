@@ -180,10 +180,10 @@ impl Inspector<Ctx> for Recorder {
     fn step(&mut self, interp: &mut Interpreter, _: &mut Ctx) {
         let (account, pc) = (name(interp.input.target_address), interp.bytecode.pc());
         self.events.push(format!("step {account} {pc}"));
-        if let (true, Some(InterpreterAction::Return(result))) =
-            (self.return_at_init, interp.bytecode.action())
-        {
-            result.output = Bytes::from_static(IN_STEP);
+        if self.return_at_init {
+            if let Some(InterpreterAction::Return(result)) = interp.bytecode.action() {
+                result.output = Bytes::from_static(IN_STEP);
+            }
         }
     }
 
