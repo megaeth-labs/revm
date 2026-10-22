@@ -1137,4 +1137,69 @@ mod tests {
         assert_eq!(a.remaining(), 10_000);
         assert_eq!(a.state_gas_spent(), 0);
     }
+
+    /// A caller that kept part of its reservoir holds it beside the spill of a child that spent
+    /// past its share, which a whole forward cannot produce. A refill in the caller then keeps
+    /// EIP-8037's order, regular gas up to the outstanding spill first and the reservoir after,
+    /// whichever paid the charge it undoes: a charge the caller paid from its kept reservoir comes
+    /// back as regular gas. The sum of the two is conserved, and a rollback restores the reservoir
+    /// the caller started with. With the whole reservoir forwarded, the caller's charge spills
+    /// too, and its refill returns where the charge was taken.
+    #[test]
+    fn test_a_refill_beside_a_kept_reservoir_and_a_childs_spill_credits_regular_gas_first() {
+        // (reservoir, remaining, spilled, state gas spent) of a tracker.
+        let figures = |gas: &GasTracker| {
+            (
+                gas.reservoir(),
+                gas.remaining(),
+                gas.state_gas_spilled(),
+                gas.state_gas_spent(),
+            )
+        };
+        for (forwarded, after_child, after_charge, after_refill) in [
+            // 98%: B keeps 20 and C spills 20; B's charge comes from its reservoir, the refill
+            // goes to its regular gas.
+            (
+                980,
+                (20, 9_980, 20, 1_000),
+                (10, 9_980, 20, 1_010),
+                (10, 9_990, 10, 1_000),
+            ),
+            // The whole reservoir: B keeps none and C spills 0; B's charge spills, and the refill
+            // undoes that spill.
+            (
+                1_000,
+                (0, 10_000, 0, 1_000),
+                (0, 9_990, 10, 1_010),
+                (0, 10_000, 0, 1_000),
+            ),
+        ] {
+            // B holds 1,000 of reservoir and forwards 5,000 of regular gas; C charges 1,000.
+            let mut b = GasTracker::new(10_000, 10_000, 1_000);
+            assert!(b.record_regular_cost(5_000));
+            b.forward_reservoir(forwarded);
+            let mut c = GasTracker::new(5_000, 5_000, forwarded);
+            assert!(c.record_state_cost(1_000));
+            handle_reservoir_remaining_gas(InstructionResult::Stop, &mut b, &mut c);
+            assert_eq!(figures(&b), after_child, "{forwarded}: after C");
+
+            // B writes a slot, 10 of state gas, and puts it back, a refill of 10.
+            assert!(b.record_state_cost(10));
+            assert_eq!(figures(&b), after_charge, "{forwarded}: after B's charge");
+            b.refill_reservoir(10);
+            assert_eq!(figures(&b), after_refill, "{forwarded}: after B's refill");
+            assert_eq!(
+                b.reservoir() + b.remaining(),
+                10_000,
+                "{forwarded}: the sum is conserved"
+            );
+
+            b.rollback_state_gas();
+            assert_eq!(
+                (b.reservoir(), b.remaining()),
+                (1_000, 10_000),
+                "{forwarded}: B's rollback restores what it started with"
+            );
+        }
+    }
 }
