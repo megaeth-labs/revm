@@ -576,7 +576,10 @@ impl Handler for PoolHandler {
                         ItemOrResult::Result(result) => result,
                     }
                 }
-                ItemOrResult::Result(result) => result,
+                ItemOrResult::Result(mut result) => {
+                    evm.frame_run_result(&mut result)?;
+                    result
+                }
             };
             self.returned.push(Returned::of(&result));
             if let Some(result) = evm.frame_return_result(result)? {

@@ -4,8 +4,10 @@
 //! returned before the first step; a frame's run result handed to the EVM before `frame_end`), so
 //! the hooks' defaults change nothing a consumer that does not use them sees.
 //!
-//! [`PARENT`] calls a child that writes, logs and reverts, a precompile, and a contract that
-//! self-destructs; creates a contract; logs; and returns. Each frame ends a different way.
+//! [`PARENT`] calls a child that writes, logs and reverts, one that halts, a precompile, and a
+//! contract that self-destructs; creates a contract; logs; and returns. Each frame ends a
+//! different way. A change that moves gas or callbacks, such as an upstream pick, moves these
+//! lines too: they are then recorded again on the loops of the change's base.
 
 use context::{result::ExecutionResult, Context, TxEnv};
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
@@ -30,10 +32,13 @@ type Ctx = MainnetContext<Db>;
 const SPEC: SpecId = SpecId::OSAKA;
 const GAS_LIMIT: u64 = 1_000_000;
 
-/// Calls [`CHILD`], [`IDENTITY`] and [`DESTRUCT`], creates a contract, logs and returns.
+/// Calls [`CHILD`], [`HALTS`], [`IDENTITY`] and [`DESTRUCT`], creates a contract, logs and
+/// returns.
 const PARENT: Address = address!("0x00000000000000000000000000000000000c0de0");
 /// Writes its slot 0, logs, and reverts with no output.
 const CHILD: Address = address!("0x00000000000000000000000000000000000c0de1");
+/// Halts on `INVALID`.
+const HALTS: Address = address!("0x00000000000000000000000000000000000c0de3");
 /// Self-destructs to the transaction's caller.
 const DESTRUCT: Address = address!("0x00000000000000000000000000000000000c0de2");
 /// The identity precompile.
@@ -49,10 +54,12 @@ struct Recorder {
     events: Vec<String>,
 }
 
+/// The name the lines give `address`.
 fn name(address: Address) -> String {
     match address {
         PARENT => "PARENT".into(),
         CHILD => "CHILD".into(),
+        HALTS => "HALTS".into(),
         DESTRUCT => "DESTRUCT".into(),
         IDENTITY => "IDENTITY".into(),
         BENCH_CALLER => "CALLER".into(),
@@ -60,6 +67,7 @@ fn name(address: Address) -> String {
     }
 }
 
+/// The frame `input` starts.
 fn frame(input: &FrameInput) -> String {
     match input {
         FrameInput::Call(inputs) => format!("call {}", name(inputs.target_address)),
@@ -68,6 +76,7 @@ fn frame(input: &FrameInput) -> String {
     }
 }
 
+/// How a frame ended: its result, output and gas.
 fn ended(result: &FrameResult) -> String {
     let (interpreter_result, gas) = (result.interpreter_result(), result.gas());
     format!(
@@ -80,6 +89,7 @@ fn ended(result: &FrameResult) -> String {
     )
 }
 
+/// Where `interp` is: its account, program counter, opcode, gas and stack depth.
 fn at(interp: &Interpreter) -> String {
     let pc = interp.bytecode.pc();
     let opcode = OpCode::new(interp.bytecode.opcode()).map_or("?", OpCode::as_str);
@@ -163,9 +173,11 @@ fn call(code: &mut Vec<u8>, target: Address) {
     code.extend_from_slice(&[CALL, POP]);
 }
 
+/// [`PARENT`]'s code.
 fn parent_code() -> Bytecode {
     let mut code = Vec::new();
     call(&mut code, CHILD);
+    call(&mut code, HALTS);
     call(&mut code, IDENTITY);
     call(&mut code, DESTRUCT);
     // The init code at the end of the first word, then CREATE(0, 32 - len, len).
@@ -186,6 +198,7 @@ fn parent_code() -> Bytecode {
     Bytecode::new_raw(code.into())
 }
 
+/// [`CHILD`]'s code.
 fn child_code() -> Bytecode {
     Bytecode::new_raw(
         vec![
@@ -195,6 +208,7 @@ fn child_code() -> Bytecode {
     )
 }
 
+/// [`DESTRUCT`]'s code.
 fn destruct_code() -> Bytecode {
     let mut code = vec![PUSH20];
     code.extend_from_slice(BENCH_CALLER.as_slice());
@@ -202,6 +216,7 @@ fn destruct_code() -> Bytecode {
     Bytecode::new_raw(code.into())
 }
 
+/// revm's mainnet EVM, with the accounts and a [`Recorder`].
 fn evm() -> MainnetEvm<Ctx, Recorder> {
     let mut db = Db::default();
     db.insert_account_info(
@@ -211,6 +226,7 @@ fn evm() -> MainnetEvm<Ctx, Recorder> {
     for (address, code, balance) in [
         (PARENT, parent_code(), 0),
         (CHILD, child_code(), 0),
+        (HALTS, Bytecode::new_raw(vec![PUSH0, INVALID].into()), 0),
         (DESTRUCT, destruct_code(), 5),
     ] {
         let info = AccountInfo::new(U256::from(balance), 1, code.hash_slow(), code);
@@ -222,6 +238,7 @@ fn evm() -> MainnetEvm<Ctx, Recorder> {
         .build_mainnet_with_inspector(Recorder::default())
 }
 
+/// The transaction to [`PARENT`].
 fn tx() -> TxEnv {
     TxEnv::builder_for_bench()
         .kind(TxKind::Call(PARENT))
@@ -316,29 +333,56 @@ const EXPECTED: &[&str] = &[
     "step PARENT 58 PUSH3 gas=953881 stack=6",
     "step_end PARENT 62 CALL gas=953878 stack=7",
     "step PARENT 62 CALL gas=953878 stack=7",
-    "step_end PARENT 63 POP gas=853778 stack=0",
+    "step_end PARENT 63 POP gas=851278 stack=0",
+    "frame_start call HALTS",
+    "call HALTS gas=100000",
+    "initialize_interp HALTS 0 PUSH0 gas=100000 stack=0",
+    "step HALTS 0 PUSH0 gas=100000 stack=0",
+    "step_end HALTS 1 INVALID gas=99998 stack=1",
+    "step HALTS 1 INVALID gas=99998 stack=1",
+    "step_end HALTS 2 STOP gas=99998 stack=1",
+    "call_end HALTS InvalidFEOpcode 0x remaining=99998 refunded=0 reservoir=0",
+    "frame_end call HALTS InvalidFEOpcode 0x remaining=99998 refunded=0 reservoir=0",
+    "step PARENT 63 POP gas=851278 stack=1",
+    "step_end PARENT 64 PUSH0 gas=851276 stack=0",
+    "step PARENT 64 PUSH0 gas=851276 stack=0",
+    "step_end PARENT 65 PUSH0 gas=851274 stack=1",
+    "step PARENT 65 PUSH0 gas=851274 stack=1",
+    "step_end PARENT 66 PUSH0 gas=851272 stack=2",
+    "step PARENT 66 PUSH0 gas=851272 stack=2",
+    "step_end PARENT 67 PUSH0 gas=851270 stack=3",
+    "step PARENT 67 PUSH0 gas=851270 stack=3",
+    "step_end PARENT 68 PUSH0 gas=851268 stack=4",
+    "step PARENT 68 PUSH0 gas=851268 stack=4",
+    "step_end PARENT 69 PUSH20 gas=851266 stack=5",
+    "step PARENT 69 PUSH20 gas=851266 stack=5",
+    "step_end PARENT 90 PUSH3 gas=851263 stack=6",
+    "step PARENT 90 PUSH3 gas=851263 stack=6",
+    "step_end PARENT 94 CALL gas=851260 stack=7",
+    "step PARENT 94 CALL gas=851260 stack=7",
+    "step_end PARENT 95 POP gas=751160 stack=0",
     "frame_start call IDENTITY",
     "call IDENTITY gas=100000",
     "call_end IDENTITY Return 0x remaining=99985 refunded=0 reservoir=0",
     "frame_end call IDENTITY Return 0x remaining=99985 refunded=0 reservoir=0",
-    "step PARENT 63 POP gas=953763 stack=1",
-    "step_end PARENT 64 PUSH0 gas=953761 stack=0",
-    "step PARENT 64 PUSH0 gas=953761 stack=0",
-    "step_end PARENT 65 PUSH0 gas=953759 stack=1",
-    "step PARENT 65 PUSH0 gas=953759 stack=1",
-    "step_end PARENT 66 PUSH0 gas=953757 stack=2",
-    "step PARENT 66 PUSH0 gas=953757 stack=2",
-    "step_end PARENT 67 PUSH0 gas=953755 stack=3",
-    "step PARENT 67 PUSH0 gas=953755 stack=3",
-    "step_end PARENT 68 PUSH0 gas=953753 stack=4",
-    "step PARENT 68 PUSH0 gas=953753 stack=4",
-    "step_end PARENT 69 PUSH20 gas=953751 stack=5",
-    "step PARENT 69 PUSH20 gas=953751 stack=5",
-    "step_end PARENT 90 PUSH3 gas=953748 stack=6",
-    "step PARENT 90 PUSH3 gas=953748 stack=6",
-    "step_end PARENT 94 CALL gas=953745 stack=7",
-    "step PARENT 94 CALL gas=953745 stack=7",
-    "step_end PARENT 95 POP gas=851145 stack=0",
+    "step PARENT 95 POP gas=851145 stack=1",
+    "step_end PARENT 96 PUSH0 gas=851143 stack=0",
+    "step PARENT 96 PUSH0 gas=851143 stack=0",
+    "step_end PARENT 97 PUSH0 gas=851141 stack=1",
+    "step PARENT 97 PUSH0 gas=851141 stack=1",
+    "step_end PARENT 98 PUSH0 gas=851139 stack=2",
+    "step PARENT 98 PUSH0 gas=851139 stack=2",
+    "step_end PARENT 99 PUSH0 gas=851137 stack=3",
+    "step PARENT 99 PUSH0 gas=851137 stack=3",
+    "step_end PARENT 100 PUSH0 gas=851135 stack=4",
+    "step PARENT 100 PUSH0 gas=851135 stack=4",
+    "step_end PARENT 101 PUSH20 gas=851133 stack=5",
+    "step PARENT 101 PUSH20 gas=851133 stack=5",
+    "step_end PARENT 122 PUSH3 gas=851130 stack=6",
+    "step PARENT 122 PUSH3 gas=851130 stack=6",
+    "step_end PARENT 126 CALL gas=851127 stack=7",
+    "step PARENT 126 CALL gas=851127 stack=7",
+    "step_end PARENT 127 POP gas=748527 stack=0",
     "frame_start call DESTRUCT",
     "call DESTRUCT gas=100000",
     "initialize_interp DESTRUCT 0 PUSH20 gas=100000 stack=0",
@@ -349,64 +393,65 @@ const EXPECTED: &[&str] = &[
     "selfdestruct DESTRUCT to CALLER value=5",
     "call_end DESTRUCT SelfDestruct 0x remaining=94997 refunded=0 reservoir=0",
     "frame_end call DESTRUCT SelfDestruct 0x remaining=94997 refunded=0 reservoir=0",
-    "step PARENT 95 POP gas=946142 stack=1",
-    "step_end PARENT 96 PUSH9 gas=946140 stack=0",
-    "step PARENT 96 PUSH9 gas=946140 stack=0",
-    "step_end PARENT 106 PUSH0 gas=946137 stack=1",
-    "step PARENT 106 PUSH0 gas=946137 stack=1",
-    "step_end PARENT 107 MSTORE gas=946135 stack=2",
-    "step PARENT 107 MSTORE gas=946135 stack=2",
-    "step_end PARENT 108 PUSH1 gas=946129 stack=0",
-    "step PARENT 108 PUSH1 gas=946129 stack=0",
-    "step_end PARENT 110 PUSH1 gas=946126 stack=1",
-    "step PARENT 110 PUSH1 gas=946126 stack=1",
-    "step_end PARENT 112 PUSH0 gas=946123 stack=2",
-    "step PARENT 112 PUSH0 gas=946123 stack=2",
-    "step_end PARENT 113 CREATE gas=946121 stack=3",
-    "step PARENT 113 CREATE gas=946121 stack=3",
-    "step_end PARENT 114 POP gas=14283 stack=0",
+    "step PARENT 127 POP gas=843524 stack=1",
+    "step_end PARENT 128 PUSH9 gas=843522 stack=0",
+    "step PARENT 128 PUSH9 gas=843522 stack=0",
+    "step_end PARENT 138 PUSH0 gas=843519 stack=1",
+    "step PARENT 138 PUSH0 gas=843519 stack=1",
+    "step_end PARENT 139 MSTORE gas=843517 stack=2",
+    "step PARENT 139 MSTORE gas=843517 stack=2",
+    "step_end PARENT 140 PUSH1 gas=843511 stack=0",
+    "step PARENT 140 PUSH1 gas=843511 stack=0",
+    "step_end PARENT 142 PUSH1 gas=843508 stack=1",
+    "step PARENT 142 PUSH1 gas=843508 stack=1",
+    "step_end PARENT 144 PUSH0 gas=843505 stack=2",
+    "step PARENT 144 PUSH0 gas=843505 stack=2",
+    "step_end PARENT 145 CREATE gas=843503 stack=3",
+    "step PARENT 145 CREATE gas=843503 stack=3",
+    "step_end PARENT 146 POP gas=12679 stack=0",
     "frame_start create by PARENT",
-    "create by PARENT gas=899836",
-    "initialize_interp 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 0 PUSH1 gas=899836 stack=0",
-    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 0 PUSH1 gas=899836 stack=0",
-    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 2 PUSH0 gas=899833 stack=1",
-    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 2 PUSH0 gas=899833 stack=1",
-    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 3 MSTORE gas=899831 stack=2",
-    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 3 MSTORE gas=899831 stack=2",
-    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 4 PUSH1 gas=899825 stack=0",
-    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 4 PUSH1 gas=899825 stack=0",
-    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 6 PUSH1 gas=899822 stack=1",
-    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 6 PUSH1 gas=899822 stack=1",
-    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 8 RETURN gas=899819 stack=2",
-    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 8 RETURN gas=899819 stack=2",
-    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 9 STOP gas=899819 stack=0",
-    "create_end Some(\"0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18\") Return 0xfe remaining=899619 refunded=0 reservoir=0",
-    "frame_end create by PARENT Return 0xfe remaining=899619 refunded=0 reservoir=0",
-    "step PARENT 114 POP gas=913902 stack=1",
-    "step_end PARENT 115 PUSH1 gas=913900 stack=0",
-    "step PARENT 115 PUSH1 gas=913900 stack=0",
-    "step_end PARENT 117 PUSH0 gas=913897 stack=1",
-    "step PARENT 117 PUSH0 gas=913897 stack=1",
-    "step_end PARENT 118 PUSH0 gas=913895 stack=2",
-    "step PARENT 118 PUSH0 gas=913895 stack=2",
-    "step_end PARENT 119 LOG1 gas=913893 stack=3",
-    "step PARENT 119 LOG1 gas=913893 stack=3",
-    "log_full PARENT 120 PUSH1 gas=913143 stack=0 Log { address: 0x00000000000000000000000000000000000c0de0, data: LogData { topics: [0x0000000000000000000000000000000000000000000000000000000000000007], data: 0x } }",
-    "step_end PARENT 120 PUSH1 gas=913143 stack=0",
-    "step PARENT 120 PUSH1 gas=913143 stack=0",
-    "step_end PARENT 122 PUSH0 gas=913140 stack=1",
-    "step PARENT 122 PUSH0 gas=913140 stack=1",
-    "step_end PARENT 123 RETURN gas=913138 stack=2",
-    "step PARENT 123 RETURN gas=913138 stack=2",
-    "step_end PARENT 124 STOP gas=913138 stack=0",
-    "call_end PARENT Return 0x000000000000000000000000000000000000000000000060fe5f526001601ff3 remaining=913138 refunded=0 reservoir=0",
-    "frame_end call PARENT Return 0x000000000000000000000000000000000000000000000060fe5f526001601ff3 remaining=913138 refunded=0 reservoir=0",
-    "result Success { reason: Return, gas: ResultGas { total_gas_spent: 86862, state_gas_spent: 0, refunded: 0, floor_gas: 21000 }, logs: [Log { address: 0x00000000000000000000000000000000000c0de0, data: LogData { topics: [0x0000000000000000000000000000000000000000000000000000000000000007], data: 0x } }], output: Call(0x000000000000000000000000000000000000000000000060fe5f526001601ff3) }",
+    "create by PARENT gas=798822",
+    "initialize_interp 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 0 PUSH1 gas=798822 stack=0",
+    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 0 PUSH1 gas=798822 stack=0",
+    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 2 PUSH0 gas=798819 stack=1",
+    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 2 PUSH0 gas=798819 stack=1",
+    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 3 MSTORE gas=798817 stack=2",
+    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 3 MSTORE gas=798817 stack=2",
+    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 4 PUSH1 gas=798811 stack=0",
+    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 4 PUSH1 gas=798811 stack=0",
+    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 6 PUSH1 gas=798808 stack=1",
+    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 6 PUSH1 gas=798808 stack=1",
+    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 8 RETURN gas=798805 stack=2",
+    "step 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 8 RETURN gas=798805 stack=2",
+    "step_end 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 9 STOP gas=798805 stack=0",
+    "create_end Some(\"0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18\") Return 0xfe remaining=798605 refunded=0 reservoir=0",
+    "frame_end create by PARENT Return 0xfe remaining=798605 refunded=0 reservoir=0",
+    "step PARENT 146 POP gas=811284 stack=1",
+    "step_end PARENT 147 PUSH1 gas=811282 stack=0",
+    "step PARENT 147 PUSH1 gas=811282 stack=0",
+    "step_end PARENT 149 PUSH0 gas=811279 stack=1",
+    "step PARENT 149 PUSH0 gas=811279 stack=1",
+    "step_end PARENT 150 PUSH0 gas=811277 stack=2",
+    "step PARENT 150 PUSH0 gas=811277 stack=2",
+    "step_end PARENT 151 LOG1 gas=811275 stack=3",
+    "step PARENT 151 LOG1 gas=811275 stack=3",
+    "log_full PARENT 152 PUSH1 gas=810525 stack=0 Log { address: 0x00000000000000000000000000000000000c0de0, data: LogData { topics: [0x0000000000000000000000000000000000000000000000000000000000000007], data: 0x } }",
+    "step_end PARENT 152 PUSH1 gas=810525 stack=0",
+    "step PARENT 152 PUSH1 gas=810525 stack=0",
+    "step_end PARENT 154 PUSH0 gas=810522 stack=1",
+    "step PARENT 154 PUSH0 gas=810522 stack=1",
+    "step_end PARENT 155 RETURN gas=810520 stack=2",
+    "step PARENT 155 RETURN gas=810520 stack=2",
+    "step_end PARENT 156 STOP gas=810520 stack=0",
+    "call_end PARENT Return 0x000000000000000000000000000000000000000000000060fe5f526001601ff3 remaining=810520 refunded=0 reservoir=0",
+    "frame_end call PARENT Return 0x000000000000000000000000000000000000000000000060fe5f526001601ff3 remaining=810520 refunded=0 reservoir=0",
+    "result Success { reason: Return, gas: ResultGas { total_gas_spent: 189480, state_gas_spent: 0, refunded: 0, floor_gas: 21000 }, logs: [Log { address: 0x00000000000000000000000000000000000c0de0, data: LogData { topics: [0x0000000000000000000000000000000000000000000000000000000000000007], data: 0x } }], output: Call(0x000000000000000000000000000000000000000000000060fe5f526001601ff3) }",
     "account 0x0000000000000000000000000000000000000000 balance=0 nonce=0 code=0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470 slots=[]",
     "account IDENTITY balance=0 nonce=0 code=0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470 slots=[]",
-    "account PARENT balance=0 nonce=2 code=0xdbf003432a6e20a1c2e13f77f0130cb233125ef7784a3402e451f5fab5fb380d slots=[]",
+    "account PARENT balance=0 nonce=2 code=0x768dfcacf8bd182319a6177b16b326be856c90ddb3e3ece4f54c6884fd242918 slots=[]",
     "account CHILD balance=0 nonce=1 code=0x67fda313dc72b1739f04ae407f6386f7db6466b9ee221a1c91ca0e0dbf9f648a slots=[(0, 0)]",
     "account DESTRUCT balance=0 nonce=1 code=0x7ff285cf123c2738db918e966277ec00263c11d3942a177731207a462269db36 slots=[]",
+    "account HALTS balance=0 nonce=1 code=0xf8e33f1c6e1a51f3b5f0cf6136a5ffe74392bd9bcca9d6a96614fe629ef3cf6d slots=[]",
     "account 0xed591dC4375A9E8c959dA1AAa3712ac1063fCC18 balance=0 nonce=1 code=0xbcc90f2d6dada5b18e155c17a1c0a55920aae94f39857d39d0d8ed07ae8f228b slots=[]",
     "account CALLER balance=1000000000000000000005 nonce=1 code=0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470 slots=[]",
 ];

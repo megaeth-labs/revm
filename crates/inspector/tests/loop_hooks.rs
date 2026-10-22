@@ -2,7 +2,8 @@
 //!
 //! A pending action: a consumer sets a frame's next action on its interpreter before the frame
 //! runs, at its start or when a child returned into it, and the frame's run returns that action
-//! before any instruction runs, without an inspector `step`.
+//! before any instruction runs, without an inspector `step`. A return ends the frame; a new frame
+//! starts a child, and the frame resumes on its result.
 //!
 //! A frame's run result: the result of a frame that ran reaches the consumer's
 //! [`EvmTr::frame_run_result`] once, as it leaves the frame's run, before the inspector's
@@ -16,7 +17,7 @@
 
 use context::{
     result::{EVMError, ExecutionResult, Output},
-    Context, ContextSetters, ContextTr, Evm, FrameStack, JournalTr, TxEnv,
+    Cfg, Context, ContextSetters, ContextTr, Evm, FrameStack, JournalTr, TxEnv,
 };
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use handler::{
@@ -29,8 +30,8 @@ use interpreter::{
     interpreter::{EthInterpreter, ExtBytecode},
     interpreter_action::FrameInit,
     interpreter_types::{Jumps, LoopControl},
-    CallInputs, CallOutcome, FrameInput, Gas, InputsImpl, InstructionResult, Interpreter,
-    InterpreterAction, InterpreterResult, SharedMemory,
+    CallInputs, CallOutcome, CreateInputs, CreateScheme, FrameInput, Gas, InputsImpl,
+    InstructionResult, Interpreter, InterpreterAction, InterpreterResult, SharedMemory,
 };
 use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
 use revm_inspector::{inspect_instructions, Inspector, InspectorEvmTr, InspectorHandler};
@@ -60,11 +61,16 @@ const CHILD: Address = address!("0x00000000000000000000000000000000000c0de1");
 const CHILD_GAS: [u8; 3] = [0x01, 0x86, 0xa0];
 /// The identity precompile, which revm answers without running a frame.
 const IDENTITY: Address = address!("0x0000000000000000000000000000000000000004");
+/// The gas the consumer takes from [`CHILD`] for the creation it starts there.
+const CREATION_GAS: u64 = 50_000;
 
 /// The output of the action the consumer sets on [`CHILD`] at its start.
 const AT_START: &[u8] = b"set at its start";
 /// The output of the action the consumer sets on [`PARENT`] when [`CHILD`] returns into it.
 const ON_RESUME: &[u8] = b"set on its resume";
+/// The output of the action the consumer sets on [`CHILD`] when the creation it started there
+/// returns into it.
+const AFTER_ITS_CHILD: &[u8] = b"set once its child returned";
 /// The output of the revert the consumer's hook makes of [`CHILD`]'s halt.
 const REWRITTEN: &[u8] = b"rewritten as it leaves its run";
 /// The output of the revert the inspector answers the call to [`CHILD`] with.
@@ -73,12 +79,22 @@ const ANSWERED: &[u8] = b"answered by the inspector";
 /// What the consumer does at the loops' points.
 #[derive(Clone, Copy, Debug, Default)]
 struct Plan {
-    /// A return carrying [`AT_START`] on [`CHILD`]'s frame, once revm built it.
-    at_start: bool,
+    /// What the consumer sets on [`CHILD`]'s frame, once revm built it.
+    at_start: Option<AtStart>,
     /// A return carrying [`ON_RESUME`] on [`PARENT`]'s frame, once [`CHILD`]'s result is in it.
     on_resume: bool,
     /// [`CHILD`]'s halt made a revert carrying [`REWRITTEN`] as it leaves its run.
     rewrite: bool,
+}
+
+/// The action the consumer sets on [`CHILD`]'s frame before it runs.
+#[derive(Clone, Copy, Debug)]
+enum AtStart {
+    /// A return carrying [`AT_START`].
+    Return,
+    /// A creation with no init code on [`CREATION_GAS`] and the shares of the frame's reservoir
+    /// and pools; once it returned into [`CHILD`], a return carrying [`AFTER_ITS_CHILD`].
+    Create,
 }
 
 /// What [`PARENT`] calls, and whether the call runs.
@@ -112,8 +128,22 @@ const fn name(address: Address) -> &'static str {
 fn target(input: &FrameInput) -> &'static str {
     match input {
         FrameInput::Call(inputs) => name(inputs.target_address),
-        _ => "other",
+        FrameInput::Create(_) => "CREATION",
+        FrameInput::Empty => "other",
     }
+}
+
+fn is_call_to(input: &FrameInput, address: Address) -> bool {
+    matches!(input, FrameInput::Call(inputs) if inputs.target_address == address)
+}
+
+/// A return of `frame` carrying `output`, on the gas it holds.
+const fn returning(frame: &EthFrame, output: &'static [u8]) -> InterpreterAction {
+    InterpreterAction::new_return(
+        InstructionResult::Return,
+        Bytes::from_static(output),
+        frame.interpreter.gas,
+    )
 }
 
 impl Inspector<Ctx> for Recorder {
@@ -198,20 +228,35 @@ impl EvmTr for Consumer {
         &mut self,
         frame_input: FrameInit,
     ) -> Result<FrameInitResult<'_, EthFrame>, ContextDbError<Ctx>> {
-        let child = target(&frame_input.frame_input) == "CHILD";
+        let at_start = self
+            .plan
+            .at_start
+            .filter(|_| is_call_to(&frame_input.frame_input, CHILD));
+        let params = self.evm.ctx.cfg().gas_params().clone();
         let mut started = self.evm.frame_init(frame_input)?;
-        if let ItemOrResult::Item(frame) = &mut started {
-            if child && self.plan.at_start {
-                let gas = frame.interpreter.gas;
-                frame
-                    .interpreter
-                    .bytecode
-                    .set_action(InterpreterAction::new_return(
-                        InstructionResult::Return,
-                        Bytes::from_static(AT_START),
-                        gas,
-                    ));
-            }
+        if let (Some(at_start), ItemOrResult::Item(frame)) = (at_start, &mut started) {
+            let action = match at_start {
+                AtStart::Return => returning(frame, AT_START),
+                AtStart::Create => {
+                    let gas = &mut frame.interpreter.gas;
+                    assert!(
+                        gas.record_regular_cost(CREATION_GAS),
+                        "the frame pays the creation"
+                    );
+                    let shares = gas.tracker_mut().forward_to_child(&params);
+                    let mut inputs = CreateInputs::new(
+                        CHILD,
+                        CreateScheme::Create,
+                        U256::ZERO,
+                        Bytes::new(),
+                        CREATION_GAS,
+                        shares.reservoir,
+                    );
+                    inputs.set_pool_shares(shares.pools);
+                    InterpreterAction::NewFrame(FrameInput::Create(Box::new(inputs)))
+                }
+            };
+            frame.interpreter.bytecode.set_action(action);
         }
         Ok(started)
     }
@@ -225,19 +270,21 @@ impl EvmTr for Consumer {
         result: FrameResult,
     ) -> Result<Option<FrameResult>, ContextDbError<Ctx>> {
         let returned = self.evm.frame_return_result(result)?;
-        if returned.is_none() && self.plan.on_resume {
-            let caller = self.evm.frame_stack.get();
-            let gas = caller.interpreter.gas;
-            caller
-                .interpreter
-                .bytecode
-                .set_action(InterpreterAction::new_return(
-                    InstructionResult::Return,
-                    Bytes::from_static(ON_RESUME),
-                    gas,
-                ));
+        if returned.is_some() {
+            return Ok(returned);
         }
-        Ok(returned)
+        let caller = self.evm.frame_stack.get();
+        let created = matches!(self.plan.at_start, Some(AtStart::Create));
+        let output = if is_call_to(&caller.input, CHILD) && created {
+            AFTER_ITS_CHILD
+        } else if is_call_to(&caller.input, PARENT) && self.plan.on_resume {
+            ON_RESUME
+        } else {
+            return Ok(None);
+        };
+        let action = returning(caller, output);
+        caller.interpreter.bytecode.set_action(action);
+        Ok(None)
     }
 
     /// Writes the result it got into the inspector's lines, and rewrites [`CHILD`]'s halt as
@@ -347,11 +394,7 @@ impl Run {
     /// The lines of `account`'s steps.
     fn steps(&self, account: &str) -> Vec<&str> {
         let prefix = format!("step {account} ");
-        self.events
-            .iter()
-            .map(String::as_str)
-            .filter(|line| line.starts_with(&prefix))
-            .collect()
+        self.lines(|line| line.starts_with(&prefix))
     }
 
     /// The consumer's hook lines.
@@ -364,6 +407,7 @@ impl Run {
         self.lines(|line| !line.starts_with("step"))
     }
 
+    /// The lines `keep` keeps, in order.
     fn lines(&self, keep: impl Fn(&str) -> bool) -> Vec<&str> {
         self.events
             .iter()
@@ -507,7 +551,7 @@ fn test_inspect_instructions_returns_a_pending_action_without_a_step() {
 #[test]
 fn test_an_action_set_at_a_frames_start_is_its_result() {
     let plan = Plan {
-        at_start: true,
+        at_start: Some(AtStart::Return),
         ..Plan::default()
     };
     for inspected in [false, true] {
@@ -517,12 +561,7 @@ fn test_an_action_set_at_a_frames_start_is_its_result() {
         assert_eq!(run.marked, (true, false), "the child ran no instruction");
         assert_eq!(run.hooks(), ["hook CHILD Return", "hook PARENT Return"]);
         if inspected {
-            let seen: Vec<&str> = run
-                .events
-                .iter()
-                .map(String::as_str)
-                .filter(|line| line.contains("CHILD"))
-                .collect();
+            let seen = run.lines(|line| line.contains("CHILD"));
             let end = format!("call_end CHILD Return {}", Bytes::from_static(AT_START));
             assert_eq!(
                 seen,
@@ -565,6 +604,52 @@ fn test_an_action_set_on_a_frames_resume_is_its_result() {
             assert_eq!(
                 &run.events[child_end + 1..],
                 ["hook PARENT Return", &end, "frame_end PARENT Return"]
+            );
+        }
+    }
+}
+
+/// A child the consumer starts from a frame's start runs before the frame does, and the frame
+/// returns the action the consumer sets once the child's result is in it: the frame runs no
+/// instruction of its own, on either path, and the inspector sees no step of it.
+#[test]
+fn test_a_child_started_at_a_frames_start_runs_before_the_frame() {
+    let plan = Plan {
+        at_start: Some(AtStart::Create),
+        ..Plan::default()
+    };
+    for inspected in [false, true] {
+        let run = run(plan, inspected);
+
+        assert_eq!(
+            run.output(),
+            &status_and(true, AFTER_ITS_CHILD),
+            "{inspected}"
+        );
+        assert_eq!(run.marked, (true, false), "the child ran no instruction");
+        assert_eq!(
+            run.hooks(),
+            [
+                "hook CREATION Return",
+                "hook CHILD Return",
+                "hook PARENT Return"
+            ],
+            "{inspected}"
+        );
+        if inspected {
+            assert_eq!(run.steps("CHILD"), Vec::<&str>::new());
+            let created = run
+                .events
+                .iter()
+                .position(|line| line == "frame_end CREATION Return");
+            let child_ends = run
+                .events
+                .iter()
+                .position(|line| line == "frame_end CHILD Return");
+            assert!(
+                created < child_ends,
+                "the creation ends first: {:?}",
+                run.events
             );
         }
     }
