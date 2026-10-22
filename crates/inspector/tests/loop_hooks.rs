@@ -601,6 +601,27 @@ fn test_an_inspector_cannot_halt_a_frame_whose_action_is_set_at_its_start() {
     );
 }
 
+/// An inspector that halts a frame in `initialize_interp` ends it before its first instruction
+/// and before any `step` (upstream's run calls `step` once first): the halt is the frame's result,
+/// and its caller gets a failed call and none of its gas back, the transaction's result when the
+/// frame's own `INVALID` halts it.
+#[test]
+fn test_an_inspectors_halt_in_initialize_interp_ends_the_frame_without_a_step() {
+    let halted = run_calling(Callee::HaltedAtInit, Plan::default(), true);
+
+    assert_eq!(halted.output(), &status_and(false, &[]));
+    assert_eq!(halted.result, run(Plan::default(), true).result);
+    assert_eq!(
+        halted.lines(|line| line.contains("CHILD")),
+        [
+            "initialize_interp CHILD",
+            "hook CHILD OutOfGas",
+            "call_end CHILD OutOfGas 0x",
+            "frame_end CHILD OutOfGas"
+        ]
+    );
+}
+
 /// An action the consumer sets on a caller once its child's result is in it is the caller's
 /// result: the rest of its code does not run, and the inspector sees no step of it after the
 /// child's end.
