@@ -323,6 +323,9 @@ impl<IW: InterpreterTypes> Interpreter<IW> {
     }
 
     /// Executes the interpreter until it returns or stops.
+    ///
+    /// An action set before the run ([`LoopControl::set_action`]) is returned before any
+    /// instruction runs.
     #[inline]
     pub fn run_plain<H: Host + ?Sized>(
         &mut self,
@@ -330,6 +333,10 @@ impl<IW: InterpreterTypes> Interpreter<IW> {
         gas_table: &GasTable,
         host: &mut H,
     ) -> InterpreterAction {
+        if self.bytecode.is_end() {
+            cold_path();
+            return self.take_next_action();
+        }
         let e = loop {
             if let Err(e) = self.step(instruction_table, gas_table, host) {
                 cold_path();

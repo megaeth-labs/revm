@@ -247,6 +247,9 @@ pub fn frame_end<CTX, INTR: InterpreterTypes>(
 /// This function is used to inspect the Interpreter loop.
 /// It will call [`Inspector::step`] and [`Inspector::step_end`] after each instruction.
 /// And [`Inspector::log`],[`Inspector::selfdestruct`] for each log and selfdestruct instruction.
+///
+/// An action set before the run ([`LoopControl::set_action`]) is returned before any
+/// instruction runs and before any [`Inspector::step`], as [`Interpreter::run_plain`] returns it.
 pub fn inspect_instructions<CTX, IT>(
     context: &mut CTX,
     interpreter: &mut Interpreter<IT>,
@@ -258,6 +261,10 @@ where
     CTX: ContextTr<Journal: JournalExt> + Host,
     IT: InterpreterTypes,
 {
+    if interpreter.bytecode.is_end() {
+        cold_path();
+        return interpreter.take_next_action();
+    }
     let mut instruction_journal_i = None;
     loop {
         inspector.step(interpreter, context);
