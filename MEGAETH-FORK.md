@@ -387,6 +387,36 @@ An id the fork once used for an entry with another default is left unused rather
 - **Removal.** When upstream carries an equivalent allowance, or when mega-evm drops the rule.
 - **Default.** Zero on every schedule, so every child starts with none and a draw returns the whole cost; nothing in the workspace draws it.
 
+### A pending action at a frame's run
+
+- **API.** No new item: upstream's `LoopControl::set_action` on a frame's interpreter, which `Interpreter::run_plain` (and `run_plain_as_output`) and `revm_inspector::inspect_instructions` honour before their first instruction.
+- **Contract.** An action set on a frame's interpreter before the frame runs is what the run returns, before any instruction runs. That is an action set once `frame_init` built the frame, or once `frame_return_result` put a child's result into its caller.
+  The plain and the inspected run return it alike: no instruction executes, so the frame's gas, stack, memory and program counter are as they were when it was set, and the inspected run calls neither `Inspector::step` nor `step_end` for that run.
+  The handler then processes it as any instruction's action (`process_next_action`): a `NewFrame` starts a child, a `Return` ends the frame on its result, as an instruction's return would.
+  A run that starts with no action set runs as upstream's: the inspector's `step` comes before each instruction, and an action the inspector sets in `step` ends the run after that `step`, as upstream's does.
+  An action an inspector sets in `initialize_interp` is pending when the run starts, so it is returned the same way, without a `step`; upstream's inspected run calls `step` once before returning it.
+  One action at a time: `set_action` asserts in a debug build that none is pending, so a consumer sets an action only on a frame that has none, and an inspector's `initialize_interp` or `step` must not set one on a frame that has one.
+- **Consumer.** mega-evm makes some of a frame's actions outside an instruction: the creation and the answer of a system contract's call, and the stop of a frame that a child left over a limit when it returns. They come back through the frame's run, so the loop starts the next frame or ends the frame, and an inspector sees the frame end.
+  Without the check, the plain run executes the frame's code before it returns the action, so mega-evm overrides `frame_run`, and the inspected run shows an inspector a `step` of an instruction that never runs.
+- **Removal.** When upstream's runs check for a pending action before their first instruction, or when mega-evm makes no action outside an instruction.
+- **Default.** revm sets no action before a run, so the check finds none and every run is upstream's, callbacks included, for a consumer and an inspector that set none.
+  Where measured (callgrind, the fork's release profile), the check costs about three instructions per frame run on the plain path: 6.03 per `CALL` (+0.23% on a transaction of 64 calls) and 6.12 per nested `CREATE`, which each run two frames (the child, and the caller's resume); 2 or 3 for a transaction whose one frame runs code; nothing for a transfer to an account without code or a precompile's answer, which run no frame. The inspected run was not measured.
+
+### A frame's run result
+
+- **API.** `EvmTr::frame_run_result(&mut self, result: &mut FrameResult) -> Result<(), ContextDbError<_>>`, a provided method.
+- **Contract.** The handler loops hand it the result of each frame that ran and returns, once, as the frame's run left it: after `process_next_action` processed the frame's last action (`return_create`'s checks and charges included, for a creation), with the frame marked finished and still on top of the stack.
+  On the plain path `Handler::run_exec_loop` calls it when `frame_run` returns a result. On the inspected path `InspectorEvmTr::inspect_frame_run` calls it before the inspector's `call_end` or `create_end` and its `frame_end`, and also for a frame without an `EthFrame`, whose run calls no inspector. On both, it runs before `frame_return_result`.
+  What it leaves in `result` is what everything after it sees: the inspector's end callbacks, `frame_return_result` and so the caller, and `last_frame_result` for the transaction's frame. An error it returns ends the transaction as an error of `frame_run` would. It leaves the frame stack as it found it.
+  A frame that returns a pending action (see A pending action at a frame's run) ran, and its result reaches it.
+  A result given without a run does not reach it: `frame_init` returns those (a start the handler refuses, a precompile's answer, an inspector's answer from `frame_start`, `call` or `create`, and an answer of a consumer's own `frame_init`). The consumer's `frame_init` has them first, and an inspector's answer is the inspector's.
+  The calls are in the loops, not in `Evm::frame_run`, so an EVM type that wraps revm's `Evm` and delegates `frame_run` to it gets its own `frame_run_result` called. A handler that overrides `run_exec_loop`, or an EVM type that overrides `inspect_frame_run`, calls it at the same point itself.
+- **Consumer.** mega-evm decides how a frame that crossed its compute limit ends: its out-of-gas becomes a revert carrying the limit's output, with its gas put back. That has to happen once, before an inspector sees the frame end, on both paths. The plain path could do it in `frame_return_result`, but the inspected run calls `frame_end` before that, so a tracer would see the out-of-gas the caller never gets.
+- **Removal.** When upstream has an equivalent point between a frame's last action and the inspector's end of it, or when mega-evm rewrites no frame's end.
+- **Default.** Does nothing, so every result and every callback is upstream's.
+  Where measured (callgrind, the fork's release profile), the default compiles to nothing on the plain path: the costs measured under A pending action at a frame's run are that check's. The inspected path was not measured.
+  The inspected run marks a frame finished before the hook, where upstream's marked it after `frame_end`, so the hook sees the frame as the plain loop leaves it; no inspector callback is handed the frame, so none can tell.
+
 ## Baseline behaviour the fork changes
 
 Picked upstream fixes change revm 40.0.3's results where 40.0.3 was wrong; that is why they are taken (see Tracking upstream), and each pick's pull request says what it changes.
