@@ -124,9 +124,14 @@ pub trait EvmTr {
     /// The handler loops call it once for each frame that ran and returns, after the frame's
     /// last action was processed and the frame marked finished, while the frame is still on top of
     /// the stack: `Handler::run_exec_loop` when [`frame_run`](EvmTr::frame_run) returns a result,
-    /// and the inspected run (`InspectorEvmTr::inspect_frame_run`) before the inspector's
-    /// `call_end`, `create_end` and `frame_end`. On both paths it runs before
+    /// and the provided inspected run (`InspectorEvmTr::inspect_frame_run`) before the
+    /// inspector's `call_end`, `create_end` and `frame_end`. On both paths it runs before
     /// [`frame_return_result`](EvmTr::frame_return_result).
+    ///
+    /// The calls are on the EVM the loops run, so an EVM type that delegates `frame_run` to an
+    /// inner EVM still has its own method called. An override of `run_exec_loop` or of
+    /// `inspect_frame_run` calls it at the same point itself; one that delegates
+    /// `inspect_frame_run` to an inner EVM reaches the inner EVM's method instead.
     ///
     /// A result given without a run does not reach it: [`frame_init`](EvmTr::frame_init)
     /// returns those (a start the handler refuses, a precompile's answer, an inspector's answer),
