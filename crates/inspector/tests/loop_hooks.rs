@@ -4,9 +4,15 @@
 //! runs, at its start or when a child returned into it, and the frame's run returns that action
 //! before any instruction runs, without an inspector `step`.
 //!
+//! A frame's run result: the result of a frame that ran reaches the consumer's
+//! [`EvmTr::frame_run_result`] once, as it leaves the frame's run, before the inspector's
+//! `call_end` and `frame_end` and before its caller; what the consumer leaves in it is what they
+//! see. A result given without a run (a precompile's, an inspector's answer) does not reach it.
+//!
 //! The consumer here wraps revm's EVM and changes nothing else: [`PARENT`] calls [`CHILD`], then
 //! marks a slot of its own, and returns the call's status and return data; [`CHILD`] marks a slot
-//! of its own and halts. A slot left unmarked is an instruction that did not run.
+//! of its own and halts. A slot left unmarked is an instruction that did not run. The consumer's
+//! hook writes its line into the inspector's, so one list orders both.
 
 use context::{
     result::{EVMError, ExecutionResult, Output},
@@ -23,8 +29,8 @@ use interpreter::{
     interpreter::{EthInterpreter, ExtBytecode},
     interpreter_action::FrameInit,
     interpreter_types::{Jumps, LoopControl},
-    CallInputs, CallOutcome, FrameInput, InputsImpl, InstructionResult, Interpreter,
-    InterpreterAction, SharedMemory,
+    CallInputs, CallOutcome, FrameInput, Gas, InputsImpl, InstructionResult, Interpreter,
+    InterpreterAction, InterpreterResult, SharedMemory,
 };
 use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
 use revm_inspector::{inspect_instructions, Inspector, InspectorEvmTr, InspectorHandler};
@@ -45,38 +51,60 @@ type Error = EVMError<Infallible>;
 const SPEC: SpecId = SpecId::OSAKA;
 const GAS_LIMIT: u64 = 1_000_000;
 
-/// Calls [`CHILD`] with [`CHILD_GAS`], marks its slot 0, and returns the call's status as a word
-/// followed by the call's return data.
+/// Calls [`CHILD`] (or the [`Callee`] a test names) with [`CHILD_GAS`], marks its slot 0, and
+/// returns the call's status as a word followed by the call's return data.
 const PARENT: Address = address!("0x00000000000000000000000000000000000c0de0");
 /// Marks its slot 0 and halts on `INVALID`.
 const CHILD: Address = address!("0x00000000000000000000000000000000000c0de1");
 /// The gas [`PARENT`] forwards to [`CHILD`], whose halt spends it: 0x0186a0.
 const CHILD_GAS: [u8; 3] = [0x01, 0x86, 0xa0];
+/// The identity precompile, which revm answers without running a frame.
+const IDENTITY: Address = address!("0x0000000000000000000000000000000000000004");
 
 /// The output of the action the consumer sets on [`CHILD`] at its start.
 const AT_START: &[u8] = b"set at its start";
 /// The output of the action the consumer sets on [`PARENT`] when [`CHILD`] returns into it.
 const ON_RESUME: &[u8] = b"set on its resume";
+/// The output of the revert the consumer's hook makes of [`CHILD`]'s halt.
+const REWRITTEN: &[u8] = b"rewritten as it leaves its run";
+/// The output of the revert the inspector answers the call to [`CHILD`] with.
+const ANSWERED: &[u8] = b"answered by the inspector";
 
-/// Where the consumer sets an action before a frame runs.
+/// What the consumer does at the loops' points.
 #[derive(Clone, Copy, Debug, Default)]
 struct Plan {
     /// A return carrying [`AT_START`] on [`CHILD`]'s frame, once revm built it.
     at_start: bool,
     /// A return carrying [`ON_RESUME`] on [`PARENT`]'s frame, once [`CHILD`]'s result is in it.
     on_resume: bool,
+    /// [`CHILD`]'s halt made a revert carrying [`REWRITTEN`] as it leaves its run.
+    rewrite: bool,
+}
+
+/// What [`PARENT`] calls, and whether the call runs.
+#[derive(Clone, Copy, Debug)]
+enum Callee {
+    /// [`CHILD`], which runs.
+    Child,
+    /// [`IDENTITY`], which revm answers.
+    Precompile,
+    /// [`CHILD`], which the inspector answers with a revert carrying [`ANSWERED`].
+    Answered,
 }
 
 /// What the inspector saw, one line per callback, by the account the frame runs as.
 #[derive(Debug, Default)]
 struct Recorder {
     events: Vec<String>,
+    /// Answers the call to [`CHILD`].
+    answer: bool,
 }
 
 const fn name(address: Address) -> &'static str {
     match address {
         PARENT => "PARENT",
         CHILD => "CHILD",
+        IDENTITY => "IDENTITY",
         _ => "other",
     }
 }
@@ -102,6 +130,21 @@ impl Inspector<Ctx> for Recorder {
     fn step_end(&mut self, interp: &mut Interpreter, _: &mut Ctx) {
         let (account, pc) = (name(interp.input.target_address), interp.bytecode.pc());
         self.events.push(format!("step_end {account} {pc}"));
+    }
+
+    fn call(&mut self, _: &mut Ctx, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        if !self.answer || inputs.target_address != CHILD {
+            return None;
+        }
+        let result = InterpreterResult::new(
+            InstructionResult::Revert,
+            Bytes::from_static(ANSWERED),
+            Gas::new(inputs.gas_limit),
+        );
+        Some(CallOutcome::new(
+            result,
+            inputs.return_memory_offset.clone(),
+        ))
     }
 
     fn call_end(&mut self, _: &mut Ctx, inputs: &CallInputs, outcome: &mut CallOutcome) {
@@ -196,6 +239,24 @@ impl EvmTr for Consumer {
         }
         Ok(returned)
     }
+
+    /// Writes the result it got into the inspector's lines, and rewrites [`CHILD`]'s halt as
+    /// [`Plan::rewrite`] says.
+    fn frame_run_result(&mut self, result: &mut FrameResult) -> Result<(), ContextDbError<Ctx>> {
+        let frame = self.evm.frame_stack.get();
+        assert!(frame.is_finished(), "the frame on top is the one that ran");
+        let (account, got) = (target(&frame.input), result.instruction_result());
+        self.evm
+            .inspector
+            .events
+            .push(format!("hook {account} {got:?}"));
+        if self.plan.rewrite && got == InstructionResult::InvalidFEOpcode {
+            let result = result.interpreter_result_mut();
+            result.result = InstructionResult::Revert;
+            result.output = Bytes::from_static(REWRITTEN);
+        }
+        Ok(())
+    }
 }
 
 impl InspectorEvmTr for Consumer {
@@ -226,10 +287,10 @@ impl InspectorEvmTr for Consumer {
     }
 }
 
-/// [`PARENT`]'s code.
-fn parent_code() -> Bytecode {
+/// [`PARENT`]'s code, calling `callee`.
+fn parent_code(callee: Address) -> Bytecode {
     let mut code = vec![PUSH0, PUSH0, PUSH0, PUSH0, PUSH0, PUSH20];
-    code.extend_from_slice(CHILD.as_slice());
+    code.extend_from_slice(callee.as_slice());
     code.push(PUSH3);
     code.extend_from_slice(&CHILD_GAS);
     code.extend_from_slice(&[
@@ -292,17 +353,45 @@ impl Run {
             .filter(|line| line.starts_with(&prefix))
             .collect()
     }
+
+    /// The consumer's hook lines.
+    fn hooks(&self) -> Vec<&str> {
+        self.lines(|line| line.starts_with("hook "))
+    }
+
+    /// Every line but the steps: the frames' starts and ends, and the hook's.
+    fn ends(&self) -> Vec<&str> {
+        self.lines(|line| !line.starts_with("step"))
+    }
+
+    fn lines(&self, keep: impl Fn(&str) -> bool) -> Vec<&str> {
+        self.events
+            .iter()
+            .map(String::as_str)
+            .filter(|line| keep(line))
+            .collect()
+    }
 }
 
-/// Runs a transaction to [`PARENT`] through the mainnet handler on the consumer's EVM, inspected
-/// or not.
+/// Runs a transaction to [`PARENT`], calling [`CHILD`], through the mainnet handler on the
+/// consumer's EVM, inspected or not.
 fn run(plan: Plan, inspected: bool) -> Run {
+    run_calling(Callee::Child, plan, inspected)
+}
+
+/// [`run`], with [`PARENT`] calling `callee`.
+fn run_calling(callee: Callee, plan: Plan, inspected: bool) -> Run {
+    let (address, answer) = match callee {
+        Callee::Child => (CHILD, false),
+        Callee::Precompile => (IDENTITY, false),
+        Callee::Answered => (CHILD, true),
+    };
     let mut db = Db::default();
     db.insert_account_info(
         BENCH_CALLER,
         AccountInfo::from_balance(U256::from(10u128.pow(21))),
     );
-    for (address, code) in [(PARENT, parent_code()), (CHILD, child_code())] {
+    for (address, code) in [(PARENT, parent_code(address)), (CHILD, child_code())] {
         db.insert_account_info(
             address,
             AccountInfo::new(U256::ZERO, 1, code.hash_slow(), code),
@@ -312,7 +401,10 @@ fn run(plan: Plan, inspected: bool) -> Run {
         .with_db(db)
         .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SPEC));
     let mut consumer = Consumer {
-        evm: ctx.build_mainnet_with_inspector(Recorder::default()),
+        evm: ctx.build_mainnet_with_inspector(Recorder {
+            answer,
+            ..Recorder::default()
+        }),
         plan,
     };
     consumer.evm.ctx.set_tx(
@@ -423,6 +515,7 @@ fn test_an_action_set_at_a_frames_start_is_its_result() {
 
         assert_eq!(run.output(), &status_and(true, AT_START), "{inspected}");
         assert_eq!(run.marked, (true, false), "the child ran no instruction");
+        assert_eq!(run.hooks(), ["hook CHILD Return", "hook PARENT Return"]);
         if inspected {
             let seen: Vec<&str> = run
                 .events
@@ -433,7 +526,12 @@ fn test_an_action_set_at_a_frames_start_is_its_result() {
             let end = format!("call_end CHILD Return {}", Bytes::from_static(AT_START));
             assert_eq!(
                 seen,
-                ["initialize_interp CHILD", &end, "frame_end CHILD Return"]
+                [
+                    "initialize_interp CHILD",
+                    "hook CHILD Return",
+                    &end,
+                    "frame_end CHILD Return"
+                ]
             );
         }
     }
@@ -466,8 +564,89 @@ fn test_an_action_set_on_a_frames_resume_is_its_result() {
             let end = format!("call_end PARENT Return {}", Bytes::from_static(ON_RESUME));
             assert_eq!(
                 &run.events[child_end + 1..],
-                [end.as_str(), "frame_end PARENT Return"]
+                ["hook PARENT Return", &end, "frame_end PARENT Return"]
             );
         }
     }
+}
+
+/// The result of each frame that ran reaches the consumer once, as it leaves the frame's run, on
+/// both paths; on the inspected path, before the inspector's `call_end` and `frame_end`.
+#[test]
+fn test_a_frames_run_result_reaches_the_consumer_once_before_the_inspector() {
+    for inspected in [false, true] {
+        let run = run(Plan::default(), inspected);
+
+        assert_eq!(
+            run.hooks(),
+            ["hook CHILD InvalidFEOpcode", "hook PARENT Return"],
+            "{inspected}"
+        );
+        if inspected {
+            let parent_end = format!("call_end PARENT Return {}", status_and(false, &[]));
+            assert_eq!(
+                run.ends(),
+                [
+                    "initialize_interp PARENT",
+                    "initialize_interp CHILD",
+                    "hook CHILD InvalidFEOpcode",
+                    "call_end CHILD InvalidFEOpcode 0x",
+                    "frame_end CHILD InvalidFEOpcode",
+                    "hook PARENT Return",
+                    &parent_end,
+                    "frame_end PARENT Return",
+                ]
+            );
+        }
+    }
+}
+
+/// What the consumer leaves in a frame's result is what the inspector and the caller see: the
+/// child's halt, made a revert with output, reaches the inspector's ends and the caller's status
+/// and return data as that revert.
+#[test]
+fn test_the_consumers_rewrite_is_what_the_inspector_and_the_caller_see() {
+    let plan = Plan {
+        rewrite: true,
+        ..Plan::default()
+    };
+    for inspected in [false, true] {
+        let run = run(plan, inspected);
+
+        assert_eq!(run.output(), &status_and(false, REWRITTEN), "{inspected}");
+        assert_eq!(
+            run.marked,
+            (true, false),
+            "the revert took the child's mark back"
+        );
+        if inspected {
+            let child_end = format!("call_end CHILD Revert {}", Bytes::from_static(REWRITTEN));
+            let seen = run.ends();
+            let from = seen
+                .iter()
+                .position(|line| *line == "hook CHILD InvalidFEOpcode")
+                .expect("the hook saw the halt");
+            assert_eq!(
+                seen[from + 1..from + 3],
+                [&child_end, "frame_end CHILD Revert"]
+            );
+        }
+    }
+}
+
+/// A result given without a run does not reach the consumer: neither a precompile's answer, which
+/// revm gives at the frame's start, nor an inspector's.
+#[test]
+fn test_a_result_given_without_a_run_does_not_reach_the_consumer() {
+    for inspected in [false, true] {
+        let run = run_calling(Callee::Precompile, Plan::default(), inspected);
+
+        assert_eq!(run.output(), &status_and(true, &[]), "{inspected}");
+        assert_eq!(run.hooks(), ["hook PARENT Return"], "{inspected}");
+    }
+
+    let run = run_calling(Callee::Answered, Plan::default(), true);
+
+    assert_eq!(run.output(), &status_and(false, ANSWERED));
+    assert_eq!(run.hooks(), ["hook PARENT Return"]);
 }

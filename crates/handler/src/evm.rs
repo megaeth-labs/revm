@@ -117,6 +117,31 @@ pub trait EvmTr {
         &mut self,
     ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>>;
 
+    /// Receives the result of the frame on top of the stack as it leaves the frame's own run,
+    /// before anything else sees it. What it leaves in `result` is what the inspector and the
+    /// caller see.
+    ///
+    /// The handler loops call it once for each frame that ran and returns, after the frame's
+    /// last action was processed and the frame marked finished, while the frame is still on top of
+    /// the stack: `Handler::run_exec_loop` when [`frame_run`](EvmTr::frame_run) returns a result,
+    /// and the inspected run (`InspectorEvmTr::inspect_frame_run`) before the inspector's
+    /// `call_end`, `create_end` and `frame_end`. On both paths it runs before
+    /// [`frame_return_result`](EvmTr::frame_return_result).
+    ///
+    /// A result given without a run does not reach it: [`frame_init`](EvmTr::frame_init)
+    /// returns those (a start the handler refuses, a precompile's answer, an inspector's answer),
+    /// so `frame_init`, or the inspector, has them first.
+    ///
+    /// The default does nothing.
+    #[inline]
+    fn frame_run_result(
+        &mut self,
+        result: &mut <Self::Frame as FrameTr>::FrameResult,
+    ) -> Result<(), ContextDbError<Self::Context>> {
+        let _ = result;
+        Ok(())
+    }
+
     /// Returns the result of the frame to the caller. Frame is popped from the frame stack.
     /// Consumes the frame result or returns it if there is more frames to run.
     fn frame_return_result(

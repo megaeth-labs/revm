@@ -564,7 +564,10 @@ pub trait Handler {
                         ItemOrResult::Result(result) => result,
                     }
                 }
-                ItemOrResult::Result(result) => result,
+                ItemOrResult::Result(mut result) => {
+                    evm.frame_run_result(&mut result)?;
+                    result
+                }
             };
 
             if let Some(result) = evm.frame_return_result(result)? {
