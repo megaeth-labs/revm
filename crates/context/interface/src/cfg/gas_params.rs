@@ -232,9 +232,6 @@ impl GasParams {
             gas::NON_ZERO_BYTE_MULTIPLIER;
         table[GasId::tx_token_cost().as_usize()] = gas::STANDARD_TOKEN_COST;
         table[GasId::tx_base_stipend().as_usize()] = 21000;
-        // The fork's entries are zero on every spec, as upstream's table has them: a caller keeps
-        // none of its reservoir and none of any pool while its child runs, and a value call's
-        // child has no history allowance.
 
         if spec.is_enabled_in(SpecId::HOMESTEAD) {
             table[GasId::tx_create_cost().as_usize()] = gas::CREATE;
@@ -826,6 +823,7 @@ impl GasParams {
     #[inline]
     pub fn pool_forward_share(&self, pool: PoolId, remaining: u64) -> u64 {
         let kept = self.get(GasId::pool_kept_percent(pool));
+        // The default, the whole pool, without the arithmetic.
         if kept == 0 {
             return remaining;
         }
@@ -844,6 +842,7 @@ impl GasParams {
     #[inline]
     pub fn reservoir_forward_share(&self, reservoir: u64) -> u64 {
         let kept = self.get(GasId::reservoir_kept_percent());
+        // The default, the whole reservoir, without the arithmetic.
         if kept == 0 {
             return reservoir;
         }
@@ -1701,9 +1700,8 @@ impl GasId {
     /// schedule defined here.
     ///
     /// A fork id, allocated from the top of the table below
-    /// [`code_deposit_history_gas`](Self::code_deposit_history_gas). Id 254, between the two, is
-    /// left unused: an earlier revision of the fork put a forward percentage there, 100 by
-    /// default, which a table encoded then still holds and which no entry reads.
+    /// [`code_deposit_history_gas`](Self::code_deposit_history_gas); id 254, between the two, is
+    /// left unused (see [`reservoir_kept_percent`](Self::reservoir_kept_percent)).
     pub const fn call_history_allowance() -> GasId {
         Self::new(253)
     }
@@ -1716,10 +1714,11 @@ impl GasId {
     /// the entry, such as upstream's or one encoded before the entry existed; a chain that keeps
     /// part of a pool for the caller raises it, and a hundred forwards none.
     ///
-    /// Fork ids, one per pool, allocated from the top of the table below
-    /// [`call_history_allowance`](Self::call_history_allowance): pool `i` at `252 - i`.
+    /// Fork ids, one per pool, allocated downward below
+    /// [`reservoir_kept_percent`](Self::reservoir_kept_percent): pool `i` at `248 - i`, so a later
+    /// pool takes the next id below them.
     pub const fn pool_kept_percent(pool: PoolId) -> GasId {
-        Self::new(252 - pool.index() as u8)
+        Self::new(248 - pool.index() as u8)
     }
 
     /// The part of a caller's EIP-8037 reservoir the caller keeps while its child frame runs, in
@@ -1731,8 +1730,10 @@ impl GasId {
     /// entry existed; a chain that keeps part of the reservoir for the caller raises it, and a
     /// hundred forwards none.
     ///
-    /// A fork id, allocated from the top of the table below the pools'
-    /// ([`pool_kept_percent`](Self::pool_kept_percent)).
+    /// A fork id, allocated from the top of the table below
+    /// [`call_history_allowance`](Self::call_history_allowance). Ids 254 and 250 to 252 are left
+    /// unused: earlier revisions of the fork put forward percentages there, 100 by default, which
+    /// a table encoded then still holds and which no entry reads.
     pub const fn reservoir_kept_percent() -> GasId {
         Self::new(249)
     }
@@ -1821,10 +1822,10 @@ mod tests {
 
         // The known GasIds are upstream's indices 1-49 (0 is unused) plus the fork's, allocated
         // from the top of the table so upstream's next sequential id does not collide with them:
-        // `code_deposit_history_gas` at 255, `call_history_allowance` at 253, the three pools'
-        // kept percents at 252, 251 and 250 and `reservoir_kept_percent` at 249; 254 is unused.
-        // Every one of them has a name.
-        let expected_ids: HashSet<u8> = (1..=49).chain(249..=253).chain([255]).collect();
+        // `code_deposit_history_gas` at 255, `call_history_allowance` at 253,
+        // `reservoir_kept_percent` at 249 and the three pools' kept percents at 248, 247 and 246;
+        // 254 and 250 to 252 are unused. Every one of them has a name.
+        let expected_ids: HashSet<u8> = (1..=49).chain(246..=249).chain([253, 255]).collect();
         assert_eq!(named_ids, expected_ids);
         assert_eq!(
             unique_names.len(),
@@ -1939,26 +1940,32 @@ mod tests {
             assert_eq!(GasId::from_name(name), Some(id));
             assert_eq!(id.name(), name);
         }
-        assert_eq!(GasId::new(254).name(), "unknown", "254 is unused");
+        for unused in [250, 251, 252, 254] {
+            assert_eq!(GasId::new(unused).name(), "unknown", "{unused} is unused");
+        }
     }
 
     /// Tables that lack the fork's share entries, each as a consumer could hold one: all zeros;
     /// upstream's table, which has no entry above id 49, as is a table of the fork's release before
-    /// the shares, whose one entry above it (id 255) is zero by default; and that table with the
-    /// forward percentage an earlier revision of the shares put at id 254, at its default of 100
-    /// and at the 98 a consumer set.
-    fn tables_without_the_share_entries() -> [(&'static str, [u64; 256]); 4] {
+    /// the shares, whose one entry above it (id 255) is zero by default; that table with the
+    /// forward percentage an earlier revision put at id 254, at its default of 100 and at the 98 a
+    /// consumer set; and with the forward percentages a later one put at ids 254 and 250 to 252,
+    /// at their default of 100.
+    fn tables_without_the_share_entries() -> [(&'static str, [u64; 256]); 5] {
         let mut upstream = *GasParams::new_spec(SpecId::AMSTERDAM).table();
         upstream[50..].fill(0);
         let mut earlier_default = upstream;
         earlier_default[254] = 100;
         let mut earlier_98 = upstream;
         earlier_98[254] = 98;
+        let mut later_default = earlier_default;
+        later_default[250..=252].fill(100);
         [
             ("all zeros", [0; 256]),
             ("upstream's", upstream),
             ("an earlier revision's, at its default", earlier_default),
             ("an earlier revision's, at 98", earlier_98),
+            ("a later revision's, at its defaults", later_default),
         ]
     }
 
