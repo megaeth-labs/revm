@@ -154,8 +154,8 @@ A format that encodes a struct by position, such as bincode, cannot read such an
 - **Consumer.** mega-evm's gas detention reads what a halting frame burned. An `OutOfGas` halt zeroes the frame's regular gas inside the interpreter, before the frame's result reaches any boundary mega-evm owns.
 - **Removal.** When upstream keeps a halting frame's regular gas readable, or when mega-evm no longer reads what a halting frame burned.
 - **Default.** Each record is written on the failure side only: the tracker's in cold, out-of-line functions, the interpreter's in its cold out-of-gas halt, the handler's on a precompile's out-of-gas. A deduction or load that succeeds runs the same code.
-  It was two words as an `Option<u64>`: the tracker was 88 bytes with it, and a copy of the tracker, and of every `Gas` and frame result that holds one, 16 bytes larger.
-  It is now a number and a flag, and the flag shares its word with the byte pool's crossing (see The byte pool); the record's encoding is unchanged, an optional number in the same place.
+  It takes two words of the tracker, a number and a flag, and the flag's word also holds the byte pool's crossing (see The byte pool); every copy of the tracker, and of every `Gas` and frame result that holds one, carries both words.
+  Encoded, the record is an optional number in the field's place.
   Where measured (callgrind, the fork's release profile), the field left a transfer and a precompile call unchanged and cost about 0.1% of the instructions of a creation; the records written on the failure side add nothing measurable.
 
 ### Precompile price
@@ -201,9 +201,9 @@ A format that encodes a struct by position, such as bincode, cannot read such an
 - **Default.** `return_create` compiles to the same code, on its own and inlined into the handler on the plain and the inspected path.
   Inlined into a consumer's own function, the admitting default may shift its block layout; where measured, that cost one unconditional branch on one out-of-gas path and changed no success path.
   Where measured (callgrind, the fork's release profile), lending `gas` costs nothing: a top-level creation runs the same instruction count as without it, and a nested `CREATE` 0.06 fewer.
-  The `gas` parameter changed this released hook's signature, an exception to rule 1 (`api:exception`): an override does not compile until it takes the parameter.
-  mega-evm's `MegaContext::admit_code_deposit` is the one override found, in Satin W9 (`cz/feat/satin-w9` at `f1d1a48d`, `crates/mega-evm/src/evm/context.rs:696`) and the W8 trees before it.
-  The legacy engine (`cz/feat/legacy-on-fork` at `501cc7cc`), alloy-evm 0.36, revm-inspectors 0.40, the op-revm fork and mega-reth (`2dc2f44ac8`, `b97b508a0b`) do not override it, and nothing built against upstream revm can, since the hook is the fork's.
+  The `gas` parameter is an exception to rule 1 (`api:exception`): an override written for the signature without it does not compile until it takes `gas: &mut GasTracker`, and an override that leaves `gas` alone behaves as it did without it.
+  A context that forwards the method to another forwards `gas` with it.
+  Nothing built against upstream revm overrides the hook, since the hook is the fork's.
 
 ### revm 40.0.3's journal semantics
 
@@ -219,6 +219,7 @@ A format that encodes a struct by position, such as bincode, cannot read such an
 - **API.** `Host::write_completed(&mut self, write: CompletedWrite<'_>, gas: &mut GasTracker) -> WriteVerdict`, whose default continues.
   `CompletedWrite` (`Sstore`, `Log`, `SelfDestruct`, with the write's account and what the instruction knows of it; `SelfDestruct` also carries `balance`, the destructed account's balance before the write) and `WriteVerdict` (`Continue`, `OutOfGas`, `Revert(Bytes)`), in `revm_context_interface::host`.
   `CompletedWrite` is exhaustive on purpose: mega-evm matches it to meter each write, so a new kind is a compile error in every consumer that matches it rather than a write that passes a wildcard arm un-metered, and adding one is an `api:exception` change.
+  Its variants' fields are exhaustive too: a consumer that builds a variant, or matches one naming every field without `..`, names every field, `SelfDestruct`'s `balance` included, and a field added to a variant is an `api:exception` change as a new kind is.
 - **Contract.** `SSTORE`, `LOG0`–`LOG4` and `SELFDESTRUCT` call it once the write is in the journal and every charge the instruction makes has been made, its refund included, so only on the instruction's success path, on the plain and the inspected path.
   `gas` is the running frame's tracker. The hook may debit and credit it, and the instruction uses it as the hook left it: nothing is charged after the hook. A charge the hook makes that fails records as any failed charge does (see The failed-charge record), whatever the verdict.
   `Continue` ends the instruction as it would have ended. `OutOfGas` fails it as a failed charge does: the frame halts out of gas, and the halt records the regular gas the hook left unless a failed charge already did. `Revert(output)` ends the frame as a `Revert` with `output`, on its gas as the hook left it; a `SELFDESTRUCT` so reverted does not self-destruct.
@@ -229,9 +230,7 @@ A format that encodes a struct by position, such as bincode, cannot read such an
   It counts an account's write record while the account's info differs from what the transaction loaded. A destruction's two accounts can look the same after the write whether or not they had changed before it (loaded with 5, now 0, from 5 or from 7), so it needs the balance before the write, which only the instruction reads before the write.
 - **Removal.** When upstream exposes an equivalent point, or when mega-evm stops metering writes.
 - **Default.** Continues and touches nothing. The facts are references to values the instruction holds anyway, except `SelfDestruct`'s `balance`, which the instruction reads for the hook from the running frame's own account just before the write. The journal holds that account warm, so the read loads nothing cold.
-  Where measured (callgrind, the fork's release profile), `SSTORE` and `LOG0`–`LOG4` compile to the same code as without the hook. The read costs a `SELFDESTRUCT` 119 instructions, one warm journal lookup (+1.5% of a transaction that self-destructs a contract). It is a `Host::load_account_info_skip_cold_load` call the instruction did not make before, so a `Host` that counts or refuses loads sees one more.
-  `balance` was added to the variant after the hook's first version, which no release carries, so upstream's superset is untouched. A consumer that builds the variant, or matches it naming every field without `..`, does not compile until it names `balance`; the pull request that adds it lists it with the `api:exception` items.
-  Satin W9 (`cz/feat/satin-w9` at `5b490695`) does both: it matches the variant with every field in `crates/mega-evm/src/limit/record.rs:129`, and builds it in tests (`limit/record.rs:168`, `limit/ledger.rs:1442`, `evm/journal.rs:999`). The legacy engine (`501cc7cc`), alloy-evm 0.36, revm-inspectors 0.40, the op-revm fork and mega-reth (`2dc2f44ac8`, `b97b508a0b`) do neither.
+  Where measured (callgrind, the fork's release profile), `SSTORE` and `LOG0`–`LOG4` compile to the same code as without the hook. The read costs a `SELFDESTRUCT` 119 instructions, one warm journal lookup (+1.5% of a transaction that self-destructs a contract). It is a `Host::load_account_info_skip_cold_load` call that upstream's instruction does not make, so a `Host` that counts or refuses loads sees one more per `SELFDESTRUCT`.
 
 ### Frame-start hook
 
@@ -254,15 +253,13 @@ A format that encodes a struct by position, such as bincode, cannot read such an
 - **Removal.** When upstream exposes an equivalent point, or when mega-evm stops charging frame starts.
 - **Default.** Returns `true` and touches nothing.
   Where measured (callgrind, the fork's release profile), a call runs one instruction more than without the hook: the store of the forward its helper returns, about 0.05% of a call to a contract that stops.
-  `CREATE` and `CREATE2` compiled to the same code as without the hook until a creation's start carried its address (measured with EIP-8037 off, the default spec's path).
-  With EIP-8037 off, the address now costs a warm journal read of the caller and the three checks: 149 instructions per `CREATE` and 147 per `CREATE2` from a contract (+0.95% and +0.73%). The read is a `Host::load_account_info_skip_cold_load` call the instruction did not make before, so a `Host` that counts or refuses loads sees one more.
-  The address and a `CREATE2`'s init-code hash moved from the handler into the instruction. A creation the handler builds or fails computes no more hashes than before; the keccak instruction counts are unchanged.
+  For `CREATE` and `CREATE2` the hook's only cost is the start's address; the byte pool's forward is counted under The byte pool.
+  With EIP-8037 off, the default spec's path, the address costs a warm journal read of the caller and the three checks: 149 instructions per `CREATE` and 147 per `CREATE2` from a contract (+0.95% and +0.73%). The read is a `Host::load_account_info_skip_cold_load` call that upstream's instruction does not make, so a `Host` that counts or refuses loads sees one more per creation.
+  The instruction computes the address and a `CREATE2`'s init-code hash, and the handler reuses them, so a creation the handler builds or fails computes the same hashes as upstream's.
   A start that never reaches the handler's frame building computes them for the hook alone: one hash for a `CREATE`, two for a `CREATE2`. That is a start the hook refuses, and a creation answered without a frame, by an inspector's `create` or by a consumer's own `frame_init`. Upstream's EIP-8037 path computes them before the hook in the same way.
   With EIP-8037 on, the start reads the address the EIP-8037 branch already computed from the input; that path was not measured.
-  `CreateInputs`' derived `PartialEq` compares the cached address and hash. With EIP-8037 off, a creation's input now holds them, as it already did with EIP-8037 on, so it compares unequal to an otherwise equal input that has computed nothing, and to its own serde round trip, which skips the cache.
-  The hook takes `&mut FrameStart` since the start charge moved onto the start; its first version took `&FrameStart`. No release carries that version, so upstream's superset is untouched, but an override written against it does not compile until it takes `&mut`, a change `cargo semver-checks` cannot see; the pull request that makes it lists it with the `api:exception` items.
-  Satin W9 overrides it (`crates/mega-evm/src/evm/host.rs:376` at `f1d1a48d`); the legacy engine (`501cc7cc`), alloy-evm 0.36, revm-inspectors 0.40, the op-revm fork and mega-reth (`2dc2f44ac8`, `b97b508a0b`) do not.
-  A creation's `target` was `None` in the hook's first version; it is now the created address. That changes the meaning of a field no release carries, so the pull request that makes the change lists it with the `api:exception` items. A consumer that reads `None` as "a creation" gets the address instead. Satin W9 (`5b490695`) reads `target` only for calls (`crates/mega-evm/src/evm/journal.rs:224`) and tells creations by `kind`, so it is unaffected; its count of the created account can now use the address.
+  `CreateInputs`' derived `PartialEq` compares the cached address and hash, which the input of a creation the instruction starts holds with EIP-8037 on and off, so it compares unequal to an otherwise equal input that has computed nothing, and to its own serde round trip, which skips the cache.
+  A consumer tells a creation from a call by `kind`, not by `target`: `target` is `None` only for the creations the Contract names, and an address for every other start.
 
 ### The byte pool
 
@@ -281,7 +278,7 @@ A format that encodes a struct by position, such as bincode, cannot read such an
   At every `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, after `frame_starting` has answered, the instruction takes `bytes_forward_share` of the caller's pool out of it and puts it on the frame's input as `bytes_share`: the child's pool when it starts, on the frame the handler runs and on an answer it gives without one (a precompile, a refused start).
   `bytes_forward_share` is `bytes_forward_percent` per cent of the pool, rounded down; a hundred or more forwards the whole pool.
   A forward is not a draw.
-  The settlement is in `handle_reservoir_remaining_gas` and follows the reservoir, not regular gas: a child that reverts or halts has its draws undone by `rollback_state_gas`, which now gives `bytes_spent` back to the pool, so what the caller absorbs is the child's remaining pool on success and the whole share on revert *and on halt*, since a halted frame appends nothing; the caller kept what it did not forward.
+  The settlement is in `handle_reservoir_remaining_gas` and follows the reservoir, not regular gas: a child that reverts or halts has its draws undone by `rollback_state_gas`, which also gives `bytes_spent` back to the pool, so what the caller absorbs is the child's remaining pool on success and the whole share on revert *and on halt*, since a halted frame appends nothing; the caller kept what it did not forward.
   The child's net merges into the caller's on success only, as the history net does, so a caller's rollback undoes its children's draws too.
   `rollback_state_gas` rolls the pool back with state and history gas, so a consumer that rolls a frame back by hand rolls the pool back with it.
   The first frame's return settles into the transaction's tracker the same way (`last_frame_result`, through `execution::settle_first_frame`, see The start charge), whose `bytes_spent` is then the transaction's net draw.
@@ -294,7 +291,7 @@ A format that encodes a struct by position, such as bincode, cannot read such an
 - **Default.** Every tracker starts with an unlimited pool (`u64::MAX`), every schedule forwards the whole pool, and nothing in the workspace draws it, so every figure of the pool is the unlimited pool going out and coming back and every result is upstream's.
   The tracker is 112 bytes, 88 without the pool: the pool and its net take a word each, the allowance (see The history allowance) a third, and the crossing a bit in the word the failed-charge record's flag takes (see The failed-charge record); in a format that carries field names, encodings that predate the fields decode with an unlimited pool, no crossing and zero for the rest, and a positional format cannot read them (see Hooks).
   `Gas` is 128 bytes (104), `InterpreterResult` 168 (144), `CallOutcome` and `FrameResult` 248 (208), `CreateOutcome` 232 (192), the outcomes with the start charge's two words.
-  Where measured (callgrind, the fork's release profile, against the base without the pool, the start charge and the allowance), the three figures together cost a transfer 120 instructions (+2.2%), a creation 144 (+0.8%), a `SELFDESTRUCT` transaction 151 (+1.9%), a transaction that calls a precompile 135 (+0.04%; 10 of them the answer's adopted share) and each `CALL` about 139 (+6.3% on a transaction of 64 calls), most of it in moving the larger frame results; snailtracer is unchanged.
+  Where measured (callgrind, the fork's release profile, against the fork without the pool, the start charge and the allowance), the three figures together cost a transfer 120 instructions (+2.2%), a creation 144 (+0.8%), a `SELFDESTRUCT` transaction 151 (+1.9%), a transaction that calls a precompile 135 (+0.04%; 10 of them the answer's adopted share) and each `CALL` about 139 (+6.3% on a transaction of 64 calls), most of it in moving the larger frame results; snailtracer is unchanged.
 
 ### The start charge
 
@@ -307,7 +304,7 @@ A format that encodes a struct by position, such as bincode, cannot read such an
   The transaction's frame has no start hook: a consumer that charges the transaction's tracker for it in pre-execution puts the refundable part on the first frame's input (`charged_start`), from `Handler::first_frame_input`.
   The charge rides from the input to the outcome, and `return_result` refunds it to the caller whole, with `refill_history` and `refill_bytes`, on the condition `refundable_state_gas_charge` uses: a call that did not succeed, a creation that did not succeed or deployed no address; `last_frame_result` refunds the first frame's the same way, and after a halt consumes the regular gas the refill credited, as it does for the state refund.
   `last_frame_result` settles the first frame through `execution::settle_first_frame`, which is all of mainnet's settlement but the copy of the transaction's gas into the frame's result: the spend and the settlement of the frame, the EIP-2780 state-gas refund and the start-charge refund, each with its halt rule.
-  A chain whose handler overrides `last_frame_result` calls it rather than copying the mainnet body, so the start-charge refund and any later step reach it too, and applies its own rules between it and the copy, as the op-revm fork does with its pre-Regolith deposit rule.
+  A chain whose handler overrides `last_frame_result` calls it rather than copying the mainnet body, so the start-charge refund and any later step reach it too, and applies its own rules between it and the copy, such as the op-revm fork's pre-Regolith deposit rule.
   Upstream's own steps of the settlement (the spend, `handle_reservoir_remaining_gas` and the EIP-2780 refund) live in `crates/handler/src/execution/first_frame.rs`, not in `handler.rs`: a pick or a base-line merge that changes upstream's `last_frame_result` body lands there, and records the move as its conflict resolution.
   A frame that succeeds keeps the charge.
   A precompile's answer and a start the handler refuses before any frame (call depth, balance) carry the input's charge, so they refund as a frame does.
@@ -316,19 +313,13 @@ A format that encodes a struct by position, such as bincode, cannot read such an
 - **Consumer.** mega-evm charges a start's write records to the caller at the hook, after the forward and before the frame's input copies the reservoir, and must give them back when the frame fails. The refund belongs where the fork refunds the upfront state charge.
 - **Removal.** When upstream carries an equivalent refundable start charge, or when mega-evm stops charging frame starts.
 - **Default.** The hook declares nothing, so the fields and the refund are zero.
-  `settle_first_frame` is inlined: where measured (callgrind, the fork's release profile), a transfer and a transaction of 64 calls run the same instruction count as when its steps were `last_frame_result`'s body.
-  This entry breaks rule 1 (`api:exception`): `CallInputs`, `CallOutcome` and `CreateOutcome` are constructible by literal and gain fields (`charged_start`, and `CallInputs` also `bytes_share` and `history_allowance`), so a consumer that constructs them by literal does not compile until it names the new fields.
-  Their defaults are no charge (`StartCharge::default()`), an unlimited share (`u64::MAX`) and no allowance (`0`).
-  The consumers checked, each at a revision:
-  - alloy-evm 0.36 and revm-inspectors 0.40 construct them with `new` and are unaffected; `CreateInputs` has private fields and is unaffected.
-  - The op-revm fork (`v20.0.0-mega.3`) constructs them with `new` and compiles unchanged, but its `OpHandler::last_frame_result` copied mainnet's settlement and so missed the first frame's start-charge refund; its next release calls `settle_first_frame`, and a consumer that declares a first-frame charge needs that release.
-  - MegaETH's legacy engine (`cz/feat/legacy-on-fork` at `501cc7cc`) builds the first frame's `CallInputs` by literal in production (`crates/mega-evm/src/evm/execution.rs:724`) and in tests (`evm/execution.rs:2114`, `evm/precompiles.rs:432`, `limit/storage_call_stipend.rs:233`, `tests/rex5/call_too_deep_guard.rs:43`). It uses none of the new figures, but stops compiling: its repin names the three fields at their defaults and runs the legacy gate.
-  - Satin W9 (`cz/feat/satin-w9` at `f1d1a48d`) builds `CreateOutcome` and `CallOutcome` by literal in production (`crates/mega-evm/src/evm/frame.rs:73`, `:91`), `CallInputs` in unit and integration tests (ten sites), and `CreateOutcome` in two integration tests (`tests/system/keyless/differential.rs:950`, `tests/system/keyless/inspector.rs:69`). Its migration puts the input's charge and share on those answers, and the start-charge refund in `frame.rs`'s `settle_frame_result`, which mirrors the inner settlement.
-  - Foundry, master as fetched on 2026-10-21, constructs `CallOutcome` and `CreateOutcome` by literal in its cheatcodes and its inspector stack, and `CallInputs` once in its cheatcodes. It requests revm 43.0.2, alloy-evm 0.39.0 and revm-inspectors 0.44.1, so it cannot take this 40.0.3 fork through a version-satisfying patch: the literals are porting work, not a checked build.
-  - mega-reth's oracle executor constructs a `CallOutcome` by literal at `2dc2f44ac8`, which pins revm 27.1.0, and with `CallOutcome::new` at `b97b508a0b`, which pins revm 40.0.3.
-
-  Foundry's and mega-reth's outcome literals already fail against the fork's base, whose outcomes carry the earlier EIP-8037 field `charged_state_gas_address` that no upstream release has; Satin W9's, production and test, were written against the fork and break here.
-  The base's `CallInputs` has upstream's fields, so every `CallInputs` literal (the legacy engine's, Satin W9's tests', Foundry's) breaks here for the first time.
+  `settle_first_frame` is inlined: where measured (callgrind, the fork's release profile), a transfer and a transaction of 64 calls run the same instruction count as with its steps written out in `last_frame_result`.
+  A handler that overrides `last_frame_result` with a copy of mainnet's settlement instead of calling `settle_first_frame` compiles, but does not refund the first frame's start charge; that matters only to a consumer that declares one.
+  This entry is an exception to rule 1 (`api:exception`): `CallInputs`, `CallOutcome` and `CreateOutcome` are constructible by literal and carry fields upstream's do not (`charged_start`, and on `CallInputs` also `bytes_share` and `history_allowance`), so a literal written for upstream's fields does not compile until it names them.
+  A consumer that uses none of the figures names them at their defaults, no charge (`StartCharge::default()`), an unlimited share (`u64::MAX`) and no allowance (`0`), and keeps upstream's behaviour.
+  A consumer that answers a start with an outcome it builds itself sets the answer's charge as the Contract says and its pool as The byte pool says.
+  The outcomes also carry the state-gas refund's `charged_state_gas_address` (see State-gas price), which upstream's do not, so an outcome literal written for upstream's fields does not compile against the fork whatever this entry adds; `CallInputs` has upstream's fields apart from this entry's, so this entry is what breaks its literals.
+  `CreateInputs` has private fields and is built with `CreateInputs::new`, so its new fields break no literal.
 
 ### The history allowance
 
