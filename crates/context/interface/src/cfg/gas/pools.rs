@@ -238,13 +238,25 @@ impl GasTracker {
     /// drawn so far, so that the pool and the net add up to `share`, as a frame's do.
     ///
     /// For a tracker built outside a frame, such as a precompile's answer, which may have drawn
-    /// before it learns the share its caller forwarded. A rollback then restores `share`. A net
-    /// above `share` leaves an empty pool.
+    /// before it learns the share its caller forwarded. A rollback then restores `share`.
+    ///
+    /// A net above `share` is a draw the share could not have paid, and fails closed: the pool is
+    /// emptied, the net is capped at `share` and the pool's crossing is set, as a draw the pool
+    /// refused sets it. The caller then gets back no more than it forwarded, whether the answer
+    /// succeeds or fails, and a consumer reads the crossing as it reads any. The answer's result
+    /// and every other pool are left as they are.
     #[inline]
     pub const fn adopt_pool_share(&mut self, pool: PoolId, share: u64) {
         let index = pool.index();
-        self.pools_remaining[index] =
-            share.saturating_add_signed(self.pools_spent[index].saturating_neg());
+        let spent = self.pools_spent[index];
+        if spent > 0 && spent as u64 > share {
+            self.pools_remaining[index] = 0;
+            // `share < spent <= i64::MAX`, so the cast is exact.
+            self.pools_spent[index] = share as i64;
+            self.pool_crossings |= 1 << index;
+            return;
+        }
+        self.pools_remaining[index] = share.saturating_add_signed(spent.saturating_neg());
     }
 
     /// [`adopt_pool_share`](Self::adopt_pool_share) for every pool.
@@ -678,6 +690,88 @@ mod tests {
                     answer.pool_remaining(pool),
                     900,
                     "{pool:?} {name}: a rollback restores the share"
+                );
+            }
+        }
+    }
+
+    /// A draw of exactly the share adopts as any draw within it does: an empty pool, the net kept
+    /// and no crossing.
+    #[test]
+    fn test_an_answer_that_drew_its_whole_share_adopts_it_unchanged() {
+        for pool in PoolId::ALL {
+            let mut answer = GasTracker::new(500, 500, 0);
+            assert!(answer.record_pool(pool, 100));
+
+            answer.adopt_pool_share(pool, 100);
+
+            assert_eq!(
+                (
+                    answer.pool_remaining(pool),
+                    answer.pool_spent(pool),
+                    answer.pool_crossing(pool)
+                ),
+                (0, 100, false),
+                "{pool:?}"
+            );
+        }
+    }
+
+    /// An answer whose provider drew more than the share fails closed on that pool: the pool is
+    /// empty, the net is the share and the crossing is set, so the caller gets back exactly what
+    /// it held, whether the answer succeeds (and a later rollback of the caller undoes the draw)
+    /// or fails. Every other pool, and every crossing already set, is left as it was.
+    #[test]
+    fn test_an_answer_that_drew_past_its_share_is_a_crossing_capped_at_the_share() {
+        for pool in PoolId::ALL {
+            for succeeded in [true, false] {
+                // The caller forwards 100 of its 1,000 and keeps 900; the provider drew 150 on
+                // an answer whose pools were unlimited, and failed a draw on another pool.
+                let mut caller = pools_1000();
+                caller.forward_pool(pool, 100);
+                let other = PoolId::new((pool.index() + 1) % PoolId::COUNT);
+                let mut answer = GasTracker::new(500, 500, 0);
+                answer.set_pool_remaining(other, 0);
+                assert!(!answer.record_pool(other, 1));
+                assert!(answer.record_pool(pool, 150));
+
+                answer.adopt_pool_share(pool, 100);
+
+                assert_eq!(
+                    (
+                        answer.pool_remaining(pool),
+                        answer.pool_spent(pool),
+                        answer.pool_crossing(pool)
+                    ),
+                    (0, 100, true),
+                    "{pool:?}"
+                );
+                assert!(
+                    answer.pool_crossing(other),
+                    "{pool:?}: the other crossing stays"
+                );
+                assert_eq!(answer.pool_spent(other), 0, "{pool:?}");
+
+                if !succeeded {
+                    answer.rollback_state_gas();
+                    assert_eq!(
+                        answer.pool_remaining(pool),
+                        100,
+                        "{pool:?}: the rollback restores the share, not the draw"
+                    );
+                }
+                caller.absorb_returned_pools(&answer, succeeded);
+                let settled = if succeeded { (900, 100) } else { (1_000, 0) };
+                assert_eq!(
+                    (caller.pool_remaining(pool), caller.pool_spent(pool)),
+                    settled,
+                    "{pool:?} succeeded: {succeeded}"
+                );
+                caller.rollback_state_gas();
+                assert_eq!(
+                    caller.pool_remaining(pool),
+                    1_000,
+                    "{pool:?} succeeded: {succeeded}: the caller's rollback gives back what it held"
                 );
             }
         }

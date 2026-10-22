@@ -402,10 +402,13 @@ impl Host for DeclaringContext {
 
 /// [`EthPrecompiles`], whose answers the provider draws on when told to: it starts an answer's
 /// pool at the share the input carries and draws `draw` bytes from it, as a provider that appends
-/// bytes for a call would. With nothing to draw it is [`EthPrecompiles`].
+/// bytes for a call would. Told not to `seed`, it draws `draw` from every pool of the answer as
+/// [`EthPrecompiles`] built it, unlimited, without starting them at the shares. With nothing to
+/// draw it is [`EthPrecompiles`].
 struct DrawingPrecompiles {
     inner: EthPrecompiles,
     draw: u64,
+    seed: bool,
 }
 
 impl PrecompileProvider<TestContext> for DrawingPrecompiles {
@@ -422,10 +425,16 @@ impl PrecompileProvider<TestContext> for DrawingPrecompiles {
     ) -> Result<Option<InterpreterResult>, String> {
         let mut answer = self.inner.run(context, inputs)?;
         if let Some(answer) = answer.as_mut().filter(|_| self.draw > 0) {
-            answer
-                .gas
-                .set_pool_remaining(FIRST, inputs.pool_shares.get(FIRST));
-            assert!(answer.gas.record_pool(FIRST, self.draw));
+            if self.seed {
+                answer
+                    .gas
+                    .set_pool_remaining(FIRST, inputs.pool_shares.get(FIRST));
+                assert!(answer.gas.record_pool(FIRST, self.draw));
+            } else {
+                for pool in PoolId::ALL {
+                    assert!(answer.gas.record_pool(pool, self.draw));
+                }
+            }
         }
         Ok(answer)
     }
@@ -660,6 +669,8 @@ struct Run {
     deposit: Deposit,
     /// What the precompile provider draws on each answer.
     precompile_draw: u64,
+    /// Whether the provider starts an answer's pool at the share before it draws.
+    precompile_seeds: bool,
     /// [`FIRST`]'s `pool_forward_percent` in the schedule, if not the default.
     forward_percent: Option<u64>,
     /// Every pool's `pool_forward_percent` in the schedule, if not the default.
@@ -677,6 +688,7 @@ impl Run {
             allowance: 0,
             deposit: Deposit::Untouched,
             precompile_draw: 0,
+            precompile_seeds: true,
             forward_percent: None,
             pool_percents: None,
             creates: false,
@@ -702,6 +714,14 @@ impl Run {
 
     const fn precompile_draw(mut self, draw: u64) -> Self {
         self.precompile_draw = draw;
+        self
+    }
+
+    /// The provider draws `draw` from every pool of each answer as built, without starting the
+    /// pools at the shares first.
+    const fn unseeded_precompile_draw(mut self, draw: u64) -> Self {
+        self.precompile_draw = draw;
+        self.precompile_seeds = false;
         self
     }
 
@@ -789,6 +809,7 @@ impl Run {
         let precompiles = DrawingPrecompiles {
             inner: EthPrecompiles::new(SPEC),
             draw: self.precompile_draw,
+            seed: self.precompile_seeds,
         };
         let mut evm: TestEvm = Evm::new(ctx, instructions, precompiles);
         let (kind, data) = if self.creates {
@@ -1158,6 +1179,76 @@ fn test_a_precompile_answer_keeps_what_its_provider_drew() {
         assert_eq!(handler.starts[1].0, 900, "{name}");
         assert_eq!(handler.returned[0], returned, "{name}");
         assert_eq!(handler.settled, Some(settled), "{name}");
+    }
+}
+
+/// A provider that draws on an answer without starting its pools at the shares draws on the
+/// unlimited pools the answer was built with, so it can draw past a share. Within the share the
+/// answer is adopted as any is; past it, each pool fails closed: the answer holds an empty pool,
+/// a net of exactly the share and the pool's crossing, and the caller ends with exactly what it
+/// held, whether the call succeeds or fails. The answer's result is the provider's.
+#[test]
+fn test_a_precompile_answer_that_drew_past_its_share_is_a_crossing_held_to_the_share() {
+    let succeeding = call(ECRECOVER, 0);
+    let failing = starved_call(ECRECOVER);
+    // Every pool of 1,000 forwards 10%, 100, and PARENT keeps 900.
+    for (name, parent, draw, returned, settled) in [
+        (
+            "within, succeeds",
+            succeeding.clone(),
+            40,
+            Returned::ended(InstructionResult::Return, 60, 40),
+            (960, 40),
+        ),
+        (
+            "the whole share, succeeds",
+            succeeding.clone(),
+            100,
+            Returned::ended(InstructionResult::Return, 0, 100),
+            (900, 100),
+        ),
+        (
+            "past it, succeeds",
+            succeeding,
+            150,
+            Returned {
+                crossing: true,
+                ..Returned::ended(InstructionResult::Return, 0, 100)
+            },
+            (900, 100),
+        ),
+        (
+            "past it, fails",
+            failing,
+            150,
+            Returned {
+                crossing: true,
+                ..Returned::ended(InstructionResult::PrecompileOOG, 0, 100)
+            },
+            (1_000, 0),
+        ),
+    ] {
+        let run = Run::new(ends(parent))
+            .pool_percents([10; PoolId::COUNT])
+            .unseeded_precompile_draw(draw);
+
+        let (result, handler) = run.with(PoolHandler::new(Some(POOL)));
+
+        assert!(result.is_success(), "{name}: {result:?}");
+        assert_eq!(
+            handler.pool_starts[1],
+            PoolAmounts::ZERO
+                .with(FIRST, 100)
+                .with(PoolId::new(1), 100)
+                .with(PoolId::new(2), 100),
+            "{name}"
+        );
+        assert_eq!(handler.returned[0], returned, "{name}");
+        assert_eq!(
+            handler.settled_pools,
+            Some([settled; PoolId::COUNT]),
+            "{name}: every pool"
+        );
     }
 }
 

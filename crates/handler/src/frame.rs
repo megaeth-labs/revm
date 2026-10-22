@@ -221,8 +221,9 @@ impl EthFrame<EthInterpreter> {
         if let Some(mut result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_string)? {
             // The provider built the answer's gas from the inputs' regular gas and reservoir. The
             // answer takes the caller's shares as the pools it started with, less what the
-            // provider drew on them, and the allowance the input carries, so the caller's
-            // settlement gets the shares back from the answer as it would from a frame.
+            // provider drew on them (a draw past a share is held to it, with the pool's
+            // crossing), and the allowance the input carries, so the caller's settlement gets
+            // the shares back from the answer as it would from a frame.
             result.gas.tracker_mut().adopt_pool_shares(pool_shares);
             result.gas.set_history_allowance(history_allowance);
             let mut logs = Vec::new();
