@@ -3,8 +3,8 @@
 
 use crate::{
     interpreter_types::{InterpreterTypes as ITy, LoopControl},
-    CreateInputs, Gas, Host, InstructionExecResult as Result, InstructionResult, Interpreter,
-    InterpreterAction, StartCharge,
+    ChildShares, CreateInputs, Gas, Host, InstructionExecResult as Result, InstructionResult,
+    Interpreter, InterpreterAction, StartCharge,
 };
 use context_interface::host::{CompletedWrite, FrameStart, WriteVerdict};
 use primitives::{constants::CALL_STACK_LIMIT, hints_util::cold_path, Address, Bytes, U256};
@@ -93,12 +93,12 @@ pub(crate) fn running_account<H: Host + ?Sized>(
     Ok((account.balance, account.nonce))
 }
 
-/// Takes the child's share of the caller's byte pool out of `gas`, by the schedule's
-/// `bytes_forward_percent`, and returns it: the pool the child starts with. Called once the
-/// frame-start hook has answered, so the share is of the pool as the hook left it.
+/// Takes the child's shares of the caller's reservoir and pools out of `gas`, by the schedule's
+/// `reservoir_forward_percent` and `pool_forward_percent`s, and returns them: what the child's
+/// tracker starts with ([`GasTracker::forward_to_child`](crate::GasTracker::forward_to_child)).
+/// Called once the frame-start hook has answered, so the shares are of the reservoir and the pools
+/// as the hook left them.
 #[inline]
-pub(crate) fn forward_bytes<H: Host + ?Sized>(gas: &mut Gas, host: &H) -> u64 {
-    let share = host.gas_params().bytes_forward_share(gas.bytes_remaining());
-    gas.tracker_mut().forward_bytes(share);
-    share
+pub(crate) fn forward_to_child<H: Host + ?Sized>(gas: &mut Gas, host: &H) -> ChildShares {
+    gas.tracker_mut().forward_to_child(host.gas_params())
 }

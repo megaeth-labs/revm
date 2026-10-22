@@ -26,7 +26,7 @@ use context_interface::{
 };
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use interpreter::{
-    Gas, InstructionResult, InterpreterResult, SStoreResult, SelfDestructResult, StateLoad,
+    Gas, InstructionResult, InterpreterResult, PoolId, SStoreResult, SelfDestructResult, StateLoad,
 };
 use primitives::{
     address, hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, TxKind, B256,
@@ -43,6 +43,8 @@ type DbError = <Db as Database>::Error;
 type Outcome = Result<ResultAndState, EVMError<DbError>>;
 
 /// Contract the call transactions call.
+/// The pool the tests draw: any of the tracker's pools behaves the same.
+const FIRST: PoolId = PoolId::new(0);
 const CONTRACT: Address = address!("0x00000000000000000000000000000000000c0de0");
 /// Nonce of [`CONTRACT`], so the address its `CREATE` deploys at is known.
 const CONTRACT_NONCE: u64 = 1;
@@ -138,7 +140,7 @@ impl ContextTr for AdmissionContext {
         gas: &mut GasTracker,
     ) -> Result<(), Bytes> {
         // A draw the pool cannot pay records the crossing on `gas`, as any failed draw does.
-        let _ = gas.record_bytes(self.draw);
+        let _ = gas.record_pool(FIRST, self.draw);
         self.offered.push(Offered {
             address: deposit.address,
             code: deposit.code.clone(),
@@ -745,7 +747,7 @@ fn test_a_pre_homestead_deposit_the_frame_cannot_pay_is_offered_with_its_crossin
 fn test_the_hook_draws_the_deposit_from_the_frames_pool() {
     const POOL: u64 = 1_000;
     let mut gas = Gas::new(100_000);
-    gas.set_bytes_remaining(POOL);
+    gas.set_pool_remaining(FIRST, POOL);
     let code = Bytes::from_static(&[0; 32]);
     // OSAKA: the deposit is one regular charge, 200 per byte.
     let charged = {
@@ -755,9 +757,9 @@ fn test_the_hook_draws_the_deposit_from_the_frames_pool() {
     };
     let pool = |gas: &Gas| {
         (
-            gas.bytes_remaining(),
-            gas.bytes_spent(),
-            gas.bytes_crossing(),
+            gas.pool_remaining(FIRST),
+            gas.pool_spent(FIRST),
+            gas.pool_crossing(FIRST),
         )
     };
 

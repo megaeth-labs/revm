@@ -182,7 +182,7 @@ impl FrameResult {
     /// the outcome's `charged_start`. The decision is the one
     /// [`Self::refundable_state_gas_charge`] makes: a call refunds when it did not succeed, a
     /// creation also when no contract address was deployed. The charge is refunded whole, with
-    /// `refill_history` and `refill_bytes`.
+    /// `GasTracker::refill_start_charge`.
     #[inline]
     pub fn refundable_start_charge(&self) -> Option<StartCharge> {
         let (failed, charge) = match self {

@@ -1,4 +1,4 @@
-use crate::{Gas, InstructionResult, InterpreterResult, StartCharge};
+use crate::{Gas, InstructionResult, InterpreterResult, PoolAmounts, StartCharge};
 use primitives::{Address, Bytes};
 
 /// Represents the outcome of a create operation in an interpreter.
@@ -54,7 +54,7 @@ impl CreateOutcome {
             address,
             charged_create_state_gas: false,
             charged_state_gas_address: Address::ZERO,
-            charged_start: StartCharge::new(0, 0),
+            charged_start: StartCharge::new(0, PoolAmounts::ZERO),
         }
     }
 

@@ -1,9 +1,9 @@
-//! Serde encoding of the byte-pool fields on the frame inputs and outcomes: the child's share,
-//! the start charge and a call's history allowance.
+//! Serde encoding of the pool fields on the frame inputs and outcomes: the child's shares of the
+//! pools, the start charge and a call's history allowance.
 //!
 //! New encodings carry the fields. In a format that carries field names, such as the JSON these
-//! tests use, encodings made before they existed lack them and still decode: to an unlimited
-//! share, no start charge and no allowance, which is what a frame of a consumer that uses none of
+//! tests use, encodings made before they existed lack them and still decode: to unlimited
+//! shares, no start charge and no allowance, which is what a frame of a consumer that uses none of
 //! them carries. A format that encodes a struct by position, such as bincode, cannot read an
 //! encoding made before they existed, as with upstream's own field additions.
 #![cfg(feature = "serde")]
@@ -12,13 +12,22 @@ use core::fmt::Debug;
 use primitives::{address, Bytes, U256};
 use revm_interpreter::{
     CallInput, CallInputs, CallOutcome, CallScheme, CallValue, CreateInputs, CreateOutcome,
-    CreateScheme, Gas, InstructionResult, InterpreterResult, StartCharge,
+    CreateScheme, Gas, InstructionResult, InterpreterResult, PoolAmounts, PoolId, StartCharge,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use state::Bytecode;
 
-const CHARGE: StartCharge = StartCharge::new(3_520, 160);
+/// The pool the tests draw: any of the tracker's pools behaves the same.
+const FIRST: PoolId = PoolId::new(0);
+const CHARGE: StartCharge = StartCharge::new(
+    3_520,
+    PoolAmounts::ZERO.with(FIRST, 160).with(PoolId::new(2), 1),
+);
+/// Shares that differ by pool.
+const SHARES: PoolAmounts = PoolAmounts::UNLIMITED
+    .with(FIRST, 980)
+    .with(PoolId::new(1), 0);
 
 /// Checks that `value` round-trips, and decodes to `without` once `fields` are removed from its
 /// encoding.
@@ -68,14 +77,14 @@ fn test_call_inputs_decode_from_json_with_and_without_the_pool_fields() {
         is_static: false,
         charged_new_account_state_gas: true,
         charged_start: charge,
-        bytes_share: share,
+        pool_shares: share,
         history_allowance: allowance,
     };
 
     assert_decodes_with_and_without(
-        &inputs(980, CHARGE, 160),
-        &["bytes_share", "charged_start", "history_allowance"],
-        &inputs(u64::MAX, StartCharge::default(), 0),
+        &inputs(SHARES, CHARGE, 160),
+        &["pool_shares", "charged_start", "history_allowance"],
+        &inputs(PoolAmounts::UNLIMITED, StartCharge::default(), 0),
     );
 }
 
@@ -90,17 +99,20 @@ fn test_create_inputs_decode_from_json_with_and_without_the_pool_fields() {
             100_000,
             50_000,
         );
-        inputs.set_bytes_share(share);
+        inputs.set_pool_shares(share);
         inputs.set_charged_start(charge);
         inputs
     };
 
     assert_decodes_with_and_without(
-        &inputs(980, CHARGE),
-        &["bytes_share", "charged_start"],
-        &inputs(u64::MAX, StartCharge::default()),
+        &inputs(SHARES, CHARGE),
+        &["pool_shares", "charged_start"],
+        &inputs(PoolAmounts::UNLIMITED, StartCharge::default()),
     );
-    assert_eq!(CreateInputs::default().bytes_share(), u64::MAX);
+    assert_eq!(
+        CreateInputs::default().pool_shares(),
+        PoolAmounts::UNLIMITED
+    );
 }
 
 #[test]

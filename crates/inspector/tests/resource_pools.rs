@@ -29,7 +29,8 @@ use handler::{
 use interpreter::{
     interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Gas,
     GasTracker, Instruction, InstructionContext, InstructionExecResult, InstructionResult,
-    InterpreterResult, SStoreResult, SelfDestructResult, StartCharge, StateLoad,
+    InterpreterResult, PoolAmounts, PoolId, SStoreResult, SelfDestructResult, StartCharge,
+    StateLoad,
 };
 use primitives::{
     address, hardfork::SpecId, Address, Bytes, Log, StorageKey, StorageValue, TxKind, B256, U256,
@@ -51,8 +52,10 @@ const SPEC: SpecId = SpecId::OSAKA;
 const GAS_LIMIT: u64 = 3_000_000;
 /// What `DRAW` draws.
 const DRAW_BYTES: u64 = 100;
+/// The pool the tests draw: any of the tracker's pools behaves the same.
+const FIRST: PoolId = PoolId::new(0);
 /// What the start hook charges and declares after `DECLARE`.
-const DECLARED: StartCharge = StartCharge::new(3_520, 160);
+const DECLARED: StartCharge = StartCharge::new(3_520, PoolAmounts::ZERO.with(FIRST, 160));
 /// What `LOG` charges as history.
 const HISTORY_COST: u64 = 100;
 /// A value call's history allowance on a chain that gives one.
@@ -85,7 +88,7 @@ const DRAIN: u8 = 0x0f;
 const LIMIT: u8 = 0x10;
 
 const fn draw(context: InstructionContext<'_, Ctx, EthInterpreter>) -> InstructionExecResult {
-    if context.interpreter.gas.record_bytes(DRAW_BYTES) {
+    if context.interpreter.gas.record_pool(FIRST, DRAW_BYTES) {
         Ok(())
     } else {
         Err(InstructionResult::OutOfGas)
@@ -93,7 +96,7 @@ const fn draw(context: InstructionContext<'_, Ctx, EthInterpreter>) -> Instructi
 }
 
 const fn drain(context: InstructionContext<'_, Ctx, EthInterpreter>) -> InstructionExecResult {
-    if context.interpreter.gas.record_bytes(u64::MAX) {
+    if context.interpreter.gas.record_pool(FIRST, u64::MAX) {
         Ok(())
     } else {
         Err(InstructionResult::OutOfGas)
@@ -102,7 +105,7 @@ const fn drain(context: InstructionContext<'_, Ctx, EthInterpreter>) -> Instruct
 
 /// Sets the frame's pool to [`LIMITED`], as a consumer sets the transaction's.
 const fn limit(context: InstructionContext<'_, Ctx, EthInterpreter>) -> InstructionExecResult {
-    context.interpreter.gas.set_bytes_remaining(LIMITED);
+    context.interpreter.gas.set_pool_remaining(FIRST, LIMITED);
     Ok(())
 }
 
@@ -186,7 +189,7 @@ impl Host for DeclaringContext {
     fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
         if core::mem::take(&mut self.declare_next) {
             assert!(gas.record_history_cost(DECLARED.history));
-            assert!(gas.record_bytes(DECLARED.bytes));
+            assert!(gas.record_pool(FIRST, DECLARED.pools.get(FIRST)));
             start.charge = DECLARED;
         }
         true
@@ -342,7 +345,7 @@ impl Ended {
             crossing: false,
             history: 0,
             allowance: 0,
-            charged_start: StartCharge::new(0, 0),
+            charged_start: StartCharge::new(0, PoolAmounts::ZERO.with(FIRST, 0)),
         }
     }
 }
@@ -374,9 +377,9 @@ impl Figures {
     fn end(&mut self, result: InstructionResult, gas: &Gas, charged: StartCharge) {
         self.ends.push(Ended {
             result,
-            pool: gas.bytes_remaining(),
-            spent: gas.bytes_spent(),
-            crossing: gas.bytes_crossing(),
+            pool: gas.pool_remaining(FIRST),
+            spent: gas.pool_spent(FIRST),
+            crossing: gas.pool_crossing(FIRST),
             history: gas.history_gas_spent(),
             allowance: gas.history_allowance(),
             charged_start: charged,
@@ -387,7 +390,7 @@ impl Figures {
 impl Inspector<Ctx, EthInterpreter> for Figures {
     fn call(&mut self, _context: &mut Ctx, inputs: &mut CallInputs) -> Option<CallOutcome> {
         self.starts.push((
-            inputs.bytes_share,
+            inputs.pool_shares.get(FIRST),
             inputs.charged_start,
             inputs.history_allowance,
         ));
@@ -402,7 +405,10 @@ impl Inspector<Ctx, EthInterpreter> for Figures {
         );
         let mut outcome = CallOutcome::new(revert, inputs.return_memory_offset.clone());
         if self.answer == Answer::WithShareAndCharge {
-            outcome.result.gas.set_bytes_remaining(inputs.bytes_share);
+            outcome
+                .result
+                .gas
+                .set_pool_remaining(FIRST, inputs.pool_shares.get(FIRST));
             outcome.charged_start = inputs.charged_start;
         }
         Some(outcome)
@@ -410,7 +416,7 @@ impl Inspector<Ctx, EthInterpreter> for Figures {
 
     fn create(&mut self, _context: &mut Ctx, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
         self.starts
-            .push((inputs.bytes_share(), inputs.charged_start(), 0));
+            .push((inputs.pool_shares().get(FIRST), inputs.charged_start(), 0));
         None
     }
 
@@ -649,7 +655,7 @@ fn test_both_paths_refund_the_start_charge_when_the_frame_fails() {
         assert!(outcome.result.is_success(), "{name}: {:?}", outcome.result);
         assert_eq!(
             figures.starts[1],
-            (UNLIMITED - DECLARED.bytes, DECLARED, 0),
+            (UNLIMITED - DECLARED.pools.get(FIRST), DECLARED, 0),
             "{name}: the charge rides on the input"
         );
         assert_eq!(
@@ -664,7 +670,7 @@ fn test_both_paths_refund_the_start_charge_when_the_frame_fails() {
                 "{name}: refunded whole"
             );
         } else {
-            let drawn = DECLARED.bytes + DRAW_BYTES;
+            let drawn = DECLARED.pools.get(FIRST) + DRAW_BYTES;
             assert_eq!(
                 (parent_end.pool, parent_end.spent, parent_end.history),
                 (UNLIMITED - drawn, drawn as i64, DECLARED.history as i64),
@@ -736,12 +742,16 @@ fn limited_call_to_ok(answer: Answer) -> (u64, Ended, (u64, i64, i64)) {
 /// caller gets the share and the charge back.
 #[test]
 fn test_an_outcome_the_inspector_builds_settles_as_built() {
-    let share = LIMITED - DECLARED.bytes;
+    let share = LIMITED - DECLARED.pools.get(FIRST);
     for (answer, answered, kept) in [
         (
             Answer::AsBuilt,
             Ended::with(InstructionResult::Revert, UNLIMITED, 0),
-            (UNLIMITED, DECLARED.bytes as i64, DECLARED.history as i64),
+            (
+                UNLIMITED,
+                DECLARED.pools.get(FIRST) as i64,
+                DECLARED.history as i64,
+            ),
         ),
         (
             Answer::WithShareAndCharge,
@@ -765,8 +775,8 @@ fn test_an_outcome_the_inspector_builds_settles_as_built() {
 /// revert would; the frame left alone keeps both.
 #[test]
 fn test_a_success_the_inspector_rewrites_into_a_revert_refunds_the_start_charge() {
-    let share = LIMITED - DECLARED.bytes;
-    let drawn = DECLARED.bytes + DRAW_BYTES;
+    let share = LIMITED - DECLARED.pools.get(FIRST);
+    let drawn = DECLARED.pools.get(FIRST) + DRAW_BYTES;
     for (answer, result, kept) in [
         (
             Answer::Runs,

@@ -1,4 +1,7 @@
-use context_interface::{cfg::gas::StartCharge, CreateScheme};
+use context_interface::{
+    cfg::gas::{PoolAmounts, StartCharge},
+    CreateScheme,
+};
 use core::cell::OnceCell;
 use primitives::{keccak256, Address, Bytes, B256, U256};
 
@@ -31,21 +34,22 @@ pub struct CreateInputs {
     #[cfg_attr(feature = "serde", serde(default))]
     charged_state_gas_address: Address,
     /// What the frame-start hook charged the caller for this creation and the creation's failure
-    /// gives back: history gas and bytes of the pool, refunded to the caller by `return_result`
-    /// when the creation fails, as `charged_create_state_gas` is.
+    /// gives back: history gas and an amount of each pool, refunded to the caller by
+    /// `return_result` when the creation fails, as `charged_create_state_gas` is.
     ///
     /// In a format that carries field names, such as JSON, encodings made before this field existed
     /// decode it as no charge.
     #[cfg_attr(feature = "serde", serde(default))]
     charged_start: StartCharge,
-    /// The share of the caller's byte pool the creation receives: its pool when it starts. Taken
-    /// out of the caller's pool by the creation instruction, by the schedule's
-    /// `bytes_forward_percent`, and given back with what the creation left of it when it returns.
+    /// The share of each of the caller's pools the creation receives: its pools when it starts.
+    /// Taken out of the caller's pools by the creation instruction, by the schedule's
+    /// `pool_forward_percent` of each, and given back with what the creation left of them when
+    /// it returns.
     ///
     /// In a format that carries field names, such as JSON, encodings made before this field existed
-    /// decode it as unlimited.
-    #[cfg_attr(feature = "serde", serde(default = "unlimited_bytes"))]
-    bytes_share: u64,
+    /// decode it as every pool unlimited.
+    #[cfg_attr(feature = "serde", serde(default = "unlimited_pools"))]
+    pool_shares: PoolAmounts,
     /// Cached created address. This is computed lazily and cached to avoid
     /// redundant keccak computations when inspectors call `created_address`.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -57,15 +61,14 @@ pub struct CreateInputs {
     cached_init_code_hash: OnceCell<B256>,
 }
 
-/// The share an encoding that predates the byte pool decodes to in a format that carries field
-/// names.
+/// The shares an encoding that predates the pools decodes to in a format that carries field names.
 #[cfg(feature = "serde")]
-const fn unlimited_bytes() -> u64 {
-    u64::MAX
+const fn unlimited_pools() -> PoolAmounts {
+    PoolAmounts::UNLIMITED
 }
 
 impl Default for CreateInputs {
-    /// Empty inputs, as [`new`](Self::new) builds them, so the share starts unlimited.
+    /// Empty inputs, as [`new`](Self::new) builds them, so the shares start unlimited.
     #[inline]
     fn default() -> Self {
         Self::new(
@@ -98,8 +101,8 @@ impl CreateInputs {
             reservoir,
             charged_create_state_gas: false,
             charged_state_gas_address: Address::ZERO,
-            charged_start: StartCharge::new(0, 0),
-            bytes_share: u64::MAX,
+            charged_start: StartCharge::new(0, PoolAmounts::ZERO),
+            pool_shares: PoolAmounts::UNLIMITED,
             cached_address: OnceCell::new(),
             cached_init_code_hash: OnceCell::new(),
         }
@@ -232,13 +235,13 @@ impl CreateInputs {
         self.charged_start = charge;
     }
 
-    /// The share of the caller's byte pool the creation receives: its pool when it starts.
-    pub const fn bytes_share(&self) -> u64 {
-        self.bytes_share
+    /// The share of each of the caller's pools the creation receives: its pools when it starts.
+    pub const fn pool_shares(&self) -> PoolAmounts {
+        self.pool_shares
     }
 
-    /// Sets the share of the caller's byte pool the creation receives.
-    pub const fn set_bytes_share(&mut self, share: u64) {
-        self.bytes_share = share;
+    /// Sets the share of each of the caller's pools the creation receives.
+    pub const fn set_pool_shares(&mut self, shares: PoolAmounts) {
+        self.pool_shares = shares;
     }
 }

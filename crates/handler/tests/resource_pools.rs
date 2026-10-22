@@ -32,7 +32,7 @@ use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use interpreter::{
     interpreter::EthInterpreter, interpreter_action::FrameInit, CallInputs, FrameInput, GasTracker,
     Instruction, InstructionContext, InstructionExecResult, InstructionResult, InterpreterResult,
-    SStoreResult, SelfDestructResult, StartCharge, StateLoad,
+    PoolAmounts, PoolId, SStoreResult, SelfDestructResult, StartCharge, StateLoad,
 };
 use primitives::{
     address, constants::CALL_STACK_LIMIT, hardfork::SpecId, Address, AddressSet, Bytes, Log,
@@ -63,8 +63,10 @@ const GAS_LIMIT: u64 = 3_000_000;
 const POOL: u64 = 1_000;
 /// What `DRAW` draws.
 const DRAW_BYTES: u64 = 100;
+/// The pool the tests draw: any of the tracker's pools behaves the same.
+const FIRST: PoolId = PoolId::new(0);
 /// What the start hook charges and declares after `DECLARE`.
-const DECLARED: StartCharge = StartCharge::new(3_520, 160);
+const DECLARED: StartCharge = StartCharge::new(3_520, PoolAmounts::ZERO.with(FIRST, 160));
 /// What `LOG` charges as history.
 const HISTORY_COST: u64 = 100;
 /// A value call's history allowance on a chain that gives one.
@@ -96,7 +98,7 @@ const LOG: u8 = 0x0e;
 const fn draw(
     context: InstructionContext<'_, TestContext, EthInterpreter>,
 ) -> InstructionExecResult {
-    if context.interpreter.gas.record_bytes(DRAW_BYTES) {
+    if context.interpreter.gas.record_pool(FIRST, DRAW_BYTES) {
         Ok(())
     } else {
         Err(InstructionResult::OutOfGas)
@@ -142,9 +144,9 @@ impl Returned {
         let gas = result.gas();
         Self {
             result: result.instruction_result(),
-            pool: gas.bytes_remaining(),
-            spent: gas.bytes_spent(),
-            crossing: gas.bytes_crossing(),
+            pool: gas.pool_remaining(FIRST),
+            spent: gas.pool_spent(FIRST),
+            crossing: gas.pool_crossing(FIRST),
             history: gas.history_gas_spent(),
             allowance: gas.history_allowance(),
         }
@@ -237,7 +239,7 @@ impl ContextTr for DeclaringContext {
             Deposit::Drawn => false,
             Deposit::DrawnAndRefused => true,
         };
-        assert!(gas.record_bytes(deposit.code.len() as u64));
+        assert!(gas.record_pool(FIRST, deposit.code.len() as u64));
         if refuses {
             Err(Bytes::new())
         } else {
@@ -260,7 +262,7 @@ impl Host for DeclaringContext {
     fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
         if core::mem::take(&mut self.declare_next) {
             assert!(gas.record_history_cost(DECLARED.history));
-            assert!(gas.record_bytes(DECLARED.bytes));
+            assert!(gas.record_pool(FIRST, DECLARED.pools.get(FIRST)));
             start.charge = DECLARED;
         }
         true
@@ -413,8 +415,10 @@ impl PrecompileProvider<TestContext> for DrawingPrecompiles {
     ) -> Result<Option<InterpreterResult>, String> {
         let mut answer = self.inner.run(context, inputs)?;
         if let Some(answer) = answer.as_mut().filter(|_| self.draw > 0) {
-            answer.gas.set_bytes_remaining(inputs.bytes_share);
-            assert!(answer.gas.record_bytes(self.draw));
+            answer
+                .gas
+                .set_pool_remaining(FIRST, inputs.pool_shares.get(FIRST));
+            assert!(answer.gas.record_pool(FIRST, self.draw));
         }
         Ok(answer)
     }
@@ -430,11 +434,11 @@ type Started = (u64, StartCharge, u64);
 fn started(input: &FrameInput) -> Started {
     match input {
         FrameInput::Call(inputs) => (
-            inputs.bytes_share,
+            inputs.pool_shares.get(FIRST),
             inputs.charged_start,
             inputs.history_allowance,
         ),
-        FrameInput::Create(inputs) => (inputs.bytes_share(), inputs.charged_start(), 0),
+        FrameInput::Create(inputs) => (inputs.pool_shares().get(FIRST), inputs.charged_start(), 0),
         FrameInput::Empty => unreachable!(),
     }
 }
@@ -484,11 +488,11 @@ impl Handler for PoolHandler {
     fn tx_gas(&self, evm: &mut TestEvm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
         let mut gas = self.mainnet.tx_gas(evm, init_and_floor_gas);
         if let Some(pool) = self.pool {
-            gas.set_bytes_remaining(pool);
+            gas.set_pool_remaining(FIRST, pool);
         }
         if self.declare {
             assert!(gas.record_history_cost(DECLARED.history));
-            assert!(gas.record_bytes(DECLARED.bytes));
+            assert!(gas.record_pool(FIRST, DECLARED.pools.get(FIRST)));
         }
         gas
     }
@@ -556,8 +560,8 @@ impl Handler for PoolHandler {
         // `post_execution` takes `&self`; the record goes through a cell.
         SETTLED.with(|settled| {
             settled.set(Some((
-                gas.bytes_remaining(),
-                gas.bytes_spent(),
+                gas.pool_remaining(FIRST),
+                gas.pool_spent(FIRST),
                 gas.history_gas_spent(),
             )))
         });
@@ -720,7 +724,7 @@ impl Run {
                     .override_gas([(GasId::call_history_allowance(), allowance)]);
                 if let Some(percent) = forward_percent {
                     cfg.gas_params
-                        .override_gas([(GasId::bytes_forward_percent(), percent)]);
+                        .override_gas([(GasId::pool_forward_percent(FIRST), percent)]);
                 }
             });
         let ctx = DeclaringContext {
@@ -895,14 +899,14 @@ fn test_the_start_charge_is_refunded_when_the_frame_fails() {
         assert_eq!(handler.starts.len(), 2, "{name}");
         assert_eq!(
             handler.starts[1],
-            (POOL - DECLARED.bytes, DECLARED, 0),
+            (POOL - DECLARED.pools.get(FIRST), DECLARED, 0),
             "{name}: the charge rides on the input"
         );
         let settled = handler.settled.expect(name);
         if fails {
             assert_eq!(settled, (POOL, 0, 0), "{name}: refunded whole");
         } else {
-            let drawn = DECLARED.bytes + DRAW_BYTES;
+            let drawn = DECLARED.pools.get(FIRST) + DRAW_BYTES;
             assert_eq!(
                 settled,
                 (POOL - drawn, drawn as i64, DECLARED.history as i64),
@@ -940,14 +944,14 @@ fn test_the_first_frame_gets_the_pool_and_its_start_charge() {
         assert_eq!(result.is_success(), !fails, "{name}: {result:?}");
         assert_eq!(
             handler.starts,
-            [(POOL - DECLARED.bytes, DECLARED, 0)],
+            [(POOL - DECLARED.pools.get(FIRST), DECLARED, 0)],
             "{name}"
         );
         let settled = handler.settled.expect(name);
         if fails {
             assert_eq!(settled, (POOL, 0, 0), "{name}: refunded whole");
         } else {
-            let drawn = DECLARED.bytes + DRAW_BYTES;
+            let drawn = DECLARED.pools.get(FIRST) + DRAW_BYTES;
             assert_eq!(
                 settled,
                 (POOL - drawn, drawn as i64, DECLARED.history as i64),
@@ -1145,7 +1149,7 @@ fn test_a_start_refused_for_the_depth_gives_the_share_and_the_start_charge_back(
         let (result, handler) = Run::new(ends(parent)).with(handler);
 
         assert!(result.is_success(), "{name}: {result:?}");
-        let share = POOL - DRAW_BYTES - DECLARED.bytes;
+        let share = POOL - DRAW_BYTES - DECLARED.pools.get(FIRST);
         assert_eq!(handler.starts[1], (share, DECLARED, 0), "{name}");
         assert_eq!(
             handler.returned[0],

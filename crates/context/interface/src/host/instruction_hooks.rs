@@ -7,7 +7,7 @@
 //! nothing and let the instruction go on.
 
 use crate::{
-    cfg::gas::StartCharge,
+    cfg::gas::{PoolAmounts, StartCharge},
     context::{SStoreResult, SelfDestructResult},
 };
 use primitives::{Address, Bytes, StorageKey, U256};
@@ -108,12 +108,15 @@ pub struct FrameStart {
     /// `CALLCODE` or `DELEGATECALL`, the calling frame's own account, which runs the called
     /// account's code.
     ///
-    /// For a `CREATE` or `CREATE2`, the address the creation takes, computed once: the handler
-    /// builds the frame at the same address without computing it again. `None` only for a
-    /// creation the handler fails before it takes an address, which reaches the hook only when
-    /// EIP-8037 is off: an endowment above the caller's balance, a caller's nonce at its maximum,
-    /// or a creating frame at the depth limit. With EIP-8037 on, the instruction ends such a
-    /// creation before the hook.
+    /// For a `CREATE` or `CREATE2`, the address the creation would take, computed once: the
+    /// handler builds the frame at the same address without computing it again. Whether the
+    /// creation takes it is the outcome's to say (`CreateOutcome::address`): a creation that
+    /// lands on an account that already has code or a nonce, one the handler refuses after the
+    /// hook, and one an inspector or a consumer answers without a frame take none, though the
+    /// start named the address. `None` only for a creation the handler fails before it takes an
+    /// address, which reaches the hook only when EIP-8037 is off: an endowment above the caller's
+    /// balance, a caller's nonce at its maximum, or a creating frame at the depth limit. With
+    /// EIP-8037 on, the instruction ends such a creation before the hook.
     pub target: Option<Address>,
     /// The value the start transfers; zero for `DELEGATECALL` and `STATICCALL`.
     pub value: U256,
@@ -142,7 +145,7 @@ impl FrameStart {
             target,
             value,
             forward,
-            charge: StartCharge::new(0, 0),
+            charge: StartCharge::new(0, PoolAmounts::ZERO),
         }
     }
 }

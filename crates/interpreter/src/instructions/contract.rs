@@ -9,7 +9,7 @@ use call_helpers::load_acc_and_calc_forward;
 
 use crate::{
     instructions::{
-        instruction_hooks::{cache_created_address, forward_bytes, frame_starting},
+        instruction_hooks::{cache_created_address, forward_to_child, frame_starting},
         utility::IntoAddress,
     },
     interpreter_action::FrameInput,
@@ -195,12 +195,12 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
         gas_limit,
     );
     let charged_start = frame_starting(&mut context.interpreter.gas, context.host, start)?;
-    let bytes_share = forward_bytes(&mut context.interpreter.gas, context.host);
+    let shares = forward_to_child(&mut context.interpreter.gas, context.host);
 
     create_inputs.set_gas_limit(gas_limit);
-    create_inputs.set_reservoir(context.interpreter.gas.reservoir());
+    create_inputs.set_reservoir(shares.reservoir);
     create_inputs.set_charged_start(charged_start);
-    create_inputs.set_bytes_share(bytes_share);
+    create_inputs.set_pool_shares(shares.pools);
     context
         .interpreter
         .bytecode
@@ -286,7 +286,7 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
     let transferred = value.transfer().unwrap_or_default();
     let start = FrameStart::new(kind, caller, Some(target_address), transferred, forward);
     let charged_start = frame_starting(&mut context.interpreter.gas, context.host, start)?;
-    let bytes_share = forward_bytes(&mut context.interpreter.gas, context.host);
+    let shares = forward_to_child(&mut context.interpreter.gas, context.host);
 
     // Call host to interact with target contract
     context
@@ -304,10 +304,10 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
                 scheme,
                 is_static,
                 return_memory_offset,
-                reservoir: context.interpreter.gas.reservoir(),
+                reservoir: shares.reservoir,
                 charged_new_account_state_gas,
                 charged_start,
-                bytes_share,
+                pool_shares: shares.pools,
                 history_allowance,
             },
         ))));

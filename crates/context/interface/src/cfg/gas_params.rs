@@ -1,7 +1,7 @@
 //! Gas table for dynamic gas constants.
 
 use crate::{
-    cfg::gas::{self, get_tokens_in_calldata, InitialAndFloorGas},
+    cfg::gas::{self, get_tokens_in_calldata, InitialAndFloorGas, PoolId},
     context::SStoreResult,
     transaction::AccessListItemTr as _,
     Transaction, TransactionType,
@@ -232,9 +232,12 @@ impl GasParams {
             gas::NON_ZERO_BYTE_MULTIPLIER;
         table[GasId::tx_token_cost().as_usize()] = gas::STANDARD_TOKEN_COST;
         table[GasId::tx_base_stipend().as_usize()] = 21000;
-        // The fork's entries: a child frame receives the whole byte pool, and a value call's
-        // child no history allowance, on every spec.
-        table[GasId::bytes_forward_percent().as_usize()] = 100;
+        // The fork's entries: a child frame receives the whole reservoir and every whole pool,
+        // and a value call's child no history allowance, on every spec.
+        table[GasId::reservoir_forward_percent().as_usize()] = 100;
+        for pool in PoolId::ALL {
+            table[GasId::pool_forward_percent(pool).as_usize()] = 100;
+        }
 
         if spec.is_enabled_in(SpecId::HOMESTEAD) {
             table[GasId::tx_create_cost().as_usize()] = gas::CREATE;
@@ -817,19 +820,24 @@ impl GasParams {
             .saturating_mul(len as u64)
     }
 
-    /// The share of a caller's byte pool a child frame receives when it starts:
-    /// [`bytes_forward_percent`](GasId::bytes_forward_percent) per cent of `pool`, rounded down.
+    /// The share of a caller's `remaining` in `pool` a child frame receives when it starts:
+    /// [`pool_forward_percent`](GasId::pool_forward_percent) per cent of it, rounded down.
     ///
     /// A hundred or more, which every schedule here sets, forwards the whole pool.
     #[inline]
-    pub fn bytes_forward_share(&self, pool: u64) -> u64 {
-        let percent = self.get(GasId::bytes_forward_percent());
-        if percent >= 100 {
-            return pool;
-        }
-        // `floor(pool * percent / 100)` without widening: the quotient's part is exact, and the
-        // remainder's part is below a hundred times a hundred.
-        pool / 100 * percent + pool % 100 * percent / 100
+    pub fn pool_forward_share(&self, pool: PoolId, remaining: u64) -> u64 {
+        percent_of(remaining, self.get(GasId::pool_forward_percent(pool)))
+    }
+
+    /// The share of a caller's EIP-8037 `reservoir` a child frame receives when it starts:
+    /// [`reservoir_forward_percent`](GasId::reservoir_forward_percent) per cent of it, rounded
+    /// down. The caller keeps the rest while the child runs.
+    ///
+    /// A hundred or more, which every schedule here sets, forwards the whole reservoir, as
+    /// EIP-8037 does.
+    #[inline]
+    pub fn reservoir_forward_share(&self, reservoir: u64) -> u64 {
+        percent_of(reservoir, self.get(GasId::reservoir_forward_percent()))
     }
 
     /// History gas a value call's child may spend before it charges its budget
@@ -1301,8 +1309,11 @@ impl GasId {
             x if x == Self::tx_account_write_cost().as_u8() => "tx_account_write_cost",
             x if x == Self::tx_create_access_cost().as_u8() => "tx_create_access_cost",
             x if x == Self::code_deposit_history_gas().as_u8() => "code_deposit_history_gas",
-            x if x == Self::bytes_forward_percent().as_u8() => "bytes_forward_percent",
+            x if x == Self::reservoir_forward_percent().as_u8() => "reservoir_forward_percent",
             x if x == Self::call_history_allowance().as_u8() => "call_history_allowance",
+            x if x == Self::pool_forward_percent(PoolId::new(0)).as_u8() => "pool0_forward_percent",
+            x if x == Self::pool_forward_percent(PoolId::new(1)).as_u8() => "pool1_forward_percent",
+            x if x == Self::pool_forward_percent(PoolId::new(2)).as_u8() => "pool2_forward_percent",
             _ => "unknown",
         }
     }
@@ -1378,8 +1389,11 @@ impl GasId {
             "tx_account_write_cost" => Some(Self::tx_account_write_cost()),
             "tx_create_access_cost" => Some(Self::tx_create_access_cost()),
             "code_deposit_history_gas" => Some(Self::code_deposit_history_gas()),
-            "bytes_forward_percent" => Some(Self::bytes_forward_percent()),
+            "reservoir_forward_percent" => Some(Self::reservoir_forward_percent()),
             "call_history_allowance" => Some(Self::call_history_allowance()),
+            "pool0_forward_percent" => Some(Self::pool_forward_percent(PoolId::new(0))),
+            "pool1_forward_percent" => Some(Self::pool_forward_percent(PoolId::new(1))),
+            "pool2_forward_percent" => Some(Self::pool_forward_percent(PoolId::new(2))),
             _ => None,
         }
     }
@@ -1671,14 +1685,14 @@ impl GasId {
         Self::new(255)
     }
 
-    /// The share of a caller's byte pool a child frame receives when it starts, in per cent of
-    /// the pool, rounded down ([`GasParams::bytes_forward_share`]). A hundred, the whole pool,
-    /// on every schedule defined here; a chain that keeps part of the pool for the caller lowers
-    /// it.
+    /// The share of a caller's EIP-8037 reservoir a child frame receives when it starts, in per
+    /// cent of the reservoir, rounded down ([`GasParams::reservoir_forward_share`]). A hundred,
+    /// the whole reservoir as EIP-8037 forwards it, on every schedule defined here; a chain that
+    /// keeps part of the reservoir for the caller while the child runs lowers it.
     ///
     /// A fork id, allocated from the top of the table below
     /// [`code_deposit_history_gas`](Self::code_deposit_history_gas).
-    pub const fn bytes_forward_percent() -> GasId {
+    pub const fn reservoir_forward_percent() -> GasId {
         Self::new(254)
     }
 
@@ -1688,10 +1702,32 @@ impl GasId {
     /// schedule defined here.
     ///
     /// A fork id, allocated from the top of the table below
-    /// [`bytes_forward_percent`](Self::bytes_forward_percent).
+    /// [`reservoir_forward_percent`](Self::reservoir_forward_percent).
     pub const fn call_history_allowance() -> GasId {
         Self::new(253)
     }
+
+    /// The share of a caller's `pool` a child frame receives when it starts, in per cent of what
+    /// the caller has left of it, rounded down ([`GasParams::pool_forward_share`]). A hundred,
+    /// the whole pool, on every schedule defined here; a chain that keeps part of a pool for the
+    /// caller lowers it.
+    ///
+    /// Fork ids, one per pool, allocated from the top of the table below
+    /// [`call_history_allowance`](Self::call_history_allowance): pool `i` at `252 - i`.
+    pub const fn pool_forward_percent(pool: PoolId) -> GasId {
+        Self::new(252 - pool.index() as u8)
+    }
+}
+
+/// `percent` per cent of `value`, rounded down; a hundred or more is the whole of it.
+#[inline]
+const fn percent_of(value: u64, percent: u64) -> u64 {
+    if percent >= 100 {
+        return value;
+    }
+    // `floor(value * percent / 100)` without widening: the quotient's part is exact, and the
+    // remainder's part is below a hundred times a hundred.
+    value / 100 * percent + value % 100 * percent / 100
 }
 
 #[cfg(test)]
@@ -1766,23 +1802,25 @@ mod tests {
 
         // The known GasIds are upstream's indices 1-49 (0 is unused) plus the fork's, allocated
         // from the top of the table so upstream's next sequential id does not collide with them:
-        // `code_deposit_history_gas` at 255, `bytes_forward_percent` at 254 and
-        // `call_history_allowance` at 253. Every one of them has a name.
-        let expected_ids: HashSet<u8> = (1..=49).chain([253, 254, 255]).collect();
+        // `code_deposit_history_gas` at 255, `reservoir_forward_percent` at 254,
+        // `call_history_allowance` at 253 and the three pools' forward percents at 252, 251 and
+        // 250. Every one of them has a name.
+        let expected_ids: HashSet<u8> = (1..=49).chain(250..=255).collect();
         assert_eq!(named_ids, expected_ids);
         assert_eq!(
             unique_names.len(),
-            52,
-            "Expected 52 unique GasIds, found {}",
+            55,
+            "Expected 55 unique GasIds, found {}",
             unique_names.len()
         );
     }
 
-    /// Every schedule forwards the whole pool: the share is the pool itself, `u64::MAX`
-    /// included. A schedule that sets a percentage forwards that much, rounded down, and one at
-    /// or above a hundred forwards the whole pool.
+    /// Every schedule forwards every whole pool and the whole reservoir: the share is the amount
+    /// itself, `u64::MAX` included. A schedule that sets a percentage forwards that much, rounded
+    /// down, and one at or above a hundred forwards the whole amount.
     #[test]
-    fn test_bytes_forward_share_defaults_to_the_whole_pool() {
+    fn test_forward_shares_default_to_the_whole_amount() {
+        let amounts = [0, 1, 99, 100, 149, 1_000, u64::MAX - 1, u64::MAX];
         for spec in [
             SpecId::FRONTIER,
             SpecId::LONDON,
@@ -1791,42 +1829,110 @@ mod tests {
             SpecId::default(),
         ] {
             let params = GasParams::new_spec(spec);
-            assert_eq!(params.get(GasId::bytes_forward_percent()), 100, "{spec:?}");
-            for pool in [0, 1, 99, 100, 149, 1_000, u64::MAX - 1, u64::MAX] {
-                assert_eq!(params.bytes_forward_share(pool), pool, "{spec:?} {pool}");
+            assert_eq!(
+                params.get(GasId::reservoir_forward_percent()),
+                100,
+                "{spec:?}"
+            );
+            for amount in amounts {
+                assert_eq!(params.reservoir_forward_share(amount), amount, "{spec:?}");
+            }
+            for pool in PoolId::ALL {
+                assert_eq!(
+                    params.get(GasId::pool_forward_percent(pool)),
+                    100,
+                    "{spec:?} {pool:?}"
+                );
+                for amount in amounts {
+                    assert_eq!(
+                        params.pool_forward_share(pool, amount),
+                        amount,
+                        "{spec:?} {pool:?} {amount}"
+                    );
+                }
             }
         }
 
+        // Each entry is its own: the reservoir at 98, the pools at 98, 50 and 0.
         let mut params = GasParams::new_spec(SpecId::OSAKA);
-        params.override_gas([(GasId::bytes_forward_percent(), 98)]);
-        assert_eq!(params.bytes_forward_share(0), 0);
-        assert_eq!(params.bytes_forward_share(1), 0);
-        assert_eq!(params.bytes_forward_share(100), 98);
-        assert_eq!(params.bytes_forward_share(149), 146, "rounded down");
-        assert_eq!(params.bytes_forward_share(1_000), 980);
+        params.override_gas([
+            (GasId::reservoir_forward_percent(), 98),
+            (GasId::pool_forward_percent(PoolId::new(0)), 98),
+            (GasId::pool_forward_percent(PoolId::new(1)), 50),
+            (GasId::pool_forward_percent(PoolId::new(2)), 0),
+        ]);
+        let share = |amount| {
+            (
+                params.reservoir_forward_share(amount),
+                PoolId::ALL.map(|pool| params.pool_forward_share(pool, amount)),
+            )
+        };
+        assert_eq!(share(0), (0, [0, 0, 0]));
+        assert_eq!(share(1), (0, [0, 0, 0]));
+        assert_eq!(share(100), (98, [98, 50, 0]));
+        assert_eq!(share(149), (146, [146, 74, 0]), "rounded down");
+        assert_eq!(share(1_000), (980, [980, 500, 0]));
+        let max_98 = (u64::MAX as u128 * 98 / 100) as u64;
         assert_eq!(
-            params.bytes_forward_share(u64::MAX),
-            (u64::MAX as u128 * 98 / 100) as u64,
+            share(u64::MAX),
+            (max_98, [max_98, u64::MAX / 2, 0]),
             "no overflow"
         );
 
-        params.override_gas([(GasId::bytes_forward_percent(), 0)]);
-        assert_eq!(params.bytes_forward_share(1_000), 0);
-        params.override_gas([(GasId::bytes_forward_percent(), 250)]);
+        params.override_gas([(GasId::reservoir_forward_percent(), 250)]);
         assert_eq!(
-            params.bytes_forward_share(1_000),
+            params.reservoir_forward_share(1_000),
             1_000,
-            "capped at the whole pool"
+            "capped at the whole reservoir"
         );
 
-        assert_eq!(
-            GasId::from_name("bytes_forward_percent"),
-            Some(GasId::bytes_forward_percent())
-        );
-        assert_eq!(
-            GasId::bytes_forward_percent().name(),
-            "bytes_forward_percent"
-        );
+        for (id, name) in [
+            (
+                GasId::reservoir_forward_percent(),
+                "reservoir_forward_percent",
+            ),
+            (
+                GasId::pool_forward_percent(PoolId::new(0)),
+                "pool0_forward_percent",
+            ),
+            (
+                GasId::pool_forward_percent(PoolId::new(1)),
+                "pool1_forward_percent",
+            ),
+            (
+                GasId::pool_forward_percent(PoolId::new(2)),
+                "pool2_forward_percent",
+            ),
+        ] {
+            assert_eq!(GasId::from_name(name), Some(id));
+            assert_eq!(id.name(), name);
+        }
+    }
+
+    /// REX's forward of regular gas to a child, `remaining - remaining * 2 / 100` rounded down, is
+    /// upstream's `call_stipend_reduction` with the quotient 50 in place of EIP-150's 64: the two
+    /// agree on every amount, so a chain that forwards 98/100 of its regular gas needs no fork
+    /// change, only the schedule entry.
+    #[test]
+    fn test_a_call_stipend_reduction_of_50_forwards_98_per_cent() {
+        let mut params = GasParams::new_spec(SpecId::OSAKA);
+        params.override_gas([(GasId::call_stipend_reduction(), 50)]);
+        let rex = |remaining: u64| (remaining as u128 - remaining as u128 * 2 / 100) as u64;
+        let amounts = (0..10_000)
+            .chain([1_000_000, 16_777_216, 30_000_000, 1 << 40])
+            .chain([u64::MAX - 49, u64::MAX - 1, u64::MAX]);
+        for remaining in amounts {
+            assert_eq!(
+                params.call_stipend_reduction(remaining),
+                rex(remaining),
+                "{remaining}"
+            );
+        }
+        // Worked examples: 98% of 1,000 is 980; of 1,049 is 1,028.02, kept as 1,029 by REX's
+        // rule, which takes 2% rounded down (20) away.
+        assert_eq!(params.call_stipend_reduction(1_000), 980);
+        assert_eq!(params.call_stipend_reduction(1_049), 1_029);
+        assert_eq!(params.call_stipend_reduction(99), 98);
     }
 
     /// No schedule gives a value call's child a history allowance.

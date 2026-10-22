@@ -1,4 +1,4 @@
-use crate::{Gas, InstructionResult, InterpreterResult, StartCharge};
+use crate::{Gas, InstructionResult, InterpreterResult, PoolAmounts, StartCharge};
 use core::ops::Range;
 use primitives::{Address, Bytes, Log};
 use std::vec::Vec;
@@ -67,7 +67,7 @@ impl CallOutcome {
             precompile_call_logs: Vec::new(),
             charged_new_account_state_gas: false,
             charged_state_gas_address: Address::ZERO,
-            charged_start: StartCharge::new(0, 0),
+            charged_start: StartCharge::new(0, PoolAmounts::ZERO),
         }
     }
 

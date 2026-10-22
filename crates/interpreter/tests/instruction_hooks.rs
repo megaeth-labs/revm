@@ -24,7 +24,7 @@ use revm_interpreter::{
     instructions::gas_table_spec,
     interpreter::{EthInterpreter, ExtBytecode},
     FrameInput, Gas, GasTracker, Host, InputsImpl, InstructionResult, Interpreter,
-    InterpreterAction, SharedMemory,
+    InterpreterAction, PoolAmounts, SharedMemory,
 };
 use state::AccountInfo;
 use std::borrow::Cow;
@@ -881,11 +881,13 @@ fn test_a_start_reaches_the_hook_with_the_forward_taken() {
             "{name}: the hook sees the forward taken"
         );
         let mut after_the_forward = at_hook;
-        after_the_forward.set_bytes_remaining(0);
+        after_the_forward.set_reservoir(0);
+        after_the_forward.set_pools_remaining(PoolAmounts::ZERO);
         assert_eq!(
             *gas.tracker(),
             after_the_forward,
-            "{name}: nothing is charged after the hook; the whole pool is forwarded"
+            "{name}: nothing is charged after the hook; the whole reservoir and every whole pool \
+             are forwarded"
         );
         let stipend = if matches!(op, CALL | CALLCODE) {
             params.call_stipend()
@@ -1037,9 +1039,10 @@ fn test_the_value_stipend_is_not_part_of_the_forward() {
     }
 }
 
-/// The frame's input copies the reservoir as the hook left it, for every kind of start. A charge the
-/// reservoir covers leaves the forward and the caller's regular gas alone; one that spills draws the
-/// caller's regular gas and empties the reservoir, and the forward is still what was taken before.
+/// The frame's input takes the reservoir as the hook left it, for every kind of start, out of the
+/// caller's, which forwards the whole of it by default. A charge the reservoir covers leaves the
+/// forward and the caller's regular gas alone; one that spills draws the caller's regular gas and
+/// empties the reservoir, and the forward is still what was taken before.
 #[test]
 fn test_the_input_copies_the_reservoir_the_hook_left() {
     let spec = SpecId::AMSTERDAM;
@@ -1055,7 +1058,11 @@ fn test_the_input_copies_the_reservoir_the_hook_left() {
 
             assert_eq!(host.start().1.reservoir(), 10_000, "{name}");
             assert_eq!(input_reservoir, reservoir, "{name}, charge {charge}");
-            assert_eq!(gas.reservoir(), reservoir, "{name}, charge {charge}");
+            assert_eq!(
+                gas.reservoir(),
+                0,
+                "{name}, charge {charge}: the caller forwarded the whole reservoir"
+            );
             assert_eq!(
                 gas_limit, quiet_limit,
                 "{name}, charge {charge}: the forward"

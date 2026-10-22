@@ -2,8 +2,8 @@
 
 pub use context_interface::cfg::gas::*;
 
-mod byte_pool;
 mod failed_charge;
+mod pools;
 mod withheld;
 
 /// Represents the state of gas during execution.

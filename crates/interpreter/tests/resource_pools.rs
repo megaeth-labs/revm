@@ -24,7 +24,7 @@ use revm_interpreter::{
     instructions::gas_table_spec,
     interpreter::{EthInterpreter, ExtBytecode},
     FrameInput, Gas, GasTracker, Host, InputsImpl, InstructionResult, Interpreter,
-    InterpreterAction, SharedMemory, StartCharge,
+    InterpreterAction, PoolAmounts, PoolId, SharedMemory, StartCharge,
 };
 use state::AccountInfo;
 use std::borrow::Cow;
@@ -39,8 +39,10 @@ const TARGET: Address = address!("0x0000000000000000000000000000000000007a59");
 const AMPLE: u64 = 1_000_000;
 /// The pool the frame starts with, unless a test leaves it unlimited.
 const POOL: u64 = 1_000;
+/// The pool the tests draw: any of the tracker's pools behaves the same.
+const FIRST: PoolId = PoolId::new(0);
 /// A start charge a hook declares.
-const DECLARED: StartCharge = StartCharge::new(3_520, 160);
+const DECLARED: StartCharge = StartCharge::new(3_520, PoolAmounts::ZERO.with(FIRST, 160));
 /// What a chain's schedule sets: the child's share and a value call's allowance.
 const PERCENT: u64 = 98;
 const ALLOWANCE: u64 = 160;
@@ -77,7 +79,7 @@ impl PoolHost {
     /// call's child an allowance.
     fn on_a_chains_schedule(mut self) -> Self {
         self.params.override_gas([
-            (GasId::bytes_forward_percent(), PERCENT),
+            (GasId::pool_forward_percent(FIRST), PERCENT),
             (GasId::call_history_allowance(), ALLOWANCE),
         ]);
         self
@@ -112,7 +114,7 @@ impl Host for PoolHost {
 
     fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
         let found = (*start, *gas);
-        let paid = gas.record_bytes(self.draw);
+        let paid = gas.record_pool(FIRST, self.draw);
         start.charge = self.declare;
         self.starts.push((found.0, found.1, paid));
         self.admit && paid
@@ -247,7 +249,7 @@ fn run(code: &[u8], pool: Option<u64>, host: &mut PoolHost) -> (InterpreterActio
         AMPLE,
     );
     if let Some(pool) = pool {
-        interpreter.gas.set_bytes_remaining(pool);
+        interpreter.gas.set_pool_remaining(FIRST, pool);
     }
     let table = instruction_table::<EthInterpreter, PoolHost>();
     let action = interpreter.run_plain(&table, &gas_table_spec(spec), host);
@@ -275,11 +277,11 @@ fn returned(action: InterpreterAction) -> InstructionResult {
 fn figures(input: &FrameInput) -> (u64, StartCharge, u64) {
     match input {
         FrameInput::Call(inputs) => (
-            inputs.bytes_share,
+            inputs.pool_shares.get(FIRST),
             inputs.charged_start,
             inputs.history_allowance,
         ),
-        FrameInput::Create(inputs) => (inputs.bytes_share(), inputs.charged_start(), 0),
+        FrameInput::Create(inputs) => (inputs.pool_shares().get(FIRST), inputs.charged_start(), 0),
         FrameInput::Empty => unreachable!(),
     }
 }
@@ -336,12 +338,16 @@ fn test_every_start_forwards_the_whole_pool_by_default() {
             "{kind:?}"
         );
         assert_eq!(
-            gas.bytes_remaining(),
+            gas.pool_remaining(FIRST),
             0,
             "{kind:?}: the caller keeps nothing"
         );
-        assert_eq!(gas.bytes_spent(), 0, "{kind:?}: a forward is not a draw");
-        assert!(!gas.bytes_crossing(), "{kind:?}");
+        assert_eq!(
+            gas.pool_spent(FIRST),
+            0,
+            "{kind:?}: a forward is not a draw"
+        );
+        assert!(!gas.pool_crossing(FIRST), "{kind:?}");
     }
 }
 
@@ -354,7 +360,7 @@ fn test_an_unlimited_pool_is_forwarded_unlimited() {
         let (share, _, _) = figures(&started(action));
 
         assert_eq!(share, u64::MAX, "{kind:?}");
-        assert_eq!(gas.bytes_remaining(), 0, "{kind:?}");
+        assert_eq!(gas.pool_remaining(FIRST), 0, "{kind:?}");
     }
 }
 
@@ -371,7 +377,7 @@ fn test_the_share_follows_the_schedule_after_the_hooks_draw() {
 
         let (_, found, paid) = host.start();
         assert_eq!(
-            found.bytes_remaining(),
+            found.pool_remaining(FIRST),
             POOL,
             "{kind:?}: the hook found the pool"
         );
@@ -379,11 +385,15 @@ fn test_the_share_follows_the_schedule_after_the_hooks_draw() {
         // 800 left after the draw; 98% of it, rounded down.
         assert_eq!(share, 784, "{kind:?}");
         assert_eq!(
-            gas.bytes_remaining(),
+            gas.pool_remaining(FIRST),
             16,
             "{kind:?}: the caller keeps the rest"
         );
-        assert_eq!(gas.bytes_spent(), 200, "{kind:?}: the hook's draw stays");
+        assert_eq!(
+            gas.pool_spent(FIRST),
+            200,
+            "{kind:?}: the hook's draw stays"
+        );
     }
 }
 
@@ -414,12 +424,12 @@ fn test_a_refused_start_forwards_no_bytes_and_discards_the_declared_charge() {
 
         assert_eq!(returned(action), InstructionResult::OutOfGas, "{kind:?}");
         assert_eq!(
-            gas.bytes_remaining(),
+            gas.pool_remaining(FIRST),
             POOL - 200,
             "{kind:?}: no share taken"
         );
-        assert_eq!(gas.bytes_spent(), 200, "{kind:?}");
-        assert!(!gas.bytes_crossing(), "{kind:?}");
+        assert_eq!(gas.pool_spent(FIRST), 200, "{kind:?}");
+        assert!(!gas.pool_crossing(FIRST), "{kind:?}");
     }
 }
 
@@ -439,12 +449,12 @@ fn test_a_draw_the_pool_cannot_pay_records_a_crossing_that_survives_the_halt() {
             "{kind:?}: the halt zeroed the regular gas"
         );
         assert_eq!(
-            gas.bytes_remaining(),
+            gas.pool_remaining(FIRST),
             POOL,
             "{kind:?}: the failed draw took nothing"
         );
-        assert_eq!(gas.bytes_spent(), 0, "{kind:?}");
-        assert!(gas.bytes_crossing(), "{kind:?}");
+        assert_eq!(gas.pool_spent(FIRST), 0, "{kind:?}");
+        assert!(gas.pool_crossing(FIRST), "{kind:?}");
     }
 }
 

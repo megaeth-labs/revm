@@ -183,8 +183,8 @@ pub trait ContextTr: Host {
     ///
     /// `gas` is the creating frame's tracker, as [`gas_after`](CodeDeposit::gas_after) reads it
     /// when the hook is called. The hook may debit and credit it, for instance draw the deployed
-    /// code's bytes from the frame's byte pool
-    /// ([`GasTracker::record_bytes`](crate::cfg::gas::GasTracker::record_bytes)); a charge it
+    /// code from one of the frame's pools
+    /// ([`GasTracker::record_pool`](crate::cfg::gas::GasTracker::record_pool)); a charge it
     /// makes that fails records as any failed charge does.
     ///
     /// - `Ok(())` admits it: the checkpoint is committed and the code is written, as without this

@@ -6,7 +6,7 @@ use context_interface::{
 };
 use interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
-    GasTracker, StartCharge,
+    GasTracker, PoolAmounts, StartCharge,
 };
 use primitives::{Address, TxKind};
 use state::Bytecode;
@@ -16,8 +16,11 @@ mod first_frame;
 pub use first_frame::settle_first_frame;
 
 /// Creates the first [`FrameInput`] from the transaction and the
-/// transaction-level `gas`, forwarding all remaining regular gas and the
-/// reservoir to the frame.
+/// transaction-level `gas`, forwarding all remaining regular gas, the
+/// reservoir and every pool to the frame. The reservoir and the pools are taken
+/// out of `gas` ([`GasTracker::forward_all_to_child`]), as a frame start takes
+/// a child's shares out of its caller's, and come back when the frame settles
+/// into `gas`.
 ///
 /// Under EIP-2780 this completes the runtime gas phase started at
 /// pre-execution (the authorization charges): the target is loaded once and
@@ -122,6 +125,9 @@ pub fn create_init_frame<CTX: ContextTr>(
                 }
             }
 
+            // The transaction's frame gets the whole reservoir and every whole pool, taken out
+            // of the transaction's gas: the schedule's shares are for the frames below it.
+            let shares = gas.forward_all_to_child();
             Ok(Some(FrameInput::Call(Box::new(CallInputs {
                 input: CallInput::Bytes(input),
                 gas_limit: gas.remaining(),
@@ -133,14 +139,13 @@ pub fn create_init_frame<CTX: ContextTr>(
                 scheme: CallScheme::Call,
                 is_static: false,
                 return_memory_offset: 0..0,
-                reservoir: gas.reservoir(),
+                reservoir: shares.reservoir,
                 charged_new_account_state_gas,
-                // The transaction's frame gets the whole pool. It has no start charge until a
-                // consumer that charged the transaction's gas for it puts one on this input
-                // (`Handler::first_frame_input`), and no allowance, which is a value call's below
-                // the transaction.
-                charged_start: StartCharge::new(0, 0),
-                bytes_share: forward_whole_pool(gas),
+                // No start charge until a consumer that charged the transaction's gas for the
+                // frame puts one on this input (`Handler::first_frame_input`), and no allowance,
+                // which is a value call's below the transaction.
+                charged_start: StartCharge::new(0, PoolAmounts::ZERO),
+                pool_shares: shares.pools,
                 history_allowance: 0,
             }))))
         }
@@ -176,31 +181,21 @@ pub fn create_init_frame<CTX: ContextTr>(
                 }
             }
             let tx = ctx.tx();
+            let shares = gas.forward_all_to_child();
             let mut inputs = CreateInputs::new(
                 tx.caller(),
                 CreateScheme::Create,
                 tx.value(),
                 input,
                 gas.remaining(),
-                gas.reservoir(),
+                shares.reservoir,
             );
             inputs.set_charged_create_state_gas(charged_create_state_gas);
             inputs.set_charged_state_gas_address(charged_state_gas_address);
-            inputs.set_bytes_share(forward_whole_pool(gas));
+            inputs.set_pool_shares(shares.pools);
             Ok(Some(FrameInput::Create(Box::new(inputs))))
         }
     }
-}
-
-/// Takes the whole byte pool out of the transaction-level `gas` for the transaction's frame and
-/// returns it: the frame's pool. The schedule's share applies to the frames below it; the
-/// transaction's frame is the pool's first holder. `last_frame_result` adds back what the frame
-/// leaves, as a caller does.
-#[inline]
-const fn forward_whole_pool(gas: &mut GasTracker) -> u64 {
-    let pool = gas.bytes_remaining();
-    gas.forward_bytes(pool);
-    pool
 }
 
 /// Unwinds the EIP-2780 runtime gas phase after first-frame creation ran out

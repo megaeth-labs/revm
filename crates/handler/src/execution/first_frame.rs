@@ -15,8 +15,9 @@ use std::string::ToString;
 /// The steps, each with the halt rule it takes:
 /// - `gas` spends all its regular gas, which was forwarded to the frame, and the frame settles
 ///   into it as a child settles into its caller ([`handle_reservoir_remaining_gas`]): a failing
-///   frame rolls back its state gas, history gas and byte draws, a halt consumes its regular gas,
-///   and what the frame left returns to `gas`;
+///   frame rolls back its state gas, history gas and pool draws, a halt consumes its regular gas,
+///   and what the frame left returns to `gas`, its reservoir and its pools added to what `gas`
+///   kept, which is nothing, since the frame took them whole;
 /// - the EIP-2780 refundable first-frame charge is refunded when no account leaf was created,
 ///   priced through [`Host::state_gas_charge`](context_interface::Host::state_gas_charge) as it
 ///   was charged; after a halt the regular gas the refund credited is consumed;
@@ -89,8 +90,7 @@ where
     // the transaction's gas, whole, on the same condition and with the same halt rule,
     // exactly like `EthFrame::return_result` refunds the start charges of inner frames.
     if let Some(charge) = frame_result.refundable_start_charge() {
-        gas.refill_history(charge.history);
-        gas.refill_bytes(charge.bytes);
+        gas.refill_start_charge(charge);
         if instruction_result.is_halt() {
             gas.spend_all();
         }
