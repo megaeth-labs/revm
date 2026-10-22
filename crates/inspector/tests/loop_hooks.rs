@@ -13,8 +13,9 @@
 //!
 //! The consumer here wraps revm's EVM and changes nothing else: [`PARENT`] calls [`CHILD`], then
 //! marks a slot of its own, and returns the call's status and return data; [`CHILD`] marks a slot
-//! of its own and halts. A slot left unmarked is an instruction that did not run. The consumer's
-//! hook writes its line into the inspector's, so one list orders both.
+//! of its own and halts. A transaction goes to [`PARENT`] unless a test sends it to [`CHILD`]. A
+//! slot left unmarked is an instruction that did not run. The consumer's hook writes its line into
+//! the inspector's, so one list orders both.
 
 use context::{
     result::{EVMError, ExecutionResult, Output},
@@ -381,7 +382,7 @@ fn child_code() -> Bytecode {
     Bytecode::new_raw(Bytes::from_static(&[PUSH1, 1, PUSH0, SSTORE, INVALID]))
 }
 
-/// What one transaction to [`PARENT`] did.
+/// What one transaction did.
 #[derive(Debug)]
 struct Run {
     result: ExecutionResult,
@@ -436,6 +437,11 @@ fn run(plan: Plan, inspected: bool) -> Run {
 
 /// [`run`], with [`PARENT`] calling `callee`.
 fn run_calling(callee: Callee, plan: Plan, inspected: bool) -> Run {
+    run_to(PARENT, callee, plan, inspected)
+}
+
+/// [`run_calling`], with the transaction sent to `to`.
+fn run_to(to: Address, callee: Callee, plan: Plan, inspected: bool) -> Run {
     let (address, answer, halt_at_init) = match callee {
         Callee::Child => (CHILD, false, false),
         Callee::Precompile => (IDENTITY, false, false),
@@ -466,7 +472,7 @@ fn run_calling(callee: Callee, plan: Plan, inspected: bool) -> Run {
     };
     consumer.evm.ctx.set_tx(
         TxEnv::builder_for_bench()
-            .kind(TxKind::Call(PARENT))
+            .kind(TxKind::Call(to))
             .gas_price(0)
             .gas_limit(GAS_LIMIT)
             .build_fill(),
@@ -802,6 +808,51 @@ fn test_the_consumers_rewrite_is_what_the_inspector_and_the_caller_see() {
             assert_eq!(
                 seen[from + 1..from + 3],
                 [&child_end, "frame_end CHILD Revert"]
+            );
+        }
+    }
+}
+
+/// What the consumer leaves in the transaction's own frame's result is the transaction's result: a
+/// transaction to [`CHILD`], whose halt the consumer makes a revert with output, ends as that
+/// revert on both paths, and gets back the gas the frame left, as a revert does and a halt does
+/// not.
+#[test]
+fn test_the_consumers_rewrite_of_the_transactions_frame_is_the_transactions_result() {
+    let plan = Plan {
+        rewrite: true,
+        ..Plan::default()
+    };
+    for inspected in [false, true] {
+        let halted = run_to(CHILD, Callee::Child, Plan::default(), inspected);
+        let rewritten = run_to(CHILD, Callee::Child, plan, inspected);
+
+        assert_eq!(
+            halted.result.tx_gas_used(),
+            GAS_LIMIT,
+            "a halt spends it all"
+        );
+        let ExecutionResult::Revert { output, .. } = &rewritten.result else {
+            panic!("the transaction reverts, got {:?}", rewritten.result);
+        };
+        assert_eq!(output, &Bytes::from_static(REWRITTEN), "{inspected}");
+        // 21,000 for the transaction, then PUSH1 3, PUSH0 2 and SSTORE's cold zero-to-one 22,100.
+        assert_eq!(rewritten.result.tx_gas_used(), 43_105, "{inspected}");
+        assert_eq!(
+            rewritten.marked,
+            (false, false),
+            "the halt took the mark back"
+        );
+        if inspected {
+            let end = format!("call_end CHILD Revert {}", Bytes::from_static(REWRITTEN));
+            assert_eq!(
+                rewritten.ends(),
+                [
+                    "initialize_interp CHILD",
+                    "hook CHILD InvalidFEOpcode",
+                    &end,
+                    "frame_end CHILD Revert"
+                ]
             );
         }
     }
