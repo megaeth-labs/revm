@@ -5,8 +5,8 @@ use handler::{
     EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult,
 };
 use interpreter::{
-    interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, FrameInput,
-    InterpreterTypes,
+    interpreter::EthInterpreter, interpreter_action::FrameInit, interpreter_types::LoopControl,
+    CallOutcome, FrameInput, InterpreterTypes,
 };
 
 use crate::{
@@ -95,6 +95,10 @@ pub trait InspectorEvmTr:
     }
 
     /// Initializes the frame for the given frame input. Frame is pushed to the frame stack.
+    ///
+    /// A new frame is handed to [`Inspector::initialize_interp`] unless its next action is
+    /// already set ([`EvmTr::frame_init`] set it): its first run returns that action before any
+    /// instruction, and the inspector may not replace it.
     #[inline]
     fn inspect_frame_init(
         &mut self,
@@ -137,7 +141,9 @@ pub trait InspectorEvmTr:
         }
         if let Some(frame) = frame.eth_frame() {
             let interp = &mut frame.interpreter;
-            inspector.initialize_interp(interp, ctx);
+            if interp.bytecode.is_not_end() {
+                inspector.initialize_interp(interp, ctx);
+            }
         };
         Ok(ItemOrResult::Item(frame))
     }

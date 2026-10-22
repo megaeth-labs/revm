@@ -3,7 +3,8 @@
 //! A pending action: a consumer sets a frame's next action on its interpreter before the frame
 //! runs, at its start or when a child returned into it, and the frame's run returns that action
 //! before any instruction runs, without an inspector `step`. A return ends the frame; a new frame
-//! starts a child, and the frame resumes on its result.
+//! starts a child, and the frame resumes on its result. A frame whose action is set at its start
+//! is not handed to the inspector's `initialize_interp`, so the inspector cannot replace it.
 //!
 //! A frame's run result: the result of a frame that ran reaches the consumer's
 //! [`EvmTr::frame_run_result`] once, as it leaves the frame's run, before the inspector's
@@ -95,6 +96,9 @@ enum AtStart {
     /// A creation with no init code on [`CREATION_GAS`] and the shares of the frame's reservoir
     /// and pools; once it returned into [`CHILD`], a return carrying [`AFTER_ITS_CHILD`].
     Create,
+    /// The creation of [`AtStart::Create`]; once it returned into [`CHILD`], nothing, so
+    /// [`CHILD`] runs its code.
+    CreateThenRun,
 }
 
 /// What [`PARENT`] calls, and whether the call runs.
@@ -106,6 +110,8 @@ enum Callee {
     Precompile,
     /// [`CHILD`], which the inspector answers with a revert carrying [`ANSWERED`].
     Answered,
+    /// [`CHILD`], which the inspector halts out of gas in `initialize_interp`.
+    HaltedAtInit,
 }
 
 /// What the inspector saw, one line per callback, by the account the frame runs as.
@@ -114,6 +120,8 @@ struct Recorder {
     events: Vec<String>,
     /// Answers the call to [`CHILD`].
     answer: bool,
+    /// Halts [`CHILD`]'s frame out of gas in `initialize_interp`.
+    halt_at_init: bool,
 }
 
 const fn name(address: Address) -> &'static str {
@@ -150,6 +158,9 @@ impl Inspector<Ctx> for Recorder {
     fn initialize_interp(&mut self, interp: &mut Interpreter, _: &mut Ctx) {
         let account = name(interp.input.target_address);
         self.events.push(format!("initialize_interp {account}"));
+        if self.halt_at_init && interp.input.target_address == CHILD {
+            interp.halt(InstructionResult::OutOfGas);
+        }
     }
 
     fn step(&mut self, interp: &mut Interpreter, _: &mut Ctx) {
@@ -237,7 +248,7 @@ impl EvmTr for Consumer {
         if let (Some(at_start), ItemOrResult::Item(frame)) = (at_start, &mut started) {
             let action = match at_start {
                 AtStart::Return => returning(frame, AT_START),
-                AtStart::Create => {
+                AtStart::Create | AtStart::CreateThenRun => {
                     let gas = &mut frame.interpreter.gas;
                     assert!(
                         gas.record_regular_cost(CREATION_GAS),
@@ -425,10 +436,11 @@ fn run(plan: Plan, inspected: bool) -> Run {
 
 /// [`run`], with [`PARENT`] calling `callee`.
 fn run_calling(callee: Callee, plan: Plan, inspected: bool) -> Run {
-    let (address, answer) = match callee {
-        Callee::Child => (CHILD, false),
-        Callee::Precompile => (IDENTITY, false),
-        Callee::Answered => (CHILD, true),
+    let (address, answer, halt_at_init) = match callee {
+        Callee::Child => (CHILD, false, false),
+        Callee::Precompile => (IDENTITY, false, false),
+        Callee::Answered => (CHILD, true, false),
+        Callee::HaltedAtInit => (CHILD, false, true),
     };
     let mut db = Db::default();
     db.insert_account_info(
@@ -447,6 +459,7 @@ fn run_calling(callee: Callee, plan: Plan, inspected: bool) -> Run {
     let mut consumer = Consumer {
         evm: ctx.build_mainnet_with_inspector(Recorder {
             answer,
+            halt_at_init,
             ..Recorder::default()
         }),
         plan,
@@ -547,7 +560,8 @@ fn test_inspect_instructions_returns_a_pending_action_without_a_step() {
 }
 
 /// An action the consumer sets on a frame revm built is the frame's result: its code does not
-/// run, on either path, and the inspector sees the frame start and end with no step between.
+/// run, on either path, and the inspector sees the frame start and end with nothing between, no
+/// `initialize_interp` and no step.
 #[test]
 fn test_an_action_set_at_a_frames_start_is_its_result() {
     let plan = Plan {
@@ -563,17 +577,28 @@ fn test_an_action_set_at_a_frames_start_is_its_result() {
         if inspected {
             let seen = run.lines(|line| line.contains("CHILD"));
             let end = format!("call_end CHILD Return {}", Bytes::from_static(AT_START));
-            assert_eq!(
-                seen,
-                [
-                    "initialize_interp CHILD",
-                    "hook CHILD Return",
-                    &end,
-                    "frame_end CHILD Return"
-                ]
-            );
+            assert_eq!(seen, ["hook CHILD Return", &end, "frame_end CHILD Return"]);
         }
     }
+}
+
+/// A frame whose action the consumer set at its start is not handed to `initialize_interp`, so an
+/// inspector that halts the frame there does not replace the consumer's action: the consumer's
+/// action is the frame's result.
+#[test]
+fn test_an_inspector_cannot_halt_a_frame_whose_action_is_set_at_its_start() {
+    let plan = Plan {
+        at_start: Some(AtStart::Return),
+        ..Plan::default()
+    };
+    let run = run_calling(Callee::HaltedAtInit, plan, true);
+
+    assert_eq!(run.output(), &status_and(true, AT_START));
+    let end = format!("call_end CHILD Return {}", Bytes::from_static(AT_START));
+    assert_eq!(
+        run.lines(|line| line.contains("CHILD")),
+        ["hook CHILD Return", &end, "frame_end CHILD Return"]
+    );
 }
 
 /// An action the consumer sets on a caller once its child's result is in it is the caller's
@@ -650,6 +675,48 @@ fn test_a_child_started_at_a_frames_start_runs_before_the_frame() {
                 created < child_ends,
                 "the creation ends first: {:?}",
                 run.events
+            );
+        }
+    }
+}
+
+/// A frame that resumes with no action set, from a child the consumer started at its start, runs
+/// its code then, on either path; the inspector sees a step before each instruction, though the
+/// frame was not handed to `initialize_interp`.
+#[test]
+fn test_a_frame_resumed_from_a_child_started_at_its_start_runs_its_code() {
+    let plan = Plan {
+        at_start: Some(AtStart::CreateThenRun),
+        ..Plan::default()
+    };
+    for inspected in [false, true] {
+        let run = run(plan, inspected);
+
+        assert_eq!(run.output(), &status_and(false, &[]), "{inspected}");
+        assert_eq!(
+            run.hooks(),
+            [
+                "hook CREATION Return",
+                "hook CHILD InvalidFEOpcode",
+                "hook PARENT Return"
+            ],
+            "{inspected}"
+        );
+        if inspected {
+            let steps = [
+                "step CHILD 0",
+                "step CHILD 2",
+                "step CHILD 3",
+                "step CHILD 4",
+            ];
+            assert_eq!(run.steps("CHILD"), steps, "PUSH1 PUSH0 SSTORE INVALID");
+            assert_eq!(
+                run.lines(|line| line.contains("CHILD") && !line.starts_with("step")),
+                [
+                    "hook CHILD InvalidFEOpcode",
+                    "call_end CHILD InvalidFEOpcode 0x",
+                    "frame_end CHILD InvalidFEOpcode"
+                ]
             );
         }
     }
