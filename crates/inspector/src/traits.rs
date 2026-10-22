@@ -151,7 +151,8 @@ pub trait InspectorEvmTr:
     /// Run the frame from the top of the stack. Returns the frame init or result.
     ///
     /// If frame has returned result it would hand it to [`EvmTr::frame_run_result`], then to the
-    /// inspector's `frame_end`, and mark the frame as finished.
+    /// inspector's `frame_end`, and mark the frame as finished. A frame without an `EthFrame` is
+    /// run by [`EvmTr::frame_run`], and its result handed to [`EvmTr::frame_run_result`] only.
     #[inline]
     fn inspect_frame_run(
         &mut self,

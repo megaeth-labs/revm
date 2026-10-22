@@ -128,9 +128,9 @@ pub trait EvmTr {
     /// `call_end`, `create_end` and `frame_end`. On both paths it runs before
     /// [`frame_return_result`](EvmTr::frame_return_result).
     ///
-    /// Whether the frame is marked finished differs by path: `frame_run` marks it before the plain
-    /// loop calls this, and the inspected run marks it after the inspector's end callbacks, as
-    /// upstream's does. An implementation does not rely on the mark.
+    /// Whether the frame is marked finished differs by path and frame type, so an implementation
+    /// does not rely on the mark: `frame_run` marks it before the plain loop calls this, and the
+    /// inspected run marks a frame with an `EthFrame` after the inspector's end callbacks.
     ///
     /// The calls are on the EVM the loops run, so an EVM type that delegates `frame_run` to an
     /// inner EVM still has its own method called. An override of `run_exec_loop` or of
