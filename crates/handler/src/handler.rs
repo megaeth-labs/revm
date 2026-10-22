@@ -499,8 +499,8 @@ pub trait Handler {
     /// ([`handle_reservoir_remaining_gas`]): a failing frame rolls its
     /// state-gas charges back in LIFO order and drops its refund counter, an
     /// exceptional halt additionally consumes its regular gas; unused regular
-    /// gas then returns to the transaction-level gas and the reservoir is
-    /// adopted from the frame. The EIP-2780 refundable first-frame charge is
+    /// gas then returns to the transaction-level gas and the reservoir the
+    /// frame left is added back to it. The EIP-2780 refundable first-frame charge is
     /// refunded from the outcome's `charged_*` flags, mirroring
     /// `EthFrame::return_result`.
     ///

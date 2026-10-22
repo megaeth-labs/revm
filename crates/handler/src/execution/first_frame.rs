@@ -5,7 +5,7 @@
 use crate::{frame::handle_reservoir_remaining_gas, FrameResult};
 use context::result::FromStringError;
 use context_interface::{context::take_error, ContextTr, Database};
-use interpreter::GasTracker;
+use interpreter::{GasTracker, PoolId};
 use std::string::ToString;
 
 /// Settles the transaction's frame, the first frame, into the transaction-level `gas`, every step
@@ -24,6 +24,11 @@ use std::string::ToString;
 /// - the start charge a consumer declared on the first frame's input
 ///   ([`FrameResult::refundable_start_charge`]) is refunded whole when the frame failed; after a
 ///   halt the regular gas the refund credited is consumed.
+///
+/// `gas` holds no reservoir and no limited pool on entry: the first frame took them whole
+/// ([`GasTracker::forward_all_to_child`]), and the settlement adds back what the frame left, so
+/// gas that still held what the frame was given would count it twice. A debug build asserts it.
+/// An unlimited pool is exempt, since what comes back saturates at it.
 ///
 /// A chain whose handler overrides `last_frame_result` calls this rather than copying the mainnet
 /// body, so a step the fork adds here reaches its handler too. It applies its own rules to `gas`
@@ -48,6 +53,19 @@ where
     ERROR: From<<CTX::Db as Database>::Error> + FromStringError,
 {
     let instruction_result = frame_result.instruction_result();
+
+    debug_assert!(
+        gas.reservoir() == 0,
+        "the transaction's gas still holds the reservoir its frame was given; the settlement \
+         would count it twice (take it with `GasTracker::forward_all_to_child`)"
+    );
+    debug_assert!(
+        PoolId::ALL
+            .into_iter()
+            .all(|pool| matches!(gas.pool_remaining(pool), 0 | u64::MAX)),
+        "the transaction's gas still holds a pool its frame was given; the settlement would \
+         count it twice (take it with `GasTracker::forward_all_to_child`)"
+    );
 
     // All regular gas was forwarded to the first frame: consume it on the
     // transaction-level gas; the settle below returns the frame's unused

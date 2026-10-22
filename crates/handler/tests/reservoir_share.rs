@@ -874,3 +874,49 @@ fn test_a_runtime_out_of_gas_returns_the_reservoir_once() {
         );
     }
 }
+
+/// The transaction's frame took the whole reservoir and every whole pool, and its settlement adds
+/// back what it left. A runner that settles the frame into gas that still holds what the frame was
+/// given, because it built the frame without taking it or seeded the gas from the frame's own
+/// figures, would count it twice; a debug build refuses the settlement.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "the transaction's gas still holds the reservoir its frame was given")]
+fn test_a_first_frame_settled_into_gas_that_kept_the_reservoir_panics_in_a_debug_build() {
+    let mut evm = Run::new(ends(Vec::new())).evm();
+    let mut result = FrameResult::new_call_oog(GAS_LIMIT, 0..0, RESERVOIR);
+    let mut gas = GasTracker::new(GAS_LIMIT, 0, RESERVOIR);
+
+    let _ = Mainnet::default().last_frame_result(&mut evm, &mut result, &mut gas);
+}
+
+/// The same for a pool the transaction's gas still holds.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "the transaction's gas still holds a pool its frame was given")]
+fn test_a_first_frame_settled_into_gas_that_kept_a_pool_panics_in_a_debug_build() {
+    let mut evm = Run::new(ends(Vec::new())).evm();
+    let mut result = FrameResult::new_call_oog(GAS_LIMIT, 0..0, 0);
+    let mut gas = GasTracker::new(GAS_LIMIT, 0, 0);
+    gas.set_pools_remaining(PoolAmounts::ZERO);
+    gas.set_pool_remaining(PoolId::new(2), 1_000);
+
+    let _ = Mainnet::default().last_frame_result(&mut evm, &mut result, &mut gas);
+}
+
+/// An unlimited pool the transaction's gas still holds cannot be counted twice, since what comes
+/// back saturates at it: a runner that builds the gas with `GasTracker::new` and draws no pool,
+/// with no reservoir, settles as before.
+#[test]
+fn test_a_first_frame_settled_into_gas_with_unlimited_pools_and_no_reservoir_settles() {
+    let mut evm = Run::new(ends(Vec::new())).evm();
+    let mut result = FrameResult::new_call_oog(GAS_LIMIT, 0..0, 0);
+    let mut gas = GasTracker::new(GAS_LIMIT, 0, 0);
+
+    Mainnet::default()
+        .last_frame_result(&mut evm, &mut result, &mut gas)
+        .expect("the frame settles");
+
+    assert_eq!(gas.pools_remaining(), PoolAmounts::UNLIMITED);
+    assert_eq!(gas.reservoir(), 0);
+}
