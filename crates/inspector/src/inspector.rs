@@ -20,6 +20,8 @@ pub trait Inspector<CTX, INTR: InterpreterTypes = EthInterpreter, FI = FrameInpu
     /// Called before the interpreter is initialized.
     ///
     /// If `interp.bytecode.set_action` is set the execution of the interpreter is skipped.
+    /// The frame's run returns that action before its first [`Inspector::step`], so no `step` of
+    /// that run sees or edits it.
     ///
     /// Not called for a frame whose next action the EVM set when it built the frame: the frame's
     /// first run returns that action before any instruction.

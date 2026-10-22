@@ -77,6 +77,10 @@ const AFTER_ITS_CHILD: &[u8] = b"set once its child returned";
 const REWRITTEN: &[u8] = b"rewritten as it leaves its run";
 /// The output of the revert the inspector answers the call to [`CHILD`] with.
 const ANSWERED: &[u8] = b"answered by the inspector";
+/// The output of the return the inspector sets on [`CHILD`]'s frame in `initialize_interp`.
+const AT_INIT: &[u8] = b"set in initialize_interp";
+/// The output the inspector's `step` writes into a return pending on the frame it steps.
+const IN_STEP: &[u8] = b"edited in step";
 
 /// What the consumer does at the loops' points.
 #[derive(Clone, Copy, Debug, Default)]
@@ -113,6 +117,9 @@ enum Callee {
     Answered,
     /// [`CHILD`], which the inspector halts out of gas in `initialize_interp`.
     HaltedAtInit,
+    /// [`CHILD`], which the inspector returns with [`AT_INIT`] in `initialize_interp`, and whose
+    /// pending return its `step` edits to carry [`IN_STEP`].
+    ReturnedAtInit,
 }
 
 /// What the inspector saw, one line per callback, by the account the frame runs as.
@@ -123,6 +130,9 @@ struct Recorder {
     answer: bool,
     /// Halts [`CHILD`]'s frame out of gas in `initialize_interp`.
     halt_at_init: bool,
+    /// Returns [`CHILD`]'s frame with [`AT_INIT`] in `initialize_interp`, and edits a return
+    /// pending on a frame it steps to carry [`IN_STEP`].
+    return_at_init: bool,
 }
 
 const fn name(address: Address) -> &'static str {
@@ -162,11 +172,19 @@ impl Inspector<Ctx> for Recorder {
         if self.halt_at_init && interp.input.target_address == CHILD {
             interp.halt(InstructionResult::OutOfGas);
         }
+        if self.return_at_init && interp.input.target_address == CHILD {
+            interp.return_with_output(Bytes::from_static(AT_INIT));
+        }
     }
 
     fn step(&mut self, interp: &mut Interpreter, _: &mut Ctx) {
         let (account, pc) = (name(interp.input.target_address), interp.bytecode.pc());
         self.events.push(format!("step {account} {pc}"));
+        if let (true, Some(InterpreterAction::Return(result))) =
+            (self.return_at_init, interp.bytecode.action())
+        {
+            result.output = Bytes::from_static(IN_STEP);
+        }
     }
 
     fn step_end(&mut self, interp: &mut Interpreter, _: &mut Ctx) {
@@ -441,11 +459,12 @@ fn run_calling(callee: Callee, plan: Plan, inspected: bool) -> Run {
 
 /// [`run_calling`], with the transaction sent to `to`.
 fn run_to(to: Address, callee: Callee, plan: Plan, inspected: bool) -> Run {
-    let (address, answer, halt_at_init) = match callee {
-        Callee::Child => (CHILD, false, false),
-        Callee::Precompile => (IDENTITY, false, false),
-        Callee::Answered => (CHILD, true, false),
-        Callee::HaltedAtInit => (CHILD, false, true),
+    let (address, answer, halt_at_init, return_at_init) = match callee {
+        Callee::Child => (CHILD, false, false, false),
+        Callee::Precompile => (IDENTITY, false, false, false),
+        Callee::Answered => (CHILD, true, false, false),
+        Callee::HaltedAtInit => (CHILD, false, true, false),
+        Callee::ReturnedAtInit => (CHILD, false, false, true),
     };
     let mut db = Db::default();
     db.insert_account_info(
@@ -465,6 +484,7 @@ fn run_to(to: Address, callee: Callee, plan: Plan, inspected: bool) -> Run {
         evm: ctx.build_mainnet_with_inspector(Recorder {
             answer,
             halt_at_init,
+            return_at_init,
             ..Recorder::default()
         }),
         plan,
@@ -623,6 +643,28 @@ fn test_an_inspectors_halt_in_initialize_interp_ends_the_frame_without_a_step() 
             "hook CHILD OutOfGas",
             "call_end CHILD OutOfGas 0x",
             "frame_end CHILD OutOfGas"
+        ]
+    );
+}
+
+/// An action an inspector sets in `initialize_interp` is returned before the frame's first `step`
+/// (upstream's run calls that `step` first), so whatever that `step` would do is not done: here
+/// the `step` edits the pending return, and the frame returns what `initialize_interp` set, where
+/// upstream's returns the edit.
+#[test]
+fn test_an_inspectors_action_in_initialize_interp_is_returned_without_the_step_that_edits_it() {
+    let run = run_calling(Callee::ReturnedAtInit, Plan::default(), true);
+
+    assert_eq!(run.output(), &status_and(true, AT_INIT));
+    assert_eq!(run.marked, (true, false), "the child runs no instruction");
+    let end = format!("call_end CHILD Return {}", Bytes::from_static(AT_INIT));
+    assert_eq!(
+        run.lines(|line| line.contains("CHILD")),
+        [
+            "initialize_interp CHILD",
+            "hook CHILD Return",
+            &end,
+            "frame_end CHILD Return"
         ]
     );
 }
