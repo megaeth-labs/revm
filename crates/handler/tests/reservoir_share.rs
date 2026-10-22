@@ -114,8 +114,9 @@ fn pool_shares_of(input: &FrameInput) -> PoolAmounts {
     }
 }
 
-/// The pools a system call's gas gets in [`ShareHandler::tx_gas`].
-const SYSTEM_POOLS: PoolAmounts = PoolAmounts::ZERO
+/// Finite pools a consumer gives the transaction's gas: a system call's in
+/// [`ShareHandler::tx_gas`], or any transaction's with [`ShareHandler::tx_pools`].
+const LIMITED_POOLS: PoolAmounts = PoolAmounts::ZERO
     .with(PoolId::new(0), 1_000)
     .with(PoolId::new(1), 500)
     .with(PoolId::new(2), 100);
@@ -183,7 +184,7 @@ impl Handler for ShareHandler {
             gas.set_remaining(gas.remaining() - reservoir);
             gas.set_reservoir(reservoir);
             // And pools, as a consumer that limits a system call's figures sets them.
-            gas.set_pools_remaining(SYSTEM_POOLS);
+            gas.set_pools_remaining(LIMITED_POOLS);
         }
         if let Some(pools) = self.tx_pools {
             gas.set_pools_remaining(pools);
@@ -746,8 +747,8 @@ fn test_a_system_call_forwards_and_settles_its_reservoir() {
         );
         // The pools go the same way: the system call's frame takes them whole, the schedule
         // forwards them whole, and they come back as they were, nothing drawn.
-        assert_eq!(handler.pool_starts, [SYSTEM_POOLS; 2], "{percent:?}");
-        assert_eq!(handler.settled_pools, Some(SYSTEM_POOLS), "{percent:?}");
+        assert_eq!(handler.pool_starts, [LIMITED_POOLS; 2], "{percent:?}");
+        assert_eq!(handler.settled_pools, Some(LIMITED_POOLS), "{percent:?}");
     }
 }
 
@@ -902,7 +903,7 @@ fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_and_the
                 .build_fill(),
         );
         let mut handler = ShareHandler::new();
-        handler.tx_pools = Some(SYSTEM_POOLS);
+        handler.tx_pools = Some(LIMITED_POOLS);
 
         let (result, handler) = run.with(handler);
 
@@ -913,7 +914,7 @@ fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_and_the
         let reservoir = handler.tx_reservoir.get().expect("tx_gas ran");
         assert!(reservoir > 0, "{percent:?}");
         assert_eq!(handler.settled, Some((reservoir, 0)), "{percent:?}");
-        assert_eq!(handler.settled_pools, Some(SYSTEM_POOLS), "{percent:?}");
+        assert_eq!(handler.settled_pools, Some(LIMITED_POOLS), "{percent:?}");
         assert_eq!(
             result.gas().total_gas_spent(),
             LIMIT - reservoir,

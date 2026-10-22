@@ -19,7 +19,7 @@ use handler::{
 };
 use interpreter::{
     interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Gas,
-    InstructionResult, InterpreterResult,
+    InstructionResult, InterpreterResult, PoolAmounts,
 };
 use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
 use revm_inspector::{InspectEvm, Inspector};
@@ -55,6 +55,15 @@ const PARENT: Address = address!("0x00000000000000000000000000000000000c0de0");
 /// Stops, when it runs.
 const OK: Address = address!("0x0000000000000000000000000000000000000c00");
 
+/// What [`PARENT`] starts after writing its slot.
+#[derive(Clone, Copy, Debug)]
+enum Start {
+    /// A call to [`OK`].
+    Call,
+    /// A creation with empty init code.
+    Create,
+}
+
 /// What the inspector does with the call to [`OK`].
 #[derive(Clone, Copy, Debug)]
 enum Answer {
@@ -74,22 +83,29 @@ struct Answering {
     parent_returned: Option<u64>,
 }
 
+impl Answering {
+    /// The gas of the answer to a start of `gas_limit` given `reservoir` and `pools`, or `None`
+    /// to let the start run.
+    const fn gas(&mut self, gas_limit: u64, reservoir: u64, pools: PoolAmounts) -> Option<Gas> {
+        self.given = Some(reservoir);
+        match self.answer {
+            Answer::Runs => None,
+            Answer::AsBuilt => Some(Gas::new(gas_limit)),
+            Answer::WithTheShares => {
+                let mut gas = Gas::new_with_regular_gas_and_reservoir(gas_limit, reservoir);
+                gas.tracker_mut().set_pools_remaining(pools);
+                Some(gas)
+            }
+        }
+    }
+}
+
 impl Inspector<Ctx, EthInterpreter> for Answering {
     fn call(&mut self, _: &mut Ctx, inputs: &mut CallInputs) -> Option<CallOutcome> {
         if inputs.target_address != OK {
             return None;
         }
-        self.given = Some(inputs.reservoir);
-        let gas = match self.answer {
-            Answer::Runs => return None,
-            Answer::AsBuilt => Gas::new(inputs.gas_limit),
-            Answer::WithTheShares => {
-                let mut gas =
-                    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, inputs.reservoir);
-                gas.tracker_mut().set_pools_remaining(inputs.pool_shares);
-                gas
-            }
-        };
+        let gas = self.gas(inputs.gas_limit, inputs.reservoir, inputs.pool_shares)?;
         Some(CallOutcome::new(
             InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
             inputs.return_memory_offset.clone(),
@@ -97,17 +113,7 @@ impl Inspector<Ctx, EthInterpreter> for Answering {
     }
 
     fn create(&mut self, _: &mut Ctx, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
-        self.given = Some(inputs.reservoir());
-        let gas = match self.answer {
-            Answer::Runs => return None,
-            Answer::AsBuilt => Gas::new(inputs.gas_limit()),
-            Answer::WithTheShares => {
-                let mut gas =
-                    Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit(), inputs.reservoir());
-                gas.tracker_mut().set_pools_remaining(inputs.pool_shares());
-                gas
-            }
-        };
+        let gas = self.gas(inputs.gas_limit(), inputs.reservoir(), inputs.pool_shares())?;
         let mut outcome = CreateOutcome::new(
             InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
             None,
@@ -127,26 +133,27 @@ impl Inspector<Ctx, EthInterpreter> for Answering {
     }
 }
 
-/// [`PARENT`]'s reservoir as its frame returned, and the reservoir the call to [`OK`] was given,
-/// or the creation if [`PARENT`] `creates`, with `percent` per cent of a caller's reservoir
-/// forwarded: the schedule's `reservoir_kept_percent` is the rest.
-fn run(answer: Answer, percent: Option<u64>, creates: bool) -> (u64, u64) {
+/// [`PARENT`]'s reservoir as its frame returned, and the reservoir its `start` was given, with
+/// `percent` per cent of a caller's reservoir forwarded: the schedule's `reservoir_kept_percent`
+/// is the rest.
+fn run(answer: Answer, percent: Option<u64>, start: Start) -> (u64, u64) {
     let mut db = Db::default();
     db.insert_account_info(
         BENCH_CALLER,
         AccountInfo::from_balance(U256::from(10u128.pow(21))),
     );
-    let mut parent = vec![
-        PUSH1, 1, PUSH0, SSTORE, PUSH0, PUSH0, PUSH0, PUSH0, PUSH0, PUSH20,
-    ];
-    if creates {
-        // `CREATE(0, 0, 0)` in place of the call's last five pushes and the call.
-        parent.truncate(4);
-        parent.extend_from_slice(&[PUSH0, PUSH0, PUSH0, CREATE, POP, STOP]);
-    } else {
-        parent.extend_from_slice(OK.as_slice());
-        parent.extend_from_slice(&[PUSH3, 0x01, 0x86, 0xa0, CALL, POP, STOP]);
+    let mut parent = vec![PUSH1, 1, PUSH0, SSTORE];
+    match start {
+        // `CALL(100_000, OK, 0, 0, 0, 0, 0)`.
+        Start::Call => {
+            parent.extend_from_slice(&[PUSH0, PUSH0, PUSH0, PUSH0, PUSH0, PUSH20]);
+            parent.extend_from_slice(OK.as_slice());
+            parent.extend_from_slice(&[PUSH3, 0x01, 0x86, 0xa0, CALL]);
+        }
+        // `CREATE(0, 0, 0)`.
+        Start::Create => parent.extend_from_slice(&[PUSH0, PUSH0, PUSH0, CREATE]),
     }
+    parent.extend_from_slice(&[POP, STOP]);
     for (address, code) in [(PARENT, parent), (OK, vec![STOP])] {
         db.insert_account_info(
             address,
@@ -202,12 +209,12 @@ fn test_an_answer_the_inspector_builds_settles_its_reservoir_as_built() {
         (Answer::WithTheShares, BEFORE_THE_CALL, BEFORE_THE_CALL),
     ] {
         assert_eq!(
-            run(answer, None, false),
+            run(answer, None, Start::Call),
             (whole, BEFORE_THE_CALL),
             "{answer:?}, the whole reservoir forwarded"
         );
         assert_eq!(
-            run(answer, Some(98), false),
+            run(answer, Some(98), Start::Call),
             (kept_98, SHARE),
             "{answer:?}, 98% forwarded"
         );
@@ -225,12 +232,12 @@ fn test_an_answer_the_inspector_builds_for_a_creation_settles_its_reservoir_as_b
         (Answer::WithTheShares, BEFORE_THE_CALL, BEFORE_THE_CALL),
     ] {
         assert_eq!(
-            run(answer, None, true),
+            run(answer, None, Start::Create),
             (whole, BEFORE_THE_CREATION),
             "{answer:?}, the whole reservoir forwarded"
         );
         assert_eq!(
-            run(answer, Some(98), true),
+            run(answer, Some(98), Start::Create),
             (kept_98, CREATION_SHARE),
             "{answer:?}, 98% forwarded"
         );
