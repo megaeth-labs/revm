@@ -93,8 +93,8 @@ pub(crate) fn running_account<H: Host + ?Sized>(
     Ok((account.balance, account.nonce))
 }
 
-/// Takes the child's shares of the caller's reservoir and pools out of `gas`, by the schedule's
-/// `reservoir_forward_percent` and `pool_forward_percent`s, and returns them: what the child's
+/// Takes the child's shares of the caller's reservoir and pools out of `gas`, all but the
+/// schedule's `reservoir_kept_percent` and `pool_kept_percent`s, and returns them: what the child's
 /// tracker starts with ([`GasTracker::forward_to_child`](crate::GasTracker::forward_to_child)).
 /// Called once the frame-start hook has answered, so the shares are of the reservoir and the pools
 /// as the hook left them.

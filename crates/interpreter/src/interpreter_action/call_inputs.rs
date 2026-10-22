@@ -186,8 +186,8 @@ pub struct CallInputs {
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_start: StartCharge,
     /// The share of each of the caller's pools the call receives: its pools when it starts.
-    /// Taken out of the caller's pools by the call instruction, by the schedule's
-    /// `pool_forward_percent` of each, and given back with what the call left of them when it
+    /// Taken out of the caller's pools by the call instruction, all but the schedule's
+    /// `pool_kept_percent` of each, and given back with what the call left of them when it
     /// returns.
     ///
     /// In a format that carries field names, such as JSON, encodings made before this field existed

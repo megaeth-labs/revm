@@ -42,9 +42,9 @@ pub struct CreateInputs {
     #[cfg_attr(feature = "serde", serde(default))]
     charged_start: StartCharge,
     /// The share of each of the caller's pools the creation receives: its pools when it starts.
-    /// Taken out of the caller's pools by the creation instruction, by the schedule's
-    /// `pool_forward_percent` of each, and given back with what the creation left of them when
-    /// it returns.
+    /// Taken out of the caller's pools by the creation instruction, all but the schedule's
+    /// `pool_kept_percent` of each, and given back with what the creation left of them when it
+    /// returns.
     ///
     /// In a format that carries field names, such as JSON, encodings made before this field existed
     /// decode it as every pool unlimited.

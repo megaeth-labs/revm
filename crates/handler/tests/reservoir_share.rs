@@ -1,10 +1,11 @@
 //! The share of its caller's EIP-8037 reservoir a child frame receives, as the mainnet handler
 //! forwards and settles it.
 //!
-//! A frame start takes the schedule's `reservoir_forward_percent` of its caller's reservoir out of
-//! the caller's tracker for the child, and the child's return adds what the child left to what the
-//! caller kept. Every schedule forwards the whole reservoir, which is upstream's forward; these
-//! tests set 98, a chain that keeps 2% of the reservoir for the caller, and compare with it.
+//! A frame start takes all but the schedule's `reservoir_kept_percent` of its caller's reservoir
+//! out of the caller's tracker for the child, and the child's return adds what the child left to
+//! what the caller kept. Every schedule keeps none and forwards the whole reservoir, which is
+//! upstream's forward; these tests forward 98, a chain that keeps 2% of the reservoir for the
+//! caller, and compare with it.
 //!
 //! The transactions run on Amsterdam with a gas limit [`RESERVOIR`] above the regular cap, so they
 //! start with a reservoir. The frames charge state gas through an instruction of the test's own,
@@ -276,7 +277,8 @@ fn ends(mut code: Vec<u8>) -> Vec<u8> {
 struct Run {
     parent: Vec<u8>,
     parent_balance: u64,
-    /// `reservoir_forward_percent` in the schedule, if not the default.
+    /// The per cent of the reservoir a child receives, if not the default: the schedule's
+    /// `reservoir_kept_percent` is the rest.
     percent: Option<u64>,
     /// The transaction, if not a call to [`PARENT`] with [`GAS_LIMIT`].
     tx: Option<TxEnv>,
@@ -381,7 +383,7 @@ impl Run {
                 cfg.tx_gas_limit_cap = Some(cap);
                 if let Some(percent) = percent {
                     cfg.gas_params
-                        .override_gas([(GasId::reservoir_forward_percent(), percent)]);
+                        .override_gas([(GasId::reservoir_kept_percent(), 100 - percent)]);
                 }
             });
         let mut instructions = EthInstructions::new_mainnet_with_spec(SPEC);
@@ -743,7 +745,7 @@ fn test_a_system_call_forwards_and_settles_its_reservoir() {
     }
 }
 
-/// The schedule's entry is upstream's forward on every spec.
+/// The schedule's entry is upstream's forward on every spec: the caller keeps none.
 #[test]
 fn test_the_schedule_forwards_the_whole_reservoir() {
     let evm = Run::new(ends(Vec::new())).evm();
@@ -751,8 +753,8 @@ fn test_the_schedule_forwards_the_whole_reservoir() {
         evm.ctx
             .cfg()
             .gas_params()
-            .get(GasId::reservoir_forward_percent()),
-        100
+            .get(GasId::reservoir_kept_percent()),
+        0
     );
 }
 

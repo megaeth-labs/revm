@@ -671,9 +671,10 @@ struct Run {
     precompile_draw: u64,
     /// Whether the provider starts an answer's pool at the share before it draws.
     precompile_seeds: bool,
-    /// [`FIRST`]'s `pool_forward_percent` in the schedule, if not the default.
+    /// The per cent of [`FIRST`] a child receives, if not the default: the schedule's
+    /// `pool_kept_percent` is the rest.
     forward_percent: Option<u64>,
-    /// Every pool's `pool_forward_percent` in the schedule, if not the default.
+    /// The per cent of each pool a child receives, if not the default.
     pool_percents: Option<[u64; PoolId::COUNT]>,
     /// Whether the transaction creates a contract from `parent` instead of calling [`PARENT`].
     creates: bool,
@@ -789,12 +790,12 @@ impl Run {
                 if let Some(percents) = pool_percents {
                     for (pool, percent) in PoolId::ALL.into_iter().zip(percents) {
                         cfg.gas_params
-                            .override_gas([(GasId::pool_forward_percent(pool), percent)]);
+                            .override_gas([(GasId::pool_kept_percent(pool), 100 - percent)]);
                     }
                 }
                 if let Some(percent) = forward_percent {
                     cfg.gas_params
-                        .override_gas([(GasId::pool_forward_percent(FIRST), percent)]);
+                        .override_gas([(GasId::pool_kept_percent(FIRST), 100 - percent)]);
                 }
             });
         let ctx = DeclaringContext {
@@ -1307,7 +1308,7 @@ fn test_a_start_refused_for_the_depth_gives_the_share_and_the_start_charge_back(
     }
 }
 
-/// With [`FIRST`]'s `pool_forward_percent` at 98, every start forwards 98% of its caller's pool, rounded
+/// With [`FIRST`]'s `pool_kept_percent` at 2, every start forwards 98% of its caller's pool, rounded
 /// down, and the caller keeps the rest; what a child hands back adds to what its caller kept, so
 /// the transaction ends with the figures the whole-pool forward gives.
 #[test]

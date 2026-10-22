@@ -91,7 +91,8 @@ impl Inspector<Ctx, EthInterpreter> for Answering {
 }
 
 /// [`PARENT`]'s reservoir as its frame returned, and the reservoir the call to [`OK`] was given,
-/// with `percent` as the schedule's `reservoir_forward_percent`.
+/// with `percent` per cent of a caller's reservoir forwarded: the schedule's
+/// `reservoir_kept_percent` is the rest.
 fn run(answer: Answer, percent: Option<u64>) -> (u64, u64) {
     let mut db = Db::default();
     db.insert_account_info(
@@ -116,7 +117,7 @@ fn run(answer: Answer, percent: Option<u64>) -> (u64, u64) {
         cfg.tx_gas_limit_cap = Some(GAS_LIMIT - RESERVOIR);
         if let Some(percent) = percent {
             cfg.gas_params
-                .override_gas([(GasId::reservoir_forward_percent(), percent)]);
+                .override_gas([(GasId::reservoir_kept_percent(), 100 - percent)]);
         }
     });
     let mut evm: Evm<

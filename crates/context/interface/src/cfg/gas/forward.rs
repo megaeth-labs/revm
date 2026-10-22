@@ -121,10 +121,10 @@ mod tests {
     fn test_each_share_is_the_schedules() {
         let mut params = GasParams::new_spec(SpecId::AMSTERDAM);
         params.override_gas([
-            (GasId::reservoir_forward_percent(), 98),
-            (GasId::pool_forward_percent(PoolId::new(0)), 98),
-            (GasId::pool_forward_percent(PoolId::new(1)), 50),
-            (GasId::pool_forward_percent(PoolId::new(2)), 0),
+            (GasId::reservoir_kept_percent(), 2),
+            (GasId::pool_kept_percent(PoolId::new(0)), 2),
+            (GasId::pool_kept_percent(PoolId::new(1)), 50),
+            (GasId::pool_kept_percent(PoolId::new(2)), 100),
         ]);
         let mut tracker = caller();
         assert!(tracker.record_state_cost(1));

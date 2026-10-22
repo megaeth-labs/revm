@@ -79,7 +79,7 @@ impl PoolHost {
     /// call's child an allowance.
     fn on_a_chains_schedule(mut self) -> Self {
         self.params.override_gas([
-            (GasId::pool_forward_percent(FIRST), PERCENT),
+            (GasId::pool_kept_percent(FIRST), 100 - PERCENT),
             (GasId::call_history_allowance(), ALLOWANCE),
         ]);
         self
@@ -551,10 +551,10 @@ fn test_every_start_forwards_the_reservoir_and_each_pool_by_its_own_share() {
 
         let mut host = PoolHost::new(SpecId::OSAKA);
         host.params.override_gas([
-            (GasId::reservoir_forward_percent(), 98),
-            (GasId::pool_forward_percent(PoolId::new(0)), 98),
-            (GasId::pool_forward_percent(PoolId::new(1)), 50),
-            (GasId::pool_forward_percent(PoolId::new(2)), 0),
+            (GasId::reservoir_kept_percent(), 2),
+            (GasId::pool_kept_percent(PoolId::new(0)), 2),
+            (GasId::pool_kept_percent(PoolId::new(1)), 50),
+            (GasId::pool_kept_percent(PoolId::new(2)), 100),
         ]);
         let (action, gas) = run_on(&code, &mut host, with_pools);
         let (reservoir, pools) = shares(&started(action));
