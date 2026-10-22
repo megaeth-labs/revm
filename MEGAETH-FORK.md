@@ -408,7 +408,8 @@ An id the fork once used for an entry with another default is left unused rather
 ### Frame-run result hook
 
 - **API.** `EvmTr::frame_run_result(&mut self, result: &mut <Self::Frame as FrameTr>::FrameResult) -> Result<(), ContextDbError<Self::Context>>`, whose default does nothing.
-- **Contract.** The handler loops hand it the result of each frame that ran and returns, once, as the frame's run left it: after `process_next_action` processed the frame's last action (`return_create`'s checks and charges included, for a creation), with the frame marked finished and still on top of the stack.
+- **Contract.** The handler loops hand it the result of each frame that ran and returns, once, as the frame's run left it: after `process_next_action` processed the frame's last action (`return_create`'s checks and charges included, for a creation), with the frame still on top of the stack.
+  Whether the frame is marked finished differs by path, so the hook does not rely on it: revm's `frame_run` marks it before the plain loop calls the hook, and the inspected run marks it after the inspector's end callbacks, as upstream's does.
   On the plain path `Handler::run_exec_loop` calls it when `frame_run` returns a result. On the inspected path `InspectorEvmTr::inspect_frame_run` calls it before the inspector's `call_end` or `create_end` and its `frame_end`, and also for a frame without an `EthFrame`, whose run calls no inspector. On both, it runs before `frame_return_result`.
   What it leaves in `result` is what everything after it sees: the inspector's end callbacks, `frame_return_result` and so the caller, and `last_frame_result` for the transaction's frame. An error it returns ends the transaction as an error of `frame_run` would. It leaves the frame stack as it found it.
   A frame that returns a pending action (see The pending action) ran, and its result reaches it.
@@ -420,7 +421,7 @@ An id the fork once used for an entry with another default is left unused rather
 - **Removal.** When upstream has an equivalent point between a frame's last action and the inspector's end of it, or when mega-evm rewrites no frame's end.
 - **Default.** Does nothing, so every result and every callback is upstream's.
   Where measured (callgrind, the fork's release profile), the default compiles to nothing on the plain path: the costs measured under The pending action are that check's. The inspected path was not measured.
-  The inspected run marks a frame finished before the hook, where upstream's marked it after `frame_end`, so the hook sees the frame as the plain loop leaves it; no inspector callback is handed the frame, so none can tell.
+  The inspected run looks the frame up for the inspector's end callbacks (`InspectorFrame::eth_frame`) and marks it finished in upstream's order, so a frame type whose accessor gives the inspector no finished frame still has its `call_end` and `frame_end`.
 
 ## Baseline behaviour the fork changes
 

@@ -299,11 +299,10 @@ impl EvmTr for Consumer {
         Ok(None)
     }
 
-    /// Writes the result it got into the inspector's lines, and rewrites [`CHILD`]'s halt as
-    /// [`Plan::rewrite`] says.
+    /// Writes the result it got into the inspector's lines, by the frame on top of the stack, and
+    /// rewrites [`CHILD`]'s halt as [`Plan::rewrite`] says.
     fn frame_run_result(&mut self, result: &mut FrameResult) -> Result<(), ContextDbError<Ctx>> {
         let frame = self.evm.frame_stack.get();
-        assert!(frame.is_finished(), "the frame on top is the one that ran");
         let (account, got) = (target(&frame.input), result.instruction_result());
         self.evm
             .inspector
