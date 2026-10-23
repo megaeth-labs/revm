@@ -63,7 +63,7 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
 
 ## Hooks
 
-This section lists every hook and switch the fork carries.
+This section lists every hook, switch and accessor the fork carries.
 Each entry names the API a consumer uses and what the fork guarantees about it.
 A hook's default keeps upstream's behaviour: a consumer that does not use it sees the same results.
 Each entry's **Consumer** says who needs it and why it cannot be done outside the fork, its **Removal** the condition under which the fork drops it, and its **Default** what it costs a consumer that does not use it.
@@ -421,6 +421,14 @@ An id the fork once used for an entry with another default is left unused rather
 - **Removal.** When upstream has an equivalent point between a frame's last action and the inspector's end of it, or when mega-evm rewrites no frame's end.
 - **Default.** Does nothing, so every result and every callback is upstream's.
   Where measured (callgrind, the fork's release profile), the default compiles to nothing on the plain path: the costs measured under The pending action are that check's. The inspected path was not measured.
+
+### The original account info by reference
+
+- **API.** `revm_state::Account::original_info_ref(&self) -> &AccountInfo`.
+- **Contract.** It returns what `Account::original_info` returns, by reference, cloning nothing: the info the account holds as its original, or the default info for an account whose original was never set.
+- **Consumer.** mega-evm tells whether a transaction changed an account by comparing the account's info with its original, for every frame start, value transfer and destruction it counts. `original_info` returns a copy, and copying the info's code moves the code's reference count up and down; the original is a private field, so only the crate can lend it.
+- **Removal.** When upstream has an equivalent accessor, or when mega-evm stops comparing an account with its original.
+- **Default.** Nothing in this workspace calls it, so every result is upstream's. The default info it lends an account without an original is built on the first such read and kept for the process.
 
 ## Baseline behaviour the fork changes
 
