@@ -44,6 +44,12 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
    - code that hands a frame a reservoir or a pool without taking it from the caller, such as a child's input or a first-frame result built by hand, an override of `Handler::first_frame_input` or `Handler::runtime_oog_result`, or a runner that settles its own first frame: it compiles and counts the reservoir twice (see The settlement adds);
    - an inspector that reads a caller's gas while its child runs, at a `CALL` or `CREATE` instruction's `step_end`: it sees the part the caller kept, zero by default, where upstream's showed the forwarded reservoir;
    - a consumer whose schedule keeps part of the reservoir (`GasId::reservoir_kept_percent`), whose results differ from upstream's by design.
+
+   Another changes the signature of an upstream function the fork picked with the EIP-8037 / EIP-2780 gas core: `pre_execution::apply_auth_list_eip2780`.
+   The fork's takes the context, the authorization list as `&[Eip7702AuthFacts]` and whether EIP-8037 is on, where upstream's takes the journal, an iterator of authorizations and the two state-gas prices, so that every authorization's charge is priced through `Host::state_gas_price` (see State-gas price).
+   The base line has no such function, so the change breaks no code written for it.
+   A consumer that runs the authorization phase through `pre_execution::apply_eip7702_auth_list` or `Handler::apply_eip7702_auth_list`, whose signatures are upstream's, is unaffected.
+   It affects code that calls `apply_auth_list_eip2780` itself, written for upstream's signature: it does not compile against the fork until it passes the context and the list `Eip7702AuthFacts::collect` builds.
 2. **Hooks and data, and a bounded set of MegaETH accounting.**
    The fork adds hooks and data.
    It also carries a named, bounded set of MegaETH accounting inside revm's forwarding and settlement, each item because it has to move with a frame's gas at a point only revm reaches:
@@ -118,13 +124,17 @@ An id the fork once used for an entry with another default is left unused rather
 - **API.** `Host::state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64>` and `Host::state_gas_charge(&mut self, charge: StateGasCharge) -> Option<u64>`.
   The value types `StateGasSite` (`account`, `slot`) and `StateGasCharge` (`one`, `units`, `total`) in `revm_context_interface::cfg`.
   For the refund: `charged_state_gas_address` on `CreateInputs`, `CallOutcome` and `CreateOutcome`, and `FrameResult::refundable_state_gas_charge`.
-  `pre_execution::Eip7702AuthFacts`, the authorization list lifted out of the transaction so the authorization phase can hand the whole context to the hook.
+  `pre_execution::Eip7702AuthFacts`, the authorization list lifted out of the transaction so the authorization phase can hand the whole context to the hook, and the signature of `pre_execution::apply_auth_list_eip2780`, which takes the context and that list in place of upstream's journal, authorization iterator and two state-gas prices (an exception to rule 1).
 - **Contract.** Every EIP-8037 state-gas charge and every refund of one is priced through `state_gas_price`, so a charge and the refund that undoes it agree by construction.
   `site` names the account the charge lands on, and the storage slot for a slot-scoped charge; a creation is priced at the address it deploys at, the first frame's included.
   `None` reports a failed lookup: the implementation records the cause in the context error, and the charge site turns it into a fatal external error.
 - **Consumer.** mega-evm prices state gas by the storage bucket of the account or slot a charge lands on. Only the charge site knows the site, and the price must be the same at the charge and at its refund.
 - **Removal.** When upstream prices state gas through an equivalent hook, or when mega-evm prices every state-gas charge from the flat schedule.
-- **Default.** Reads the flat schedule (`gas_params().get(id)`) and never fails, so every charge and refund is upstream's.
+- **Default.** Reads the flat schedule (`gas_params().get(id)`) and never fails, so every price is upstream's, and so is every charge and refund but one.
+  With EIP-2780 on, the first frame's creation is checked and charged at the address it deploys at, which the caller's account nonce gives, where upstream's derives the address from the transaction's nonce.
+  The two agree while the nonce check is on.
+  With the nonce check off and a transaction nonce that differs from the caller's account nonce, as for an OP deposit, upstream's checks, charges and warms an address the transaction does not deploy at, and the fork's the address it deploys at.
+  There, whether the creation pays `create_state_gas` can differ from upstream's, and so can the gas of a later access to the other address, which upstream's leaves warm and the fork's leaves cold.
   The refund carries one address more in the frame inputs and outcomes, and under EIP-2780 an EIP-7702 transaction's authorization list is buffered before the authorization phase, one 88-byte entry per authorization that can apply.
 
 ### History gas
