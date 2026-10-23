@@ -85,9 +85,23 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
    A tag is the only identity a fork release has (rule 3), and the release workflow tags only commits whose `ci success` is green.
    Consumer tag pinning is not enforced mechanically; each consumer's `Cargo.lock` records the commit it built against.
 
+## What the fork carries
+
+`git diff <base>..main` is the fork's footprint on upstream (rule 4).
+It falls into five classes, and the next base-line move (see Tracking upstream) treats each one differently.
+The sizes are the lines of `crates/`, without tests, that `git blame <base>..main` attributes to each class's commits.
+
+| Class | What | Size | At the next base-line move |
+|---|---|---|---|
+| Upstream gas core | The EIP-8037 / EIP-2780 gas core, picked from later upstream releases | about 2,600 lines | Goes away once the new base contains every pick; the sweep issues record which tag first contains each. The settlement code the fork's MegaETH accounting is written into is upstream's own (`handle_reservoir_remaining_gas`, `EthFrame::return_result`, `create_init_frame`, `last_frame_result`), so that accounting is re-applied to the new base's versions of it. |
+| Other upstream picks | Fixes and performance picks | about 140 lines | Goes away once the new base contains them; a pick the base lacks is picked again or dropped, as its sweep decides. A behaviour a switch takes back stays switchable (see Consumer switches). |
+| Generic hooks | State-gas price, precompile price, code-deposit admission, the failed-charge record, the completed-write and frame-start hooks, the pending action and the frame-run-result hook | about 1,750 lines | Each is proposed upstream, in a form upstream can take: without MegaETH vocabulary in its types (`FrameStart::charge` leaves `FrameStart` first), as an instruction-level helper rather than a `Host` method where one serves, and with no cost on the default path that upstream would not accept. It is carried until upstream has an equivalent (its Removal). |
+| Consumer switches | Amsterdam opcodes and EIP-7708 below Amsterdam, revm 40.0.3's journal semantics | about 300 lines | Carried until their Removal conditions. The Amsterdam switch is proposed in the shape of upstream's per-EIP activation switches, which already cover three of its four opcodes; revm 40.0.3's journal semantics are not proposed. |
+| MegaETH accounting (rule 2) | Withheld regular gas, the history-gas dimension, the resource pools, the reservoir kept share, the start charge, the history allowance | about 2,150 lines, of which the pools, the kept share, the start charge and the allowance are about 1,450 | Carried and re-applied to the new base, or replaced: an item a later design keeps in `mega-evm` instead, with the same results for the consumer that uses it, leaves the fork, and its entry's Removal says when. The items that ride on the frame results (the pools, the start charge, the allowance) are the first candidates, since every consumer pays their size. |
+
 ## Hooks
 
-This section lists every hook, switch and accessor the fork carries.
+This section lists every hook, switch and accessor the fork carries, and each item of rule 2's MegaETH accounting.
 Each entry names the API a consumer uses and what the fork guarantees about it.
 A hook's default keeps upstream's behaviour: a consumer that does not use it sees the same results.
 Each entry's **Consumer** says who needs it and why it cannot be done outside the fork, its **Removal** the condition under which the fork drops it, and its **Default** what it costs a consumer that does not use it.
