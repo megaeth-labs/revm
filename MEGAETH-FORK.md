@@ -432,7 +432,7 @@ An id the fork once used for an entry with another default is left unused rather
   Only a consumer draws it: `draw_history_allowance(cost)` takes `min(cost, allowance)` and returns the part of `cost` the allowance did not cover, which the consumer charges as history.
   A precompile's answer is given the input's allowance after its provider ran, so the allowance it carries back is the input's, whatever the provider drew.
   The allowance is the frame's alone: it is not returned, merged or rolled back.
-- **Consumer.** mega-evm lets a value call's child log a bounded number of bytes without charging history, as the call stipend lets it run. The call instruction decides which starts get the stipend, and the start carries that decision.
+- **Consumer.** mega-evm lets a value call's child log a bounded number of bytes without charging history, as the call stipend lets it run. The call instruction decides which starts get the stipend; a start's `kind` and `value` are public on `FrameStart`.
 - **Removal.** When upstream carries an equivalent allowance, or when mega-evm drops the rule.
 - **Default.** Zero on every schedule, so every child starts with none and a draw returns the whole cost; nothing in the workspace draws it.
 
