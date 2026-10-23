@@ -8,7 +8,7 @@ Crate names stay `revm-*`; consumers switch to the fork through a `[patch.crates
 
 revm does not expose the hooks MegaETH needs (multi-dimensional gas, gas preserved on halt, read-only journal access).
 Without them, `mega-evm` had to wrap every opcode and copy upstream functions.
-The fork adds those hooks, and the MegaETH accounting that has to move with a frame's gas inside revm's forwarding and settlement, a set rule 2 names and bounds; every other MegaETH rule stays in `mega-evm`.
+The fork adds those hooks, and the MegaETH accounting it carries today inside revm's forwarding and settlement, a set rule 2 names and bounds; every other MegaETH rule stays in `mega-evm`.
 
 ## Baseline
 
