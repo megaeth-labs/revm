@@ -258,7 +258,7 @@ An id the fork once used for an entry with another default is left unused rather
 - **Removal.** When upstream exposes an equivalent point, or when mega-evm stops charging frame starts.
 - **Default.** Returns `true` and touches nothing.
   Where measured (callgrind, the fork's release profile), a call runs one instruction more than without the hook: the store of the forward its helper returns, about 0.05% of a call to a contract that stops.
-  For `CREATE` and `CREATE2` the hook's only cost is the start's address; the byte pool's forward is counted under The byte pool.
+  For `CREATE` and `CREATE2` the hook's only cost is the start's address; the pools' forward is counted under Resource pools.
   With EIP-8037 off, the default spec's path, the address costs a warm journal read of the caller and the three checks: 149 instructions per `CREATE` and 147 per `CREATE2` from a contract (+0.95% and +0.73%). The read is a `Host::load_account_info_skip_cold_load` call that upstream's instruction does not make, so a `Host` that counts or refuses loads sees one more per creation.
   The instruction computes the address and a `CREATE2`'s init-code hash, and the handler reuses them, so a creation the handler builds or fails computes the same hashes as upstream's.
   A start that never reaches the handler's frame building computes them for the hook alone: one hash for a `CREATE`, two for a `CREATE2`. That is a start the hook refuses, and a creation answered without a frame, by an inspector's `create` or by a consumer's own `frame_init`. Upstream's EIP-8037 path computes them before the hook in the same way.
