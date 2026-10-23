@@ -63,9 +63,50 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
 
 ## Hooks
 
+This section lists every hook and switch the fork carries.
 Each entry names the API a consumer uses and what the fork guarantees about it.
 A hook's default keeps upstream's behaviour: a consumer that does not use it sees the same results.
-Each entry's **Default** says what the hook costs a consumer that does not use it.
+Each entry's **Consumer** says who needs it and why it cannot be done outside the fork, its **Removal** the condition under which the fork drops it, and its **Default** what it costs a consumer that does not use it.
+
+### State-gas price
+
+- **API.** `Host::state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64>` and `Host::state_gas_charge(&mut self, charge: StateGasCharge) -> Option<u64>`.
+  The value types `StateGasSite` (`account`, `slot`) and `StateGasCharge` (`one`, `units`, `total`) in `revm_context_interface::cfg`.
+  For the refund: `charged_state_gas_address` on `CreateInputs`, `CallOutcome` and `CreateOutcome`, and `FrameResult::refundable_state_gas_charge`.
+  `pre_execution::Eip7702AuthFacts`, the authorization list lifted out of the transaction so the authorization phase can hand the whole context to the hook.
+- **Contract.** Every EIP-8037 state-gas charge and every refund of one is priced through `state_gas_price`, so a charge and the refund that undoes it agree by construction.
+  `site` names the account the charge lands on, and the storage slot for a slot-scoped charge; a creation is priced at the address it deploys at, the first frame's included.
+  `None` reports a failed lookup: the implementation records the cause in the context error, and the charge site turns it into a fatal external error.
+- **Consumer.** mega-evm prices state gas by the storage bucket of the account or slot a charge lands on. Only the charge site knows the site, and the price must be the same at the charge and at its refund.
+- **Removal.** When upstream prices state gas through an equivalent hook, or when mega-evm prices every state-gas charge from the flat schedule.
+- **Default.** Reads the flat schedule (`gas_params().get(id)`) and never fails, so every charge and refund is upstream's.
+  The refund carries one address more in the frame inputs and outcomes, and under EIP-2780 an EIP-7702 transaction's authorization list is buffered before the authorization phase, one 88-byte entry per authorization that can apply.
+
+### History gas
+
+- **API.** On `GasTracker`, forwarded on `Gas`: `record_history_cost`, `refill_history`, `history_gas_spent`, `set_history_gas_spent`.
+  `GasId::code_deposit_history_gas` and `GasParams::code_deposit_history_gas(len)`.
+- **Contract.** A history charge draws the same reservoir-first budget as a state-gas charge: the reservoir, then regular gas, withheld part first.
+  It is booked on its own counter, so history gas can be reported and limited apart from state gas.
+  It unwinds with state gas: a frame that reverts or halts refills both in last-in-first-out order, and `refill_history` returns a spill before it tops up the reservoir.
+  `return_create` charges `code_deposit_history_gas` for the deployed bytes after their state-gas charge.
+  `ResultGas` has no field for it: `total_gas_spent` and `block_regular_gas_used` include it, and the `ResultGas` documentation says how a block-level consumer separates it.
+- **Consumer.** mega-evm charges history gas for the bytes a transaction appends to the chain's history. The code deposit is charged inside `return_create`, and only the tracker can unwind a frame's history charges with its state charges.
+- **Removal.** When upstream carries an equivalent gas dimension, or when mega-evm stops charging history gas.
+- **Default.** No schedule prices `code_deposit_history_gas`, and nothing else in the workspace charges history gas, so the counter stays zero and every result is upstream's.
+  The counter decodes as zero from encodings that predate it.
+
+### Amsterdam opcodes and transfer logs below Amsterdam
+
+- **API.** `revm_interpreter::enable_amsterdam_opcodes(&mut InstructionTable)` and the ungated instructions it installs (`dupn_enabled`, `swapn_enabled`, `exchange_enabled`, `slot_num_enabled`); `DummyHost::with_slot_num`.
+  `CfgEnv::enable_amsterdam_eip7708` with `with_enable_amsterdam_eip7708`, `Cfg::enable_amsterdam_eip7708` (default `false`), and `JournalTr::set_amsterdam_eip7708_enabled` (default no-op).
+- **Contract.** `enable_amsterdam_opcodes` overwrites `DUPN`, `SWAPN`, `EXCHANGE` and `SLOTNUM` with implementations that do not check the spec, and changes nothing else; the gas table is unchanged, since these four have the same static gas on every spec.
+  A consumer that wraps table entries installs first and wraps after.
+  With `enable_amsterdam_eip7708` set, the journal emits EIP-7708 transfer logs on any spec; `amsterdam_eip7708_disabled` still wins over both the spec and the switch.
+  The journal learns the switch through the context's cfg sync (construction, `with_cfg`, `modify_cfg`, journal or database replacement): assigning the field on an existing context's `cfg` does not reach it, and a custom `JournalTr` that keeps the default no-op emits no logs below Amsterdam.
+- **Consumer.** mega-evm runs Amsterdam's opcodes and transfer logs on a spec built on Osaka. Upstream gates both on `SpecId::AMSTERDAM` inside the instructions and the journal.
+- **Removal.** When the spec mega-evm runs is built on Amsterdam, or upstream activates these features independently of the spec.
+- **Default.** Nothing calls `enable_amsterdam_opcodes`, and the switch is off, so the table and the journal behave as upstream's.
 
 ### Withheld regular gas and the crossing record
 
@@ -80,13 +121,38 @@ Each entry's **Default** says what the hook costs a consumer that does not use i
   It puts back the amount; the split comes back only as far as the halt left it.
   An `OutOfGas` halt of the interpreter zeroes both parts, so after it the whole amount comes back spendable.
   `return_create`'s own `OutOfGas`, on a code-deposit or code-hash charge that crossed, zeroes nothing, so there the split comes back as it was.
-  A charge beyond the sum records nothing, and neither does an operand refused before any charge.
+  A charge beyond the sum records no crossing, and neither does an operand refused before any charge; the failed-charge record below covers every failed charge.
   The record is the last crossing since it was cleared, survives `spend_all`, starts empty in every child, and is not taken over by a parent.
   A consumer marks a result it produced itself as a crossing with `set_withheld_crossing`, passing `with_remaining` the regular gas the frame had before the charge that crossed.
   A call it holds to an allowance below its forward and answers without running crossed exactly when `allowance < cost <= forward` for the gas `cost` the call needs (for a precompile, the price `Precompile::required_gas` answers); its record is then `with_remaining(forward)`, and a cost above the forward is a plain out-of-gas with no record.
   A frame whose regular charge fails halts, except before Homestead, where `return_create` deploys empty code when the frame cannot pay the code deposit: a crossing on that charge leaves the record on a creation that returns successfully.
+- **Consumer.** mega-evm holds a frame's regular charges to what its gas detention allows. Every regular charge and every reader of the frame's gas is inside the interpreter, so only the tracker can keep part of the gas from the charges while every reader still sees it.
+- **Removal.** When upstream carries an equivalent split of a frame's regular gas, or when mega-evm stops holding regular charges below a frame's gas.
 - **Default.** With nothing withheld every method behaves as upstream's.
-  The tracker is 72 bytes and the record one word; a crossing is recorded in a cold, out-of-line function on the failure side of a regular charge, so a charge that succeeds runs upstream's code.
+  The record is one word; a crossing is recorded in a cold, out-of-line function on the failure side of a regular charge, so a charge that succeeds runs upstream's code.
+
+### The failed-charge record
+
+- **API.** `GasTracker::failed_charge_remaining() -> Option<u64>` and `GasTracker::set_failed_charge_remaining(Option<u64>)`, both forwarded on `Gas`.
+- **Contract.** Every deduction that fails and ends the frame out of gas records the regular gas left before it, spendable and withheld parts together:
+  - a regular charge (`record_regular_cost`, `record_cost_unsafe`), whether or not the withheld part would have paid it;
+  - a state or history charge whose spill past the reservoir regular gas cannot pay (`record_state_cost`, `record_history_cost`), whether the reservoir paid nothing or part of it; the record is regular gas alone, and the reservoir is left as it was;
+  - a forward to a child that regular gas cannot pay (`record_withheld_first_cost`), which only a call before EIP-150 can fail;
+  - an out-of-gas halt of the interpreter with no record there, before the halt zeroes the frame's gas: a cold access the instruction refused before its charge because the frame could not pay it (an account read, `SLOAD`, `SSTORE`, `SELFDESTRUCT`, a call's target and the account it delegates to), or an out-of-gas a consumer's instruction returned itself; a record already there is the failure that caused the halt, and is kept;
+  - a precompile run that needs more gas than the frame has: the frame's whole gas limit, as nothing ran.
+
+  The failed deduction took nothing, so the record is all the regular gas the frame had; the unchecked charge records it before the spendable part wraps, and a failure with nothing left records `Some(0)`.
+  A deduction that succeeds leaves the record as it is, and so does every credit and setter of the regular gas.
+  The fork never clears the record: it survives `spend_all`, a later failed charge replaces it, it starts empty in every child, and a parent does not take over its child's.
+  A frame whose charge fails halts, except before Homestead, where `return_create` deploys empty code when the frame cannot pay the code deposit: the record is then left on a creation that returns successfully.
+  A consumer that builds an out-of-gas result itself, outside the interpreter's halt, records the same with `set_failed_charge_remaining`.
+- **Not recorded.** The other out-of-gas halts zero nothing, so the frame's gas stays readable in its result: an operand refused before any charge, the memory limit, and the `SSTORE` stipend sentry.
+  A charge that fails before the first frame, in the transaction's runtime gas phase, records on the transaction's gas, which the handler then rebuilds; no frame ran.
+- **Consumer.** mega-evm's gas detention reads what a halting frame burned. An `OutOfGas` halt zeroes the frame's regular gas inside the interpreter, before the frame's result reaches any boundary mega-evm owns.
+- **Removal.** When upstream keeps a halting frame's regular gas readable, or when mega-evm no longer reads what a halting frame burned.
+- **Default.** Each record is written on the failure side only: the tracker's in cold, out-of-line functions, the interpreter's in its cold out-of-gas halt, the handler's on a precompile's out-of-gas. A deduction or load that succeeds runs the same code.
+  It is two words: the tracker is 88 bytes, and a copy of the tracker, and of every `Gas` and frame result that holds one, is 16 bytes larger.
+  Where measured (callgrind, the fork's release profile), the field left a transfer and a precompile call unchanged and cost about 0.1% of the instructions of a creation; the records written on the failure side add nothing measurable.
 
 ### Precompile price
 
@@ -106,6 +172,8 @@ Each entry's **Default** says what the hook costs a consumer that does not use i
   A precompile that wraps a built-in must price itself from the price function of the run it wraps, and price its own refusals at `0`; `with_required_gas`'s documentation shows the pattern, and such a wrapper needs a differential test against its own run.
   Outstanding: the port to the op-revm fork. At `v20.0.0-mega.2` its nine size-limited wrappers (the BN254 pairing and the BLS12-381 G1 MSM, G2 MSM and pairing, across its hardforks) are built with `Precompile::new` and answer `None`.
 - **Guard.** `ecrecover`, `sha256`, `ripemd160` and `blake2f` repeat literals their runs keep private; the differential test `required_gas_matches_every_builtin_run`, run under every backend, fails when a run's gas changes and its price does not.
+- **Consumer.** mega-evm holds a precompile call to an allowance below its forward and must tell a crossing from a plain out-of-gas without running it. A precompile's gas rule is private to its run.
+- **Removal.** When upstream exposes a precompile's price before the run, or when mega-evm stops holding precompile calls to an allowance.
 - **Default.** Nothing on the execution path calls it; `Precompile` is one word larger.
 
 ### Code-deposit admission
@@ -122,8 +190,30 @@ Each entry's **Default** says what the hook costs a consumer that does not use i
   The deposit's charges, and with them its state-gas price lookup through `Host::state_gas_price`, are made before it is offered, so that lookup is made whether or not the deposit is admitted; a refusal does not undo what the lookup recorded.
 - **Reach.** The hook is on the context `return_create` is called with, so a consumer that wraps `EthFrame`, runs `process_next_action` from its own `frame_run`, or customises `Handler` reaches it by implementing `ContextTr` for its context.
   A context that wraps another and implements `ContextTr` by hand must forward the method, or it gets the admitting default.
+- **Consumer.** mega-evm refuses a deposit its own rules reject, after revm's checks and charges and before the creation commits. That point is inside `return_create`, between its last charge and the checkpoint commit.
+- **Removal.** When upstream has an equivalent admission point, or when mega-evm stops refusing deposits.
 - **Default.** `return_create` compiles to the same code, on its own and inlined into the handler on the plain and the inspected path.
   Inlined into a consumer's own function, the admitting default may shift its block layout; where measured, that cost one unconditional branch on one out-of-gas path and changed no success path.
+
+### revm 40.0.3's journal semantics
+
+- **API.** `CfgEnv::legacy_journal_semantics` with `with_legacy_journal_semantics`, `Cfg::legacy_journal_semantics` (default `false`), and `JournalTr::set_legacy_journal_semantics` (default no-op).
+- **Contract.** With the switch set, the journal records what revm 40.0.3 recorded where two picked upstream fixes changed it: a storage slot warmed while cold for the current transaction re-baselines its EIP-2200 `original_value`, and a `CodeChange` entry records `KECCAK_EMPTY` and no code as the previous code, on the journal's path and on the account-level `set_code`.
+  The journal learns the switch through the context's cfg sync, as it learns `enable_amsterdam_eip7708`.
+- **Consumer.** MegaETH's legacy engine, which replays blocks produced on revm 40.0.3 and must reproduce them exactly. The two behaviours are inside the journal.
+- **Removal.** When no consumer needs to reproduce revm 40.0.3's journal.
+- **Default.** Off, which is the picked behaviour; the journal reads one `bool` when it warms a cold slot and when it records a code change.
+
+## Baseline behaviour the fork changes
+
+Picked upstream fixes change revm 40.0.3's results where 40.0.3 was wrong; that is why they are taken (see Tracking upstream), and each pick's pull request says what it changes.
+A pick that changes what the journal records lands with a switch back to the base line (see revm 40.0.3's journal semantics).
+One pick changes what the top-level entry points do with the journal, and has no switch:
+
+- **The journal is finalized on an error.** `ExecuteCommitEvm::transact_commit`, `ExecuteEvm::replay`, `InspectEvm::inspect_tx` and `inspect`, `InspectCommitEvm::inspect_tx_commit` and `inspect_commit`, and the four `inspect_system_call` variants clear the journal when execution returns an error.
+  revm 40.0.3 left it holding the failed transaction's warm set and touched accounts, which leaked into the next transaction run on the same EVM.
+  Upstream #3780, carried verbatim with the EIP-8037 / EIP-2780 gas core.
+  There is no switch: a consumer that must keep the journal after an error uses the entry points that do not finalize (`transact_one`, `inspect_one_tx`, `system_call_one`) and finalizes itself.
 
 ## Tracking upstream
 
@@ -135,7 +225,7 @@ Picks are batched by crate or subsystem, one pull request per batch, so one revi
 The fork has no benchmark gate: a performance pick must leave execution results unchanged under the crate tests and the EEST run, and cite upstream's benchmark numbers in the pull request body.
 A pick that touches a precompile is tested under mutually exclusive feature sets, because `--all-features` selects only the preferred backend in each `cfg_if!` block: `--no-default-features --features std` (every fallback: the arkworks BLS12-381 and KZG paths, `aurora-engine-modexp`, `k256`, `p256`), the default set, `--all-features`, and the single feature that selects the backend the pick changes (`std,blst`, `std,c-kzg`, `std,gmp`, `std,secp256k1` or `std,p256-aws-lc-rs`) on its own.
 A pick that breaks the public API needs `api:exception`, the deviating items listed in the pull request body, and a check of every consumer that uses them.
-An upstream change that upstream later reverted but the fork still needs lands as a fork-owned opt-in switch (`mega:hook`) whose default keeps upstream's behaviour; the system-call state-gas margin (#55) is the first.
+An upstream change that upstream later reverted but the fork still needs lands as a fork-owned opt-in switch (`mega:hook`) whose default keeps upstream's behaviour.
 A picked upstream fix that changes journal semantics lands with an opt-in switch back to the base line's behaviour when a consumer reproduces the base line exactly; the switch defaults to the picked behaviour, the consumer that needs the base line sets it, and nothing else reads it. `CfgEnv::legacy_journal_semantics` (the cold-slot re-baseline and the `CodeChange` revert of revm 40.0.3) is the first.
 Every pick is applied verbatim: `git show -U0 <commit> | git patch-id --verbatim` gives the same id for the pick and its upstream commit unless the pick's message records a conflict resolution; the pull request body, which becomes the squash message, lists each pick's `(cherry picked from commit <sha>)` line and its conflicts.
 

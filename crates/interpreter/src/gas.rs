@@ -2,6 +2,7 @@
 
 pub use context_interface::cfg::gas::*;
 
+mod failed_charge;
 mod withheld;
 
 /// Represents the state of gas during execution.
@@ -248,7 +249,8 @@ impl Gas {
     ///
     /// Note that this does not affect the reservoir. Both the spendable and the withheld part
     /// are zeroed; a recorded [`WithheldCrossing`] is kept, and with it the regular gas left
-    /// before the failed charge.
+    /// before the failed charge, and so is the record of the last failed charge
+    /// ([`failed_charge_remaining`](Self::failed_charge_remaining)).
     #[inline]
     pub const fn spend_all(&mut self) {
         self.tracker.spend_all();

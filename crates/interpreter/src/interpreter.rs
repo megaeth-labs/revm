@@ -206,6 +206,7 @@ impl<IW: InterpreterTypes> Interpreter<IW> {
     #[inline(never)]
     pub fn halt(&mut self, result: InstructionResult) {
         if result == InstructionResult::OutOfGas {
+            self.gas.record_out_of_gas_halt();
             self.gas.spend_all();
         }
         self.bytecode
@@ -238,6 +239,7 @@ impl<IW: InterpreterTypes> Interpreter<IW> {
     #[cold]
     #[inline(never)]
     pub fn halt_oog(&mut self) {
+        self.gas.record_out_of_gas_halt();
         self.gas.spend_all();
         self.halt(InstructionResult::OutOfGas);
     }

@@ -124,16 +124,6 @@ pub trait Cfg {
     fn legacy_journal_semantics(&self) -> bool {
         false
     }
-
-    /// Returns whether a system call places its EIP-8037 state-gas margin in the reservoir.
-    ///
-    /// When `true` and EIP-8037 is enabled, a system call runs on at most the base 30M regular
-    /// gas and the rest of its gas limit becomes the state-gas reservoir, as EIP-8037 specifies
-    /// for system calls. Default is `false`: the whole system call gas limit is regular gas.
-    #[inline]
-    fn system_call_state_gas_margin_in_reservoir(&self) -> bool {
-        false
-    }
 }
 
 /// What bytecode analysis to perform
@@ -274,6 +264,5 @@ mod tests {
         let cfg = RequiredOnly(GasParams::default());
         assert!(!cfg.legacy_journal_semantics());
         assert!(!cfg.enable_amsterdam_eip7708());
-        assert!(!cfg.system_call_state_gas_margin_in_reservoir());
     }
 }

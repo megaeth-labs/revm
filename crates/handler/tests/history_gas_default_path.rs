@@ -130,9 +130,9 @@ fn transact(spec: SpecId, reservoir: u64, kind: TxKind, data: Vec<u8>) -> Execut
 
 /// `(spec, the reservoir, the call's gas, the create's gas)`, as `main` reports them.
 ///
-/// `ResultGas::new_with_state_gas(total_gas_spent, refunded, floor_gas, state_gas_spent)`,
-/// then `reservoir_remaining`: the reservoir the transaction started with, less the state gas it
-/// drew. Before Amsterdam there is neither (no cap below [`GAS_LIMIT`], no state gas price).
+/// `ResultGas::new_with_state_gas(total_gas_spent, refunded, floor_gas, state_gas_spent)`.
+/// Before Amsterdam there is no reservoir and no state gas (no cap below [`GAS_LIMIT`], no state
+/// gas price).
 ///
 /// Amsterdam state gas: 97,920 a slot, 183,600 a new account, 1,530 a deposited byte.
 /// - The call draws 526,320: slot 2 and the successful child's slot (slot 1's restore refills
@@ -143,40 +143,35 @@ fn transact(spec: SpecId, reservoir: u64, kind: TxKind, data: Vec<u8>) -> Execut
 ///   `183,600 + 97,920 + 32 × 1,530`.
 ///
 /// With [`SHORT_RESERVOIR`] each transaction draws the reservoir dry and the rest of its state
-/// gas spills onto regular gas, so the reservoir ends at 0 and every other figure stays as it
-/// is with [`RESERVOIR`]. None of it spills inside a child's 100,000: the reservoir holds at
-/// least `300,000 − 2 × 97,920 = 104,160` whenever a child writes its slot, and runs dry at
-/// `CREATE`.
+/// gas spills onto regular gas, and every figure stays as it is with [`RESERVOIR`]. None of it
+/// spills inside a child's 100,000: the reservoir holds at least `300,000 − 2 × 97,920 = 104,160`
+/// whenever a child writes its slot, and runs dry at `CREATE`.
 const EXPECTED: [(SpecId, u64, ResultGas, ResultGas); 4] = [
     (
         SpecId::PRAGUE,
         0,
-        ResultGas::new_with_state_gas(278_968, 19_900, 21_000, 0).with_reservoir_remaining(0),
-        ResultGas::new_with_state_gas(82_218, 0, 22_730, 0).with_reservoir_remaining(0),
+        ResultGas::new_with_state_gas(278_968, 19_900, 21_000, 0),
+        ResultGas::new_with_state_gas(82_218, 0, 22_730, 0),
     ),
     (
         SpecId::OSAKA,
         0,
-        ResultGas::new_with_state_gas(278_968, 19_900, 21_000, 0).with_reservoir_remaining(0),
-        ResultGas::new_with_state_gas(82_218, 0, 22_730, 0).with_reservoir_remaining(0),
+        ResultGas::new_with_state_gas(278_968, 19_900, 21_000, 0),
+        ResultGas::new_with_state_gas(82_218, 0, 22_730, 0),
     ),
     (
         SpecId::AMSTERDAM,
         RESERVOIR,
-        // 1,000,000 − 526,320
-        ResultGas::new_with_state_gas(724_094, 10_000, 15_000, 526_320)
-            .with_reservoir_remaining(473_680),
-        // 1,000,000 − 330,480
-        ResultGas::new_with_state_gas(367_304, 0, 26_816, 330_480)
-            .with_reservoir_remaining(669_520),
+        ResultGas::new_with_state_gas(724_094, 10_000, 15_000, 526_320),
+        ResultGas::new_with_state_gas(367_304, 0, 26_816, 330_480),
     ),
     (
         SpecId::AMSTERDAM,
         SHORT_RESERVOIR,
         // 300,000 − 526,320 < 0: 226,320 spills.
-        ResultGas::new_with_state_gas(724_094, 10_000, 15_000, 526_320).with_reservoir_remaining(0),
+        ResultGas::new_with_state_gas(724_094, 10_000, 15_000, 526_320),
         // 300,000 − 330,480 < 0: 30,480 spills.
-        ResultGas::new_with_state_gas(367_304, 0, 26_816, 330_480).with_reservoir_remaining(0),
+        ResultGas::new_with_state_gas(367_304, 0, 26_816, 330_480),
     ),
 ];
 

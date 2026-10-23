@@ -567,7 +567,6 @@ fn test_a_reverting_frame_whose_refill_took_the_other_kinds_spill_returns_the_in
         // The rollback ran: the caller holds the reservoir it lent and nothing the child charged.
         assert_eq!(counters(&charged.settled), (RESERVOIR, 0, 0, 0));
         assert_eq!(charged.settled.remaining(), uncharged.settled.remaining());
-        assert_eq!(charged.gas().reservoir_remaining(), RESERVOIR);
         assert_eq!(charged.total(), uncharged.total());
     }
 }
@@ -660,7 +659,6 @@ fn test_a_halting_first_frame_returns_the_reservoir_and_burns_its_regular_gas() 
         );
         // Everything but the reservoir is spent.
         assert_eq!(charged.total(), REGULAR_CAP);
-        assert_eq!(charged.gas().reservoir_remaining(), reservoir);
         assert_eq!(charged.gas(), uncharged.gas());
         assert!(charged
             .state
@@ -1004,14 +1002,13 @@ fn test_a_sibling_refill_pays_back_the_spill_of_an_earlier_siblings_history_char
 
         // The caller's regular gas is short of the uncharged run's by the spill still outstanding,
         // and the history net still charged is the only difference in the total.
-        let (reservoir, _, history, spilled) = caller_gas;
+        let (_, _, history, spilled) = caller_gas;
         assert_eq!(counters(&charged.settled), caller_gas);
         assert_eq!(
             charged.settled.remaining(),
             uncharged.settled.remaining() - spilled
         );
         assert_eq!(unwound_reservoir(&charged.settled), RESERVOIR as i64);
-        assert_eq!(charged.gas().reservoir_remaining(), reservoir);
         assert_eq!(charged.gas().state_gas_spent_final(), 0);
         assert_eq!(
             charged.total(),
@@ -1081,7 +1078,6 @@ fn test_a_failed_sibling_refill_leaves_the_spill_of_an_earlier_siblings_history_
             uncharged.settled.remaining() - 50_000
         );
         assert_eq!(unwound_reservoir(&charged.settled), RESERVOIR as i64);
-        assert_eq!(charged.gas().reservoir_remaining(), 0);
         assert_eq!(charged.gas().state_gas_spent_final(), 0);
         assert_eq!(charged.total(), uncharged.total() + LARGE_HISTORY);
     }

@@ -11,7 +11,7 @@ use core::num::NonZeroU64;
 ///
 /// Recorded by [`GasTracker::record_regular_cost`] and [`GasTracker::record_cost_unsafe`] when
 /// `spendable < cost <= spendable + withheld`. A charge larger than the whole regular gas records
-/// nothing: it would have failed with nothing withheld too.
+/// no crossing: it would have failed with nothing withheld too.
 ///
 /// The record holds the regular gas left before the failed charge ([`remaining`](Self::remaining)):
 /// the tracker's [`remaining`](GasTracker::remaining) at the charge, spendable and withheld parts
@@ -184,9 +184,10 @@ impl GasTracker {
     /// reservoir.
     ///
     /// Draws the withheld part first and the spendable part after it, so it fails only when
-    /// [`remaining`](Self::remaining) cannot pay. On failure the tracker is left untouched and no
-    /// crossing is recorded. With nothing withheld it deducts exactly what
-    /// [`record_regular_cost`](Self::record_regular_cost) deducts.
+    /// [`remaining`](Self::remaining) cannot pay. On failure the regular gas is left untouched, no
+    /// crossing is recorded, and the regular gas left is recorded as
+    /// [`failed_charge_remaining`](Self::failed_charge_remaining). With nothing withheld it
+    /// deducts exactly what [`record_regular_cost`](Self::record_regular_cost) deducts.
     #[inline]
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_withheld_first_cost(&mut self, cost: u64) -> bool {
@@ -200,26 +201,8 @@ impl GasTracker {
             self.withheld -= from_withheld;
             return true;
         }
+        self.withheld_first_cost_failed();
         false
-    }
-
-    /// Records a failed regular charge of `cost` against `spendable` as a [`WithheldCrossing`]
-    /// holding the regular gas left, `spendable` plus the withheld part, when the withheld part
-    /// would have paid it.
-    ///
-    /// Only called on the failure path of a regular charge, where `cost > spendable`, so the
-    /// charge's success path does not pay for the check. `spendable` is the spendable part before
-    /// the charge: [`record_cost_unsafe`](Self::record_cost_unsafe) has already wrapped it.
-    #[cold]
-    #[inline(never)]
-    pub(super) const fn regular_charge_failed(&mut self, cost: u64, spendable: u64) {
-        // `cost > spendable`, so a withheld part that covers the difference is never zero, and
-        // neither is the regular gas left.
-        if cost - spendable <= self.withheld {
-            if let Some(remaining) = NonZeroU64::new(spendable.saturating_add(self.withheld)) {
-                self.withheld_crossing = Some(WithheldCrossing::with_remaining(remaining));
-            }
-        }
     }
 }
 
@@ -253,12 +236,12 @@ mod tests {
         assert_eq!(size_of::<Option<WithheldCrossing>>(), size_of::<u64>());
     }
 
-    /// The tracker is 72 bytes. Above that, copies of the tracker, and of every `Gas` and frame
-    /// result that holds one, get markedly more expensive, so a new field is measured before this
-    /// changes.
+    /// The tracker is 88 bytes: 72 with the withheld part and its record, and two words more for
+    /// the failed-charge record. Copies of the tracker, and of every `Gas` and frame result that
+    /// holds one, grow with it, so a new field is measured before this changes.
     #[test]
-    fn test_the_tracker_is_72_bytes() {
-        assert_eq!(size_of::<GasTracker>(), 72);
+    fn test_the_tracker_is_88_bytes() {
+        assert_eq!(size_of::<GasTracker>(), 88);
     }
 
     /// Withholding moves gas between the parts and leaves the total alone.
@@ -522,7 +505,7 @@ mod tests {
         );
     }
 
-    /// The unchecked charge records nothing when the whole regular gas cannot pay it.
+    /// The unchecked charge records no crossing when the whole regular gas cannot pay it.
     #[test]
     fn test_record_cost_unsafe_records_nothing_beyond_the_withheld_part() {
         let mut tracker = withheld_600();
