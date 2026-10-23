@@ -9,8 +9,9 @@ It is read by the automated reviewer as well as by people.
 1. **Superset.** The public API of every published crate stays a superset of the crates.io baseline recorded in `scripts/mega/crates.txt`.
    The `Semver` workflow checks API changes against the pull request base; reviewers check baseline compatibility and the documented exceptions.
    A PR that must break the superset carries the `api:exception` label and lists in its body every deviating item with the consumers it was checked against (`reth`, `alloy-evm`, `revm-inspectors`, the `op-revm` fork).
-2. **Thin layer.** The fork adds hooks and data, never MegaETH semantics.
+2. **Hooks and data, and rule 2's set.** The fork adds hooks and data, and no MegaETH semantics beyond the bounded set of accounting `MEGAETH-FORK.md` rule 2 names.
    If a change makes a design decision (a price, a limit, a policy), ask for it to move to `mega-evm` and for the fork to expose only the hook it needs.
+   A change that adds to rule 2's set must argue every condition rule 2 lists, the first above all: why a hook on the state revm exposes cannot make the same decision.
 3. **`no_std`.** No unguarded `std::`, no new dependency that enables `std` by default, no allocation in a path that did not allocate before.
    The CI checks both riscv targets; the reviewer checks the intent.
 4. **One topic per PR, conventional prefix on every fork-authored commit.** Fork-authored commits and PR titles start with `feat`, `fix`, `chore`, `docs`, `ci` or `test` and say what changed; cherry-picked commits keep upstream's subject (`MEGAETH-FORK.md` rule 4); `git log --oneline <base>..main` (`<base>` from `scripts/mega/base.txt`) is the fork's changelog and must stay readable.

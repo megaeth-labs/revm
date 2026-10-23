@@ -8,7 +8,7 @@ Crate names stay `revm-*`; consumers switch to the fork through a `[patch.crates
 
 revm does not expose the hooks MegaETH needs (multi-dimensional gas, gas preserved on halt, read-only journal access).
 Without them, `mega-evm` had to wrap every opcode and copy upstream functions.
-The fork adds those hooks as a thin layer; all MegaETH logic stays in `mega-evm`.
+The fork adds those hooks, and the MegaETH accounting that has to move with a frame's gas inside revm's forwarding and settlement, a set rule 2 names and bounds; every other MegaETH rule stays in `mega-evm`.
 
 ## Baseline
 
@@ -36,9 +36,33 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
    `reth`, `alloy-evm` and `revm-inspectors` are compiled against this fork unmodified; `op-revm` is forked separately at [megaeth-labs/op-revm](https://github.com/megaeth-labs/op-revm) and ported there.
    The `Semver` workflow checks every pull request against its base; a deviation passes only with the `api:exception` label, and the pull request body lists every deviating item with the consumers it was checked against.
    Each consumer's own CI builds against the tagged fork.
-2. **Thin layer.**
-   The fork adds hooks and data; it does not implement MegaETH semantics.
-   If a change needs a design decision, it belongs in `mega-evm`.
+   The fork carries accepted exceptions, and each entry under Hooks names its own.
+   One of them changes what upstream functions do without changing a signature, so neither the compiler nor the `Semver` workflow finds it: the reservoir settlement adds.
+   `handle_reservoir_remaining_gas` and `GasTracker::absorb_returned_reservoir` add the reservoir a frame returns to what its caller kept, where upstream's replace the caller's reservoir with it, and the forward takes the reservoir out of the caller where upstream's left it there (see The reservoir share).
+   A consumer that starts and settles frames only through revm's instructions and handler, on a schedule that keeps none of the reservoir, gets upstream's results, since the caller then holds nothing when the child returns.
+   It affects three kinds of consumer:
+   - code that hands a frame a reservoir or a pool without taking it from the caller, such as a child's input or a first-frame result built by hand, an override of `Handler::first_frame_input` or `Handler::runtime_oog_result`, or a runner that settles its own first frame: it compiles and counts the reservoir twice (see The settlement adds);
+   - an inspector that reads a caller's gas while its child runs, at a `CALL` or `CREATE` instruction's `step_end`: it sees the part the caller kept, zero by default, where upstream's showed the forwarded reservoir;
+   - a consumer whose schedule keeps part of the reservoir (`GasId::reservoir_kept_percent`), whose results differ from upstream's by design.
+2. **Hooks and data, and a bounded set of MegaETH accounting.**
+   The fork adds hooks and data.
+   It also carries a named, bounded set of MegaETH accounting inside revm's forwarding and settlement, each item because it has to move with a frame's gas at a point only revm reaches:
+   - withheld regular gas and its crossing record, which every regular charge reads;
+   - the history-gas dimension, charged reservoir-first, unwound with state gas, and charged for deployed code inside `return_create`;
+   - the resource pools, per-frame budgets forwarded to a child, given back by a failed one and settled with the reservoir;
+   - the reservoir kept share, and the additive settlement it needs (rule 1);
+   - the start charge, and its refund when the frame fails;
+   - the history allowance.
+
+   Each item has its entry under Hooks, whose Default keeps upstream's results for a consumer that sets nothing.
+   Nothing else that implements MegaETH semantics enters the fork.
+   An addition to the set needs all of these, argued in its pull request:
+   - no hook that sees only the state revm exposes at that point can make the same decision, because the figure is read or written inside a charge, or has to be ordered with revm's own settlement; the pull request says why the consumer cannot keep it beside revm's gas;
+   - it is mechanism, not policy: every amount, share, price and limit comes from the consumer, through the gas schedule or a hook, and a detail the fork has to fix itself, such as a rounding, is named in its entry;
+   - zero, unlimited or none as its default leaves every result upstream's, and its entry states what a consumer that sets nothing pays for it, in bytes on the frame results and in instructions;
+   - its entry names the condition under which the fork drops it.
+
+   A design decision still belongs in `mega-evm`: the fork carries the figures and moves them with the gas, and `mega-evm` decides what they are and what happens when one runs out.
 3. **Cargo versions stay fixed between base-line moves.**
    The `[patch.crates-io]` mechanism only applies when the patched version satisfies the consumer's requirement, and pre-release suffixes do not satisfy `^40.0.3`.
    Releases are identified by git tags only.
@@ -477,7 +501,7 @@ Every pull request carries exactly one `mega:` label and one `api:` label; the `
 | Label | Meaning |
 |---|---|
 | `mega:cherry-pick` | Upstream commits brought into the fork unchanged apart from recorded conflicts |
-| `mega:hook` | A hook or data field added in the thin layer |
+| `mega:hook` | A hook, data field or switch, or an item of rule 2's MegaETH accounting |
 | `mega:vendor` | A vendored crate (`crates/op-revm`) added or updated |
 | `mega:ci` | Workflows, `scripts/mega`, the fork documents |
 | `mega:rebase` | The base line moves to a new upstream tag |
