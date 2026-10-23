@@ -52,7 +52,7 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
    It affects code that calls `apply_auth_list_eip2780` itself, written for upstream's signature: it does not compile against the fork until it passes the context and the list `Eip7702AuthFacts::collect` builds.
 2. **Hooks and data, and a bounded set of MegaETH accounting.**
    The fork adds hooks and data.
-   It also carries a named, bounded set of MegaETH accounting inside revm's forwarding and settlement, each item because it has to move with a frame's gas at a point only revm reaches:
+   It also carries, today, a named, bounded set of MegaETH accounting inside revm's forwarding and settlement; the set is what the fork carries now, and the test for an addition (below) is stricter:
    - withheld regular gas and its crossing record, which every regular charge reads;
    - the history-gas dimension, charged reservoir-first, unwound with state gas, and charged for deployed code inside `return_create`;
    - the resource pools, per-frame budgets forwarded to a child, given back by a failed one and settled with the reservoir;
@@ -60,6 +60,7 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
    - the start charge, and its refund when the frame fails;
    - the history allowance.
 
+   Some of these a consumer could keep beside revm's gas through the hooks, at a cost in code and in the gas figures it has to restore; the next base-line move may take them out (see What the fork carries).
    Each item has its entry under Hooks, whose Default keeps upstream's results for a consumer that sets nothing.
    Nothing else that implements MegaETH semantics enters the fork.
    An addition to the set needs all of these, argued in its pull request:
@@ -93,16 +94,16 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
 
 ## What the fork carries
 
-`git diff <base>..main` is the fork's footprint on upstream (rule 4).
+`git diff <base>..<fork head>` is the fork's footprint on upstream (rule 4).
 It falls into five classes, and the next base-line move (see Tracking upstream) treats each one differently.
-The sizes are the lines of `crates/`, without tests, that `git blame <base>..main` attributes to each class's commits.
+The sizes are the lines of `crates/`, without tests, that `git blame <base>..<fork head>` attributes to each class's commits.
 
 | Class | What | Size | At the next base-line move |
 |---|---|---|---|
 | Upstream gas core | The EIP-8037 / EIP-2780 gas core, picked from later upstream releases | about 2,600 lines | Goes away once the new base contains every pick; the sweep issues record which tag first contains each. The settlement code the fork's MegaETH accounting is written into is upstream's own (`handle_reservoir_remaining_gas`, `EthFrame::return_result`, `create_init_frame`, `last_frame_result`), so that accounting is re-applied to the new base's versions of it. |
 | Other upstream picks | Fixes and performance picks | about 140 lines | Goes away once the new base contains them; a pick the base lacks is picked again or dropped, as its sweep decides. A behaviour a switch takes back stays switchable (see Consumer switches). |
 | Generic hooks | State-gas price, precompile price, code-deposit admission, the failed-charge record, the completed-write and frame-start hooks, the pending action and the frame-run-result hook | about 1,750 lines | Each is proposed upstream, in a form upstream can take: without MegaETH vocabulary in its types (`FrameStart::charge` leaves `FrameStart` first), as an instruction-level helper rather than a `Host` method where one serves, and with no cost on the default path that upstream would not accept. It is carried until upstream has an equivalent (its Removal). |
-| Consumer switches | Amsterdam opcodes and EIP-7708 below Amsterdam, revm 40.0.3's journal semantics | about 300 lines | Carried until their Removal conditions. The Amsterdam switch is proposed in the shape of upstream's per-EIP activation switches, which already cover three of its four opcodes; revm 40.0.3's journal semantics are not proposed. |
+| Consumer switches | Amsterdam opcodes and EIP-7708 below Amsterdam, the base line's journal semantics | about 300 lines | Carried until their Removal conditions. The Amsterdam switch is proposed in the shape of upstream's per-EIP activation switches, which already cover three of its four opcodes; the base line's journal semantics are not proposed. |
 | MegaETH accounting (rule 2) | Withheld regular gas, the history-gas dimension, the resource pools, the reservoir kept share, the start charge, the history allowance | about 2,150 lines, of which the pools, the kept share, the start charge and the allowance are about 1,450 | Carried and re-applied to the new base, or replaced: an item a later design keeps in `mega-evm` instead, with the same results for the consumer that uses it, leaves the fork, and its entry's Removal says when. The items that ride on the frame results (the pools, the start charge, the allowance) are the first candidates, since every consumer pays their size. |
 
 ## Hooks
@@ -306,7 +307,7 @@ An id the fork once used for an entry with another default is left unused rather
 - **Removal.** When upstream exposes an equivalent point, or when mega-evm stops charging frame starts.
 - **Default.** Returns `true` and touches nothing.
   Where measured (callgrind, the fork's release profile), a call runs one instruction more than without the hook: the store of the forward its helper returns, about 0.05% of a call to a contract that stops.
-  For `CREATE` and `CREATE2` the hook's only cost is the start's address; the pools' forward is counted under Resource pools.
+  For `CREATE` and `CREATE2` the hook's only cost is the start's address; the resource pools' forward is counted under Resource pools.
   With EIP-8037 off, the default spec's path, the address costs a warm journal read of the caller and the three checks: 149 instructions per `CREATE` and 147 per `CREATE2` from a contract (+0.95% and +0.73%). The read is a `Host::load_account_info_skip_cold_load` call that upstream's instruction does not make, so a `Host` that counts or refuses loads sees one more per creation.
   The instruction computes the address and a `CREATE2`'s init-code hash, and the handler reuses them, so a creation the handler builds or fails computes the same hashes as upstream's.
   A start that never reaches the handler's frame building computes them for the hook alone: one hash for a `CREATE`, two for a `CREATE2`. That is a start the hook refuses, and a creation answered without a frame, by an inspector's `create` or by a consumer's own `frame_init`. Upstream's EIP-8037 path computes them before the hook in the same way.
@@ -381,7 +382,7 @@ An id the fork once used for an entry with another default is left unused rather
   A consumer takes what it hands over: `forward_to_child` takes the schedule's shares, as the instructions do; `forward_all_to_child` takes everything, as the transaction's frame does; `forward_reservoir` and `forward_pool` take a share the consumer computed.
   A consumer that lowers a child's share after the forward and gives the excess back to the caller keeps the sum, and is right; so is code that settles with arithmetic of its own that replaces the caller's reservoir and calls none of these functions.
   A debug build asserts on entry to `settle_first_frame` that the transaction's gas holds no reservoir and no limited pool; an unlimited pool is exempt, since what comes back saturates at it. A frame below the transaction's has no such check: its caller may hold a kept part, or an excess given back, beside the share, and only the code that built the input knows which.
-- **Consumer.** mega-evm keeps the caller's part of the reservoir from a callee that could exhaust it: a child receives 98/100 of what its caller has left, as with every other resource a callee could exhaust. Only the instruction knows the reservoir as the frame-start hook left it before the input is built, and only the settlement can add the child's reservoir to what the caller kept.
+- **Consumer.** mega-evm keeps the caller's part of the reservoir from a callee that could exhaust it: a child receives 98/100 of what its caller has left, as with every other resource a callee could exhaust. The kept part is taken from the reservoir as the frame-start hook left it, before the input is built, and added back to the caller's reservoir when the child's reservoir is settled.
 - **Removal.** When upstream forwards a share of the reservoir through an equivalent setting, or when mega-evm forwards the whole reservoir.
 - **Default.** Every schedule keeps none of the reservoir and so forwards it whole, the child's return gives the caller what the child left, and every result is upstream's: EEST, the default-path figures pinned to upstream and the handler suites pass unchanged.
   A table without the entry, built raw or decoded from an encoding that predates it, keeps none too (see Hooks).
@@ -410,7 +411,7 @@ An id the fork once used for an entry with another default is left unused rather
   An outcome an inspector builds to answer a start carries no charge unless the inspector copies the input's (`CallOutcome::new` and `CreateOutcome::new` carry none), so the caller keeps the charge, as revm keeps its own upfront state charge on an outcome a tool builds; an outcome the inspector rewrites at `call_end` or `create_end` keeps the frame's charge, so a success rewritten into a failure is refunded.
   An answer a consumer builds itself, such as an interceptor's, is refunded by the same rule: it carries the charge the consumer puts on it, and none when built with `new`.
   A consumer that settles a result into a caller's tracker itself refunds the charge with `refill_start_charge` on the same condition, so a pool added to the charge reaches it.
-- **Consumer.** mega-evm charges a start's write records to the caller at the hook, after the forward and before the frame's input takes its share of the reservoir, and must give them back when the frame fails. It draws a start's records on the child's pools, so its hook declares history alone, but a creation's creator record is drawn from the caller's pools at the hook: when revm answers the creation before it bumps the nonce, the engine adds what the record drew to the answer's charge, so the creation's failure gives it back (`give_back_creator_record`). The refund belongs where the fork refunds the upfront state charge.
+- **Consumer.** mega-evm charges a start's write records to the caller at the hook, after the forward and before the frame's input takes its share of the reservoir, and must give them back when the frame fails. Its hook charges history only and declares `StartCharge::new(charge, PoolAmounts::ZERO)`: the records a start draws on the child's pools are counted in the child, and a creation's creator record is counted on the creator's pools after the creation returns, once the engine sees the creator's nonce was bumped, whether the creation succeeded or not, so no pool amount rides on the charge. The refund belongs where the fork refunds the upfront state charge.
 - **Removal.** When upstream carries an equivalent refundable start charge, or when mega-evm stops charging frame starts.
 - **Default.** The hook declares nothing, so the fields and the refund are zero.
   The charge is four words, history and one per pool, on every input and outcome; its size is part of the outcomes' measured above (see Resource pools).
@@ -431,7 +432,7 @@ An id the fork once used for an entry with another default is left unused rather
   Only a consumer draws it: `draw_history_allowance(cost)` takes `min(cost, allowance)` and returns the part of `cost` the allowance did not cover, which the consumer charges as history.
   A precompile's answer is given the input's allowance after its provider ran, so the allowance it carries back is the input's, whatever the provider drew.
   The allowance is the frame's alone: it is not returned, merged or rolled back.
-- **Consumer.** mega-evm lets a value call's child log a bounded number of bytes without charging history, as the call stipend lets it run. Only the call instruction knows which starts get the stipend.
+- **Consumer.** mega-evm lets a value call's child log a bounded number of bytes without charging history, as the call stipend lets it run. The call instruction decides which starts get the stipend, and the start carries that decision.
 - **Removal.** When upstream carries an equivalent allowance, or when mega-evm drops the rule.
 - **Default.** Zero on every schedule, so every child starts with none and a draw returns the whole cost; nothing in the workspace draws it.
 
@@ -515,7 +516,8 @@ A pick that changes an execution result the sealed spec can reach then lands beh
 The switch follows the `legacy_journal_semantics` pattern: it keeps the result the spec was sealed with, its default is the picked behaviour, which is upstream's, and the consumer turns it on for each sealed spec, so a later spec can take the fix by leaving it off.
 A pick that cannot be put behind such a switch is not taken while a sealed spec runs on the fork, and its sweep records why.
 A pick that changes only results no sealed spec reaches, such as a fix to a feature the sealed specs leave off, lands without a switch, and its pull request says why no sealed spec reaches it.
-Whether a pick moves a sealed spec's results is settled by the consumer's outcome check on that spec, run against the pick, and the pull request records the result.
+A pick lands without a switch only with both of these in its pull request: a code-based argument that names the behaviour the pick changes and shows that no sealed spec reaches it, and targeted regression tests for that behaviour.
+The consumer's outcome check on each sealed spec, run against the pick, is supporting evidence and is recorded too; a fixture corpus shows only the cases it reaches, so passing it does not define the pick as safe.
 
 Every pick is applied verbatim: `git show -U0 <commit> | git patch-id --verbatim` gives the same id for the pick and its upstream commit unless the pick's message records a conflict resolution; the pull request body, which becomes the squash message, lists each pick's `(cherry picked from commit <sha>)` line and its conflicts.
 A pick that lands behind a switch keeps the verbatim pick as its own branch commit, followed by the switch in a commit of its own, and the squash message records the switch as the pick's conflict resolution.
