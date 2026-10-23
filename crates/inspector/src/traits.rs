@@ -5,8 +5,8 @@ use handler::{
     EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult,
 };
 use interpreter::{
-    interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, FrameInput,
-    InterpreterTypes,
+    interpreter::EthInterpreter, interpreter_action::FrameInit, interpreter_types::LoopControl,
+    CallOutcome, FrameInput, InterpreterTypes,
 };
 
 use crate::{
@@ -95,6 +95,10 @@ pub trait InspectorEvmTr:
     }
 
     /// Initializes the frame for the given frame input. Frame is pushed to the frame stack.
+    ///
+    /// A new frame is handed to [`Inspector::initialize_interp`] unless its next action is
+    /// already set ([`EvmTr::frame_init`] set it): its first run returns that action before any
+    /// instruction, and the inspector may not replace it.
     #[inline]
     fn inspect_frame_init(
         &mut self,
@@ -137,14 +141,18 @@ pub trait InspectorEvmTr:
         }
         if let Some(frame) = frame.eth_frame() {
             let interp = &mut frame.interpreter;
-            inspector.initialize_interp(interp, ctx);
+            if interp.bytecode.is_not_end() {
+                inspector.initialize_interp(interp, ctx);
+            }
         };
         Ok(ItemOrResult::Item(frame))
     }
 
     /// Run the frame from the top of the stack. Returns the frame init or result.
     ///
-    /// If frame has returned result it would mark it as finished.
+    /// If frame has returned result it would hand it to [`EvmTr::frame_run_result`], then to the
+    /// inspector's `frame_end`, and mark the frame as finished. A frame without an `EthFrame` is
+    /// run by [`EvmTr::frame_run`], and its result handed to [`EvmTr::frame_run_result`] only.
     #[inline]
     fn inspect_frame_run(
         &mut self,
@@ -152,7 +160,11 @@ pub trait InspectorEvmTr:
         let (ctx, inspector, frame, instructions) = self.ctx_inspector_frame_instructions();
 
         let Some(frame) = frame.eth_frame() else {
-            return self.frame_run();
+            let mut result = self.frame_run()?;
+            if let ItemOrResult::Result(frame_result) = &mut result {
+                self.frame_run_result(frame_result)?;
+            }
+            return Ok(result);
         };
 
         let next_action = inspect_instructions(
@@ -165,6 +177,7 @@ pub trait InspectorEvmTr:
         let mut result = frame.process_next_action(ctx, next_action);
 
         if let Ok(ItemOrResult::Result(frame_result)) = &mut result {
+            self.frame_run_result(frame_result)?;
             let (ctx, inspector, frame) = self.ctx_inspector_frame();
             // TODO When all_mut fn is added we can fetch inspector at the top of the function.s
             if let Some(frame) = frame.eth_frame() {

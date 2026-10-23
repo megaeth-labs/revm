@@ -1,7 +1,11 @@
 //! Host interface for external blockchain state access.
 
+mod instruction_hooks;
+
+pub use instruction_hooks::{CompletedWrite, FrameStart, FrameStartKind, WriteVerdict};
+
 use crate::{
-    cfg::{GasId, GasParams, StateGasCharge, StateGasSite},
+    cfg::{gas::GasTracker, GasId, GasParams, StateGasCharge, StateGasSite},
     context::{SStoreResult, SelfDestructResult, StateLoad},
     journaled_state::{AccountInfoLoad, AccountLoad},
 };
@@ -92,6 +96,51 @@ pub trait Host {
     fn state_gas_charge(&mut self, charge: StateGasCharge) -> Option<u64> {
         self.state_gas_price(charge.id, charge.site)
             .map(|unit_price| charge.total(unit_price))
+    }
+
+    /* Instruction hooks */
+
+    /// Called by `SSTORE`, `LOG0`–`LOG4` and `SELFDESTRUCT` once `write` is in the journal and
+    /// every charge the instruction makes has been made, so only when the instruction completes.
+    /// `gas` is the running frame's.
+    ///
+    /// The hook may debit and credit `gas`, and the instruction uses it as the hook left it,
+    /// charging nothing after the hook; a charge the hook makes that fails records as any failed
+    /// charge does ([`GasTracker::failed_charge_remaining`]), whatever the verdict.
+    /// [`WriteVerdict::Continue`] ends the instruction as it would have ended.
+    /// [`WriteVerdict::OutOfGas`] fails it as a failed charge does: the frame halts out of gas,
+    /// and the halt records the regular gas the hook left unless a failed charge already did.
+    /// [`WriteVerdict::Revert`] ends the frame as a `Revert` with the verdict's output, on its gas
+    /// as the hook left it; a `SELFDESTRUCT` so reverted does not self-destruct.
+    ///
+    /// The default continues and touches nothing.
+    #[inline]
+    fn write_completed(&mut self, write: CompletedWrite<'_>, gas: &mut GasTracker) -> WriteVerdict {
+        let _ = (write, gas);
+        WriteVerdict::Continue
+    }
+
+    /// Called by `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2` once
+    /// every charge the instruction makes has been made and the forward
+    /// ([`FrameStart::forward`]) has been taken from `gas`, the running frame's, and before the
+    /// frame's input is built.
+    ///
+    /// The hook may debit and credit `gas`, and the instruction uses it as the hook left it,
+    /// charging nothing after the hook: the frame's input copies its reservoir from `gas`. A
+    /// charge the hook makes that fails records as any failed charge does
+    /// ([`GasTracker::failed_charge_remaining`]), whatever the answer. The part of its charge
+    /// that the frame's failure gives back, the hook declares on `start`
+    /// ([`FrameStart::charge`]). `true` goes on to start the frame, which the handler may still
+    /// refuse or answer without running it, and the frame's input carries the declared charge.
+    /// `false` fails the instruction out of gas and starts no frame: the forward stays taken
+    /// unless the hook gave it back, the declared charge goes with the start, and the halt
+    /// records the regular gas the hook left unless a failed charge already did.
+    ///
+    /// The default returns `true` and touches nothing.
+    #[inline]
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
+        let _ = (start, gas);
+        true
     }
 
     /* Database */

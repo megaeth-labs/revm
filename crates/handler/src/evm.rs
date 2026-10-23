@@ -117,6 +117,40 @@ pub trait EvmTr {
         &mut self,
     ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>>;
 
+    /// Receives the result of the frame on top of the stack as it leaves the frame's own run,
+    /// before anything else sees it. What it leaves in `result` is what the inspector and the
+    /// caller see.
+    ///
+    /// The handler loops call it once for each frame that ran and returns, after the frame's
+    /// last action was processed, while the frame is still on top of the stack:
+    /// `Handler::run_exec_loop` when [`frame_run`](EvmTr::frame_run) returns a result, and the
+    /// provided inspected run (`InspectorEvmTr::inspect_frame_run`) before the inspector's
+    /// `call_end`, `create_end` and `frame_end`. On both paths it runs before
+    /// [`frame_return_result`](EvmTr::frame_return_result).
+    ///
+    /// Whether the frame is marked finished differs by path and frame type, so an implementation
+    /// does not rely on the mark: `frame_run` marks it before the plain loop calls this, and the
+    /// inspected run marks a frame with an `EthFrame` after the inspector's end callbacks.
+    ///
+    /// The calls are on the EVM the loops run, so an EVM type that delegates `frame_run` to an
+    /// inner EVM still has its own method called. An override of `run_exec_loop` or of
+    /// `inspect_frame_run` calls it at the same point itself; one that delegates
+    /// `inspect_frame_run` to an inner EVM reaches the inner EVM's method instead.
+    ///
+    /// A result given without a run does not reach it: [`frame_init`](EvmTr::frame_init)
+    /// returns those (a start the handler refuses, a precompile's answer, an inspector's answer),
+    /// so `frame_init`, or the inspector, has them first.
+    ///
+    /// The default does nothing.
+    #[inline]
+    fn frame_run_result(
+        &mut self,
+        result: &mut <Self::Frame as FrameTr>::FrameResult,
+    ) -> Result<(), ContextDbError<Self::Context>> {
+        let _ = result;
+        Ok(())
+    }
+
     /// Returns the result of the frame to the caller. Frame is popped from the frame stack.
     /// Consumes the frame result or returns it if there is more frames to run.
     fn frame_return_result(

@@ -1,4 +1,4 @@
-use crate::{Gas, InstructionResult, InterpreterResult};
+use crate::{Gas, InstructionResult, InterpreterResult, PoolAmounts, StartCharge};
 use core::ops::Range;
 use primitives::{Address, Bytes, Log};
 use std::vec::Vec;
@@ -36,9 +36,18 @@ pub struct CallOutcome {
     /// was taken even when the price varies per account. Meaningless while
     /// `charged_new_account_state_gas` is `false`.
     ///
-    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_state_gas_address: Address,
+    /// Copied from `CallInputs::charged_start`: what the frame-start hook charged the caller for
+    /// this call and the call's failure gives back, so the parent can refund it when the call
+    /// does not succeed.
+    ///
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as no charge.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub charged_start: StartCharge,
 }
 
 impl CallOutcome {
@@ -58,6 +67,7 @@ impl CallOutcome {
             precompile_call_logs: Vec::new(),
             charged_new_account_state_gas: false,
             charged_state_gas_address: Address::ZERO,
+            charged_start: StartCharge::new(0, PoolAmounts::ZERO),
         }
     }
 

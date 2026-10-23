@@ -3,9 +3,18 @@
 use crate::{cfg::gas_params, cfg::GasParams, Transaction};
 use primitives::hardfork::SpecId;
 
+#[cfg(feature = "serde")]
+mod encoding;
 mod failed_charge;
+mod forward;
+mod history_allowance;
+mod pools;
+mod start_charge;
 mod withheld;
 
+pub use forward::ChildShares;
+pub use pools::{PoolAmounts, PoolId};
+pub use start_charge::StartCharge;
 pub use withheld::WithheldCrossing;
 
 /// Tracker for gas during execution.
@@ -47,6 +56,17 @@ pub use withheld::WithheldCrossing;
 /// spendable part, so a consumer that caps a creating frame must not release before
 /// `return_create`, or those charges escape the cap.
 ///
+/// Beside the gas, the tracker carries figures of the fork that are inert until a consumer uses
+/// them: [`PoolId::COUNT`] resource pools ([`pool_remaining`](Self::pool_remaining), unlimited by
+/// default, each forwarded to a child frame by its own share and settled with its gas) and the
+/// history allowance ([`history_allowance`](Self::history_allowance), zero by default).
+///
+/// A child frame starts with a share of its caller's reservoir and pools, which the caller's
+/// tracker gives up while the child runs ([`forward_to_child`](Self::forward_to_child)); the
+/// child's return adds what it left to what the caller kept
+/// ([`absorb_returned_reservoir`](Self::absorb_returned_reservoir)). Every schedule defined here
+/// forwards the whole reservoir and every whole pool.
+///
 /// The net counters (`state_gas_spent`, `history_gas_spent`) are `i64`, while charges and refills
 /// take `u64` amounts and convert them with saturation. The tracker assumes that the transaction
 /// gas limit, and so any single charge or refill and the state plus history net a rollback adds
@@ -55,8 +75,27 @@ pub use withheld::WithheldCrossing;
 /// checks it. Above it, a rollback no longer restores the reservoir exactly and can burn or mint
 /// gas at the boundary. Reaching it takes a transaction gas limit above `i64::MAX`
 /// (about 9.2 × 10^18).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+///
+/// Each pool's net ([`pool_spent`](Self::pool_spent)) is an `i64` too, and assumes the same bound
+/// on its amounts: every draw and refill within `i64::MAX`, and the net with its children's merged
+/// in within `±i64::MAX`. A debug build asserts it where a net moves.
+///
+/// Encoded, the tracker has a field per figure, in the order below; the failed-charge record and
+/// the pools' crossings, which share a word in memory, are encoded as an optional number and a
+/// `bool` per pool in their own places.
+///
+/// A field the fork added decodes with its default from an encoding made before it existed only
+/// in a format that carries field names, such as JSON, as each field says. A format that encodes
+/// a struct by position, such as bincode, cannot read an encoding made before a field was added,
+/// as with upstream's own field additions: it reads the old fields in their places and then
+/// looks for the new ones, so a tracker persisted in such a format must not cross an upgrade of
+/// this crate that adds a field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(from = "encoding::Encoded", into = "encoding::Encoded")
+)]
 pub struct GasTracker {
     /// Gas Limit,
     gas_limit: u64,
@@ -105,8 +144,8 @@ pub struct GasTracker {
     /// `code_deposit_history_gas` a price, so a chain that does not price history bytes behaves
     /// exactly as it did before this field existed.
     ///
-    /// Encodings made before this field existed decode it as zero.
-    #[cfg_attr(feature = "serde", serde(default))]
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
     history_gas_spent: i64,
     /// Refunded gas. Used to refund the gas to the caller at the end of execution.
     refunded: i64,
@@ -117,8 +156,8 @@ pub struct GasTracker {
     /// but never by a regular charge. Zero unless a consumer withholds gas; while it is zero, every
     /// method behaves as it did before this field existed.
     ///
-    /// Encodings made before this field existed decode it as zero.
-    #[cfg_attr(feature = "serde", serde(default))]
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
     withheld: u64,
     /// The record of the last failed regular charge the withheld part would have paid
     /// ([`withheld_crossing`](Self::withheld_crossing)): the regular gas left before that
@@ -131,14 +170,51 @@ pub struct GasTracker {
     /// position, such as bincode, cannot tell the two records apart and reads the old one as the
     /// regular gas left, so a record persisted in such a format must not cross an upgrade of this
     /// crate.
-    #[cfg_attr(feature = "serde", serde(default))]
     withheld_crossing: Option<WithheldCrossing>,
     /// The regular gas left, spendable and withheld parts together, before the last charge that
-    /// failed ([`failed_charge_remaining`](Self::failed_charge_remaining)).
+    /// failed ([`failed_charge_remaining`](Self::failed_charge_remaining)), if
+    /// `failed_charge_recorded` is set, and zero otherwise.
     ///
-    /// Encodings made before this field existed decode it as `None`.
-    #[cfg_attr(feature = "serde", serde(default))]
-    failed_charge_remaining: Option<u64>,
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as `None`.
+    failed_charge_remaining: u64,
+    /// Whether `failed_charge_remaining` holds a record. A flag apart from the record rather than
+    /// an `Option`, whose tag would take a word of its own, so it shares a word with
+    /// `pool_crossings`.
+    failed_charge_recorded: bool,
+    /// The pools ([`pool_remaining`](Self::pool_remaining)): what this frame may still draw from
+    /// each. Unlimited unless a consumer sets a pool; nothing in this workspace draws one.
+    ///
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as every pool unlimited.
+    pools_remaining: [u64; PoolId::COUNT],
+    /// The frame's net draw of each pool ([`pool_spent`](Self::pool_spent)), signed as
+    /// `history_gas_spent` is, so a rollback can give it back and a merge can hand it on.
+    ///
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero for every pool.
+    pools_spent: [i64; PoolId::COUNT],
+    /// Whether a draw failed that a pool could not pay ([`pool_crossing`](Self::pool_crossing)),
+    /// a bit per pool, in the word `failed_charge_recorded` takes.
+    ///
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as no crossing on any pool.
+    pool_crossings: u8,
+    /// History gas this frame may spend before it charges its budget
+    /// ([`history_allowance`](Self::history_allowance)). Zero unless the schedule gives a value
+    /// call's child one.
+    ///
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
+    history_allowance: u64,
+}
+
+impl Default for GasTracker {
+    /// A tracker with no gas, as [`new`](Self::new) builds it, so the pools start unlimited.
+    #[inline]
+    fn default() -> Self {
+        Self::new(0, 0, 0)
+    }
 }
 
 impl GasTracker {
@@ -155,7 +231,12 @@ impl GasTracker {
             refunded: 0,
             withheld: 0,
             withheld_crossing: None,
-            failed_charge_remaining: None,
+            failed_charge_remaining: 0,
+            failed_charge_recorded: false,
+            pools_remaining: [u64::MAX; PoolId::COUNT],
+            pools_spent: [0; PoolId::COUNT],
+            pool_crossings: 0,
+            history_allowance: 0,
         }
     }
 
@@ -219,15 +300,22 @@ impl GasTracker {
         self.reservoir = val;
     }
 
-    /// Adopts a reservoir returned by a child frame and reconciles it with any
-    /// outstanding state gas spilled into regular gas.
+    /// Adds a reservoir returned by a child frame to the part of the reservoir this (parent)
+    /// frame kept, and reconciles it with any outstanding state gas spilled into regular gas.
+    ///
+    /// The child started with a share of this frame's reservoir, which this frame gave up for it
+    /// ([`forward_to_child`](Self::forward_to_child)); what it returns is that share, less what it
+    /// spent, plus what it refilled. Every schedule defined here forwards the whole reservoir, so
+    /// this frame kept nothing and its reservoir becomes the child's, as upstream's settlement,
+    /// which replaced the parent's reservoir with the child's, made it.
     ///
     /// A successful child can refill state gas charged by an ancestor (for
     /// example, by clearing a slot created by a sibling). Since the child does
     /// not inherit the ancestor's [`Self::state_gas_spilled`] counter, that
     /// refill initially lands in the child's reservoir. On return it must first
     /// restore the parent's regular gas in last-in-first-out order; only the
-    /// excess remains in the reservoir.
+    /// excess joins the reservoir. The spill is unwound from the returned reservoir only; the
+    /// part this frame kept stays in its reservoir.
     ///
     /// This only reconciles the funding pools. The child's signed
     /// `state_gas_spent` has already accounted for the refill and is merged
@@ -241,7 +329,7 @@ impl GasTracker {
         };
         self.remaining = self.remaining.saturating_add(to_remaining);
         self.state_gas_spilled -= to_remaining;
-        self.reservoir = reservoir - to_remaining;
+        self.reservoir = self.reservoir.saturating_add(reservoir - to_remaining);
     }
 
     /// Returns the state gas spent.
@@ -444,6 +532,10 @@ impl GasTracker {
     /// pays for bytes the failing frame no longer appends. The term is zero on any chain that
     /// never calls [`record_history_cost`](Self::record_history_cost).
     ///
+    /// The pools unwind here too: each pool's net draw ([`pool_spent`](Self::pool_spent)) goes
+    /// back to it, which then reads as the pool the frame started with, for the same reason, and
+    /// the term is zero on any chain that never calls [`record_pool`](Self::record_pool).
+    ///
     /// On revert the resulting `remaining` (including the refilled spill) is
     /// returned to the parent; on halt the caller additionally zeroes `remaining`
     /// so the spilled gas is consumed while the reservoir is left untouched.
@@ -461,6 +553,7 @@ impl GasTracker {
         self.state_gas_spent = 0;
         self.state_gas_spilled = 0;
         self.history_gas_spent = 0;
+        self.rollback_pools();
     }
 
     /// Refills the reservoir with state gas that is returned by 0→x→0 storage
@@ -659,13 +752,15 @@ mod tests {
     /// A child that refills history its parent charged goes below zero, and merging it into the
     /// parent on success nets the two out. The merge follows the handler's order: the signed figure
     /// is read, added and written back, as the state counter's is, and then the parent absorbs the
-    /// child's reservoir.
+    /// child's reservoir, which the parent forwarded whole.
     #[test]
     fn test_a_child_refill_of_a_parent_charge_nets_out_on_merge() {
         let mut parent = GasTracker::new(1_000, 1_000, 500);
         assert!(parent.record_history_cost(100));
 
-        let mut child = GasTracker::new(300, 300, parent.reservoir());
+        let share = parent.reservoir();
+        parent.forward_reservoir(share);
+        let mut child = GasTracker::new(300, 300, share);
         child.refill_history(100);
         assert_eq!(child.history_gas_spent(), -100);
 

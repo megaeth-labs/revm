@@ -1,9 +1,12 @@
-use context_interface::CreateScheme;
+use context_interface::{
+    cfg::gas::{PoolAmounts, StartCharge},
+    CreateScheme,
+};
 use core::cell::OnceCell;
 use primitives::{keccak256, Address, Bytes, B256, U256};
 
 /// Inputs for a create call
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CreateInputs {
     /// Caller address of the EVM
@@ -26,9 +29,27 @@ pub struct CreateInputs {
     /// EIP-8037: the account `charged_create_state_gas` was priced for, so the refund re-prices
     /// the same address. Meaningless while `charged_create_state_gas` is `false`.
     ///
-    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     charged_state_gas_address: Address,
+    /// What the frame-start hook charged the caller for this creation and the creation's failure
+    /// gives back: history gas and an amount of each pool, refunded to the caller by
+    /// `return_result` when the creation fails, as `charged_create_state_gas` is.
+    ///
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as no charge.
+    #[cfg_attr(feature = "serde", serde(default))]
+    charged_start: StartCharge,
+    /// The share of each of the caller's pools the creation receives: its pools when it starts.
+    /// Taken out of the caller's pools by the creation instruction, all but the schedule's
+    /// `pool_kept_percent` of each, and given back with what the creation left of them when it
+    /// returns.
+    ///
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as every pool unlimited.
+    #[cfg_attr(feature = "serde", serde(default = "unlimited_pools"))]
+    pool_shares: PoolAmounts,
     /// Cached created address. This is computed lazily and cached to avoid
     /// redundant keccak computations when inspectors call `created_address`.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -38,6 +59,27 @@ pub struct CreateInputs {
     /// init code is computed at most once.
     #[cfg_attr(feature = "serde", serde(skip))]
     cached_init_code_hash: OnceCell<B256>,
+}
+
+/// The shares an encoding that predates the pools decodes to in a format that carries field names.
+#[cfg(feature = "serde")]
+const fn unlimited_pools() -> PoolAmounts {
+    PoolAmounts::UNLIMITED
+}
+
+impl Default for CreateInputs {
+    /// Empty inputs, as [`new`](Self::new) builds them, so the shares start unlimited.
+    #[inline]
+    fn default() -> Self {
+        Self::new(
+            Address::ZERO,
+            CreateScheme::Create,
+            U256::ZERO,
+            Bytes::new(),
+            0,
+            0,
+        )
+    }
 }
 
 impl CreateInputs {
@@ -59,6 +101,8 @@ impl CreateInputs {
             reservoir,
             charged_create_state_gas: false,
             charged_state_gas_address: Address::ZERO,
+            charged_start: StartCharge::new(0, PoolAmounts::ZERO),
+            pool_shares: PoolAmounts::UNLIMITED,
             cached_address: OnceCell::new(),
             cached_init_code_hash: OnceCell::new(),
         }
@@ -75,6 +119,12 @@ impl CreateInputs {
                 .create2(salt.to_be_bytes(), self.init_code_hash()),
             CreateScheme::Custom { address } => address,
         })
+    }
+
+    /// The created address, if [`created_address`](Self::created_address) has computed it since
+    /// the caller, the scheme or the init code last changed.
+    pub(crate) fn cached_created_address(&self) -> Option<Address> {
+        self.cached_address.get().copied()
     }
 
     /// Returns the keccak256 hash of the init code.
@@ -172,5 +222,26 @@ impl CreateInputs {
     /// Sets the state gas reservoir (EIP-8037).
     pub const fn set_reservoir(&mut self, reservoir: u64) {
         self.reservoir = reservoir;
+    }
+
+    /// What the frame-start hook charged the caller for this creation and the creation's failure
+    /// gives back.
+    pub const fn charged_start(&self) -> StartCharge {
+        self.charged_start
+    }
+
+    /// Records what the frame-start hook charged the caller for this creation.
+    pub const fn set_charged_start(&mut self, charge: StartCharge) {
+        self.charged_start = charge;
+    }
+
+    /// The share of each of the caller's pools the creation receives: its pools when it starts.
+    pub const fn pool_shares(&self) -> PoolAmounts {
+        self.pool_shares
+    }
+
+    /// Sets the share of each of the caller's pools the creation receives.
+    pub const fn set_pool_shares(&mut self, shares: PoolAmounts) {
+        self.pool_shares = shares;
     }
 }

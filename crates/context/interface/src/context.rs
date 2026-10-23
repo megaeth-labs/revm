@@ -2,7 +2,8 @@
 //! Context trait and related types.
 pub use crate::journaled_state::StateLoad;
 use crate::{
-    result::FromStringError, Block, Cfg, Database, Host, JournalTr, LocalContextTr, Transaction,
+    cfg::gas::GasTracker, result::FromStringError, Block, Cfg, Database, Host, JournalTr,
+    LocalContextTr, Transaction,
 };
 use auto_impl::auto_impl;
 use primitives::{Bytes, StorageValue};
@@ -180,14 +181,21 @@ pub trait ContextTr: Host {
     /// [`gas_before`](CodeDeposit::gas_before) does not: an admitted deposit returns with the
     /// record, and a refused one, put back to `gas_before`, discards it.
     ///
+    /// `gas` is the creating frame's tracker, as [`gas_after`](CodeDeposit::gas_after) reads it
+    /// when the hook is called. The hook may debit and credit it, for instance draw the deployed
+    /// code from one of the frame's pools
+    /// ([`GasTracker::record_pool`](crate::cfg::gas::GasTracker::record_pool)); a charge it
+    /// makes that fails records as any failed charge does.
+    ///
     /// - `Ok(())` admits it: the checkpoint is committed and the code is written, as without this
-    ///   hook.
+    ///   hook, and the frame returns with `gas` as the hook left it.
     /// - `Err(output)` refuses it: the checkpoint is reverted, so no state change of the creation
     ///   is kept and no code is written; the frame's gas is put back to
-    ///   [`gas_before`](CodeDeposit::gas_before), so none of the deposit's charges is paid; and the
-    ///   creation ends as a `Revert` with `output` as its revert data. From there it settles as a
-    ///   creation whose init code reverted: its caller gets its unspent gas back, a zero address
-    ///   and `output` as return data.
+    ///   [`gas_before`](CodeDeposit::gas_before), so none of the deposit's charges is paid and
+    ///   whatever the hook did to `gas` is undone, a crossing its failed draw recorded included;
+    ///   and the creation ends as a `Revert` with `output` as its revert data. From there it
+    ///   settles as a creation whose init code reverted: its caller gets its unspent gas back, a
+    ///   zero address and `output` as return data.
     ///
     /// The deposit's charges are made before it is offered, and with them the lookup of its state
     /// gas price through [`Host::state_gas_price`]. So that lookup is made whether or not the
@@ -197,10 +205,14 @@ pub trait ContextTr: Host {
     /// [`Host::state_gas_price`] lookup does, and refuses; the transaction then returns the
     /// error.
     ///
-    /// The default admits every deposit.
+    /// The default admits every deposit and leaves `gas` alone.
     #[inline]
-    fn admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes> {
-        let _ = deposit;
+    fn admit_code_deposit(
+        &mut self,
+        deposit: &CodeDeposit<'_>,
+        gas: &mut GasTracker,
+    ) -> Result<(), Bytes> {
+        let _ = (deposit, gas);
         Ok(())
     }
 }

@@ -16,7 +16,9 @@ use primitives::{Address, Bytes};
 ///
 /// The charges are read off the two trackers: [`gas_before`](Self::gas_before), the creating
 /// frame's gas before the first deposit charge, and [`gas_after`](Self::gas_after), the same gas
-/// with every deposit charge recorded. Nothing else touches the frame's gas between the two.
+/// with every deposit charge recorded. Nothing else touches the frame's gas between the two. Both
+/// are as `return_create` left them: the hook is lent the frame's gas itself beside the deposit,
+/// and what it does to that gas shows on neither.
 ///
 /// The fields are public to read. The type is `#[non_exhaustive]`, so it is built with
 /// [`new`](Self::new) outside this crate, and a field added later is not a breaking change.
@@ -32,7 +34,7 @@ pub struct CodeDeposit<'a> {
     /// gas back to this.
     pub gas_before: &'a GasTracker,
     /// The creating frame's gas with every deposit charge recorded: what the frame returns with
-    /// when the deposit is admitted.
+    /// when the deposit is admitted, unless the hook charges the gas it is lent.
     ///
     /// Before Homestead, when the frame could not pay the code-deposit cost, nothing was charged
     /// and [`code`](Self::code) is empty. If that failed charge was a crossing of the frame's

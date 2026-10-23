@@ -3,6 +3,7 @@
 pub use context_interface::cfg::gas::*;
 
 mod failed_charge;
+mod pools;
 mod withheld;
 
 /// Represents the state of gas during execution.

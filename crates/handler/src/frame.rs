@@ -18,7 +18,7 @@ use interpreter::{
     interpreter_types::ReturnData,
     CallInput, CallInputs, CallOutcome, CallValue, CreateInputs, CreateOutcome, CreateScheme,
     FrameInput, Gas, GasTracker, InputsImpl, InstructionResult, Interpreter, InterpreterAction,
-    InterpreterResult, InterpreterTypes, SharedMemory,
+    InterpreterResult, InterpreterTypes, SharedMemory, StartCharge,
 };
 use primitives::{
     constants::CALL_STACK_LIMIT,
@@ -159,8 +159,16 @@ impl EthFrame<EthInterpreter> {
         let reservoir_remaining_gas = inputs.reservoir;
         let charged_new_account_state_gas = inputs.charged_new_account_state_gas;
         let charged_state_gas_address = inputs.target_address;
-        let gas =
+        let charged_start = inputs.charged_start;
+        // The child's pools are the shares its caller forwarded, and its history allowance what
+        // the call instruction gave it; both ride on the frame's gas, as the reservoir does,
+        // whether the handler runs the frame or answers the start without one.
+        let pool_shares = inputs.pool_shares;
+        let history_allowance = inputs.history_allowance;
+        let mut gas =
             Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, reservoir_remaining_gas);
+        gas.tracker_mut().set_pools_remaining(pool_shares);
+        gas.set_history_allowance(history_allowance);
 
         let return_result = |instruction_result: InstructionResult| {
             Ok(ItemOrResult::Result(FrameResult::Call(CallOutcome {
@@ -174,6 +182,7 @@ impl EthFrame<EthInterpreter> {
                 precompile_call_logs: Vec::new(),
                 charged_new_account_state_gas,
                 charged_state_gas_address,
+                charged_start,
             })))
         };
 
@@ -209,7 +218,14 @@ impl EthFrame<EthInterpreter> {
         let is_static = inputs.is_static;
         let gas_limit = inputs.gas_limit;
 
-        if let Some(result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_string)? {
+        if let Some(mut result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_string)? {
+            // The provider built the answer's gas from the inputs' regular gas and reservoir. The
+            // answer takes the caller's shares as the pools it started with, less what the
+            // provider drew on them (a draw past a share is held to it, with the pool's
+            // crossing), and the allowance the input carries, so the caller's settlement gets
+            // the shares back from the answer as it would from a frame.
+            result.gas.tracker_mut().adopt_pool_shares(pool_shares);
+            result.gas.set_history_allowance(history_allowance);
             let mut logs = Vec::new();
             if result.result.is_ok() {
                 // Preserve the reservoir on the result gas so it can be reimbursed.
@@ -228,6 +244,7 @@ impl EthFrame<EthInterpreter> {
                 precompile_call_logs: logs,
                 charged_new_account_state_gas,
                 charged_state_gas_address,
+                charged_start,
             })));
         }
 
@@ -241,7 +258,8 @@ impl EthFrame<EthInterpreter> {
         }
 
         // Create interpreter and executes call and push new CallStackFrame.
-        this.get(EthFrame::invalid).clear(
+        let frame = this.get(EthFrame::invalid);
+        frame.clear(
             FrameData::Call(CallFrame {
                 return_memory_range: inputs.return_memory_offset.clone(),
             }),
@@ -256,6 +274,15 @@ impl EthFrame<EthInterpreter> {
             reservoir_remaining_gas,
             checkpoint,
         );
+        frame
+            .interpreter
+            .gas
+            .tracker_mut()
+            .set_pools_remaining(pool_shares);
+        frame
+            .interpreter
+            .gas
+            .set_history_allowance(history_allowance);
 
         Ok(ItemOrResult::Item(this.consume()))
     }
@@ -282,19 +309,27 @@ impl EthFrame<EthInterpreter> {
         // Recorded by whoever made the charge — the CREATE opcode or the EIP-2780 runtime phase
         // — because the created address is not derivable here on the early-fail paths.
         let charged_state_gas_address = inputs.charged_state_gas_address();
+        let charged_start = inputs.charged_start();
+        // The creation's pools are the shares its caller forwarded; they ride on the frame's
+        // gas, as the reservoir does, on an early failure too, so the caller's settlement gets
+        // them back.
+        let pool_shares = inputs.pool_shares();
         let return_error = |e| {
+            let mut gas = Gas::new_with_regular_gas_and_reservoir(
+                inputs.gas_limit(),
+                reservoir_remaining_gas,
+            );
+            gas.tracker_mut().set_pools_remaining(pool_shares);
             Ok(ItemOrResult::Result(FrameResult::Create(CreateOutcome {
                 result: InterpreterResult {
                     result: e,
-                    gas: Gas::new_with_regular_gas_and_reservoir(
-                        inputs.gas_limit(),
-                        reservoir_remaining_gas,
-                    ),
+                    gas,
                     output: Bytes::new(),
                 },
                 address: None,
                 charged_create_state_gas,
                 charged_state_gas_address,
+                charged_start,
             })))
         };
 
@@ -356,7 +391,8 @@ impl EthFrame<EthInterpreter> {
         };
         let gas_limit = inputs.gas_limit();
 
-        this.get(EthFrame::invalid).clear(
+        let frame = this.get(EthFrame::invalid);
+        frame.clear(
             FrameData::Create(CreateFrame { created_address }),
             FrameInput::Create(inputs),
             depth,
@@ -369,6 +405,11 @@ impl EthFrame<EthInterpreter> {
             reservoir_remaining_gas,
             checkpoint,
         );
+        frame
+            .interpreter
+            .gas
+            .tracker_mut()
+            .set_pools_remaining(pool_shares);
 
         Ok(ItemOrResult::Item(this.consume()))
     }
@@ -440,16 +481,21 @@ impl EthFrame<EthInterpreter> {
                 // Propagate EIP-8037 new-account state-gas flag from the frame
                 // input so the parent can refund the upfront charge if the call
                 // ends in revert/halt.
-                let (charged_new_account_state_gas, charged_state_gas_address) = match &self.input {
-                    FrameInput::Call(inputs) => {
-                        (inputs.charged_new_account_state_gas, inputs.target_address)
-                    }
-                    _ => (false, Address::ZERO),
-                };
+                // The start charge rides along for the same refund.
+                let (charged_new_account_state_gas, charged_state_gas_address, charged_start) =
+                    match &self.input {
+                        FrameInput::Call(inputs) => (
+                            inputs.charged_new_account_state_gas,
+                            inputs.target_address,
+                            inputs.charged_start,
+                        ),
+                        _ => (false, Address::ZERO, StartCharge::default()),
+                    };
                 let mut outcome =
                     CallOutcome::new(interpreter_result, frame.return_memory_range.clone());
                 outcome.charged_new_account_state_gas = charged_new_account_state_gas;
                 outcome.charged_state_gas_address = charged_state_gas_address;
+                outcome.charged_start = charged_start;
                 ItemOrResult::Result(FrameResult::Call(outcome))
             }
             FrameData::Create(frame) => {
@@ -466,15 +512,18 @@ impl EthFrame<EthInterpreter> {
                 // inputs carry the address the charge site recorded, which is the one the
                 // refund must use. An uncharged creation leaves it zero, so the field is
                 // meaningful only when `charged_create_state_gas` is set.
-                let (charged_create_state_gas, charged_state_gas_address) = match &self.input {
-                    FrameInput::Create(inputs) => (
-                        inputs.charged_create_state_gas(),
-                        inputs.charged_state_gas_address(),
-                    ),
-                    _ => (false, Address::ZERO),
-                };
+                let (charged_create_state_gas, charged_state_gas_address, charged_start) =
+                    match &self.input {
+                        FrameInput::Create(inputs) => (
+                            inputs.charged_create_state_gas(),
+                            inputs.charged_state_gas_address(),
+                            inputs.charged_start(),
+                        ),
+                        _ => (false, Address::ZERO, StartCharge::default()),
+                    };
                 create_outcome.charged_create_state_gas = charged_create_state_gas;
                 create_outcome.charged_state_gas_address = charged_state_gas_address;
+                create_outcome.charged_start = charged_start;
                 ItemOrResult::Result(FrameResult::Create(create_outcome))
             }
         };
@@ -511,6 +560,10 @@ impl EthFrame<EthInterpreter> {
             },
             None => None,
         };
+        // The start charge the frame-start hook charged this (parent) frame and declared on the
+        // start is refunded on the same condition, whole, by the same two refills a consumer's
+        // own take-back uses; it needs no price lookup, since the hook declared the amounts.
+        let refund_start_charge = result.refundable_start_charge();
 
         // Insert result to the top frame.
         match result {
@@ -546,7 +599,7 @@ impl EthFrame<EthInterpreter> {
                 }
 
                 // Settle the child's gas and merge it into the parent (returns
-                // unused regular gas, adopts the reservoir, and propagates state
+                // unused regular gas, adds back the reservoir, and propagates state
                 // gas / refunds on success).
                 handle_reservoir_remaining_gas(
                     ins_result,
@@ -577,7 +630,7 @@ impl EthFrame<EthInterpreter> {
                 let mut create_gas = *outcome.gas();
 
                 // Settle the child's gas and merge it into the parent (returns
-                // unused regular gas, adopts the reservoir, and propagates state
+                // unused regular gas, adds back the reservoir, and propagates state
                 // gas / refunds on success).
                 handle_reservoir_remaining_gas(
                     instruction_result,
@@ -597,9 +650,15 @@ impl EthFrame<EthInterpreter> {
         }
 
         // Refund the upfront state charge after the child's gas is settled
-        // (the settle overwrites the reservoir with the child's).
+        // (the settle adds the child's reservoir to what the parent kept).
         if let Some(charge) = refund_state_gas {
             self.interpreter.gas.refill_reservoir(charge);
+        }
+        if let Some(charge) = refund_start_charge {
+            self.interpreter
+                .gas
+                .tracker_mut()
+                .refill_start_charge(charge);
         }
 
         Ok(())
@@ -619,13 +678,23 @@ impl EthFrame<EthInterpreter> {
 /// Then the parent *merges* the settled child:
 /// - unused regular gas (`remaining`, including any spill returned on revert)
 ///   flows back to the parent on success or revert; a halt consumes it.
-/// - the reservoir, a shared state-gas pool the child inherited at call time, is
-///   always adopted from the child (restored to the inherited value on
-///   revert/halt). Any returned reservoir first unwinds the parent's outstanding
-///   spilled state gas in LIFO order.
+/// - the reservoir, the share of the parent's state-gas pool the child was given
+///   at call time, is always added back from the child to what the parent kept
+///   (restored to the inherited value on revert/halt). Every schedule defined
+///   here forwards the whole reservoir, so the parent kept nothing and its
+///   reservoir becomes the child's. Any returned reservoir first unwinds the
+///   parent's outstanding spilled state gas in LIFO order.
 /// - net state gas, net history gas, the spilled portion, and the refund counter
 ///   persist only on success; on revert/halt the child's state changes roll back
 ///   and contribute nothing.
+/// - each pool settles as the reservoir does, not as regular gas: the child's
+///   rollback gives its draws back to its pools, so what it hands back is its
+///   remaining pool on success and the whole share it was given on revert *and on
+///   halt*, since a halted frame draws nothing; the parent, which kept what it
+///   did not forward, always absorbs it. The child's net draws merge into the
+///   parent's on success only, as the history net does, so a later rollback of
+///   the parent undoes the child's draws too. With no pool set, every figure here
+///   is the unlimited pool going out and coming back.
 #[inline]
 pub const fn handle_reservoir_remaining_gas(
     instruction_result: InstructionResult,
@@ -671,6 +740,7 @@ pub const fn handle_reservoir_remaining_gas(
         parent_gas.record_refund(child_gas.refunded());
     }
     parent_gas.absorb_returned_reservoir(child_gas.reservoir());
+    parent_gas.absorb_returned_pools(child_gas, instruction_result.is_ok());
 }
 
 /// Handles the result of a CREATE operation, including validation and state updates.
@@ -837,6 +907,7 @@ pub fn return_create<CTX: ContextTr>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use interpreter::PoolId;
 
     #[test]
     fn sibling_refill_restores_parent_regular_gas() {
@@ -871,5 +942,264 @@ mod tests {
         assert_eq!(parent.reservoir(), 0);
         assert_eq!(parent.state_gas_spent(), 0);
         assert_eq!(parent.state_gas_spilled(), 0);
+    }
+
+    /// A child with `share` of each of its caller's pools.
+    fn child_with_share(parent: &mut GasTracker, share: u64) -> GasTracker {
+        let mut child = GasTracker::new(500, 500, 0);
+        for pool in PoolId::ALL {
+            parent.forward_pool(pool, share);
+            child.set_pool_remaining(pool, share);
+        }
+        child
+    }
+
+    /// A tracker with every pool at 1,000.
+    fn pools_1000() -> GasTracker {
+        let mut tracker = GasTracker::new(1_000, 1_000, 0);
+        for pool in PoolId::ALL {
+            tracker.set_pool_remaining(pool, 1_000);
+        }
+        tracker
+    }
+
+    /// `(remaining, spent)` of every pool.
+    fn pools(tracker: &GasTracker) -> [(u64, i64); PoolId::COUNT] {
+        PoolId::ALL.map(|pool| (tracker.pool_remaining(pool), tracker.pool_spent(pool)))
+    }
+
+    /// A child that succeeds hands back what it left of each share and its net draws; one that
+    /// reverts or halts hands back the whole shares, its draws undone, and no net. The caller
+    /// kept what it did not forward either way, and each pool settles alone.
+    #[test]
+    fn test_the_pools_settle_like_the_reservoir_not_like_regular_gas() {
+        for result in [
+            InstructionResult::Stop,
+            InstructionResult::Revert,
+            InstructionResult::OutOfGas,
+        ] {
+            let mut parent = pools_1000();
+            for pool in PoolId::ALL {
+                assert!(parent.record_pool(pool, 100));
+            }
+            let mut child = child_with_share(&mut parent, 800);
+            assert_eq!(pools(&parent), [(100, 100); 3], "{result:?}: kept back");
+            let [first, second, third] = PoolId::ALL;
+            assert!(child.record_pool(first, 300));
+            assert!(child.record_pool(second, 1));
+            child.refill_pool(third, 10);
+
+            handle_reservoir_remaining_gas(result, &mut parent, &mut child);
+
+            if result.is_ok() {
+                assert_eq!(pools(&parent), [(600, 400), (899, 101), (910, 90)]);
+                assert_eq!(pools(&child), [(500, 300), (799, 1), (810, -10)]);
+            } else {
+                assert_eq!(pools(&parent), [(900, 100); 3], "{result:?}");
+                assert_eq!(
+                    pools(&child),
+                    [(800, 0); 3],
+                    "{result:?}: a failed child's pools read as its shares"
+                );
+            }
+        }
+    }
+
+    /// A caller's rollback undoes the draws of a child that succeeded inside it: B's revert
+    /// gives A back the whole share it forwarded, C's draws included.
+    #[test]
+    fn test_a_callers_rollback_undoes_a_successful_childs_draws() {
+        let mut a = pools_1000();
+        let mut b = child_with_share(&mut a, 1_000);
+        for pool in PoolId::ALL {
+            assert!(b.record_pool(pool, 100));
+        }
+        let mut c = child_with_share(&mut b, 900);
+        for pool in PoolId::ALL {
+            assert!(c.record_pool(pool, 100));
+        }
+
+        handle_reservoir_remaining_gas(InstructionResult::Stop, &mut b, &mut c);
+        assert_eq!(pools(&b), [(800, 200); 3]);
+
+        handle_reservoir_remaining_gas(InstructionResult::Revert, &mut a, &mut b);
+        assert_eq!(pools(&a), [(1_000, 0); 3]);
+    }
+
+    /// A child that gives back a draw its caller made goes below zero, and merging it into the
+    /// caller on success nets the two out, as a history refill does; on failure the refill is
+    /// undone with the rest.
+    #[test]
+    fn test_a_childs_refill_of_a_callers_draw_nets_out_on_success_only() {
+        for result in [InstructionResult::Stop, InstructionResult::Revert] {
+            let mut parent = pools_1000();
+            for pool in PoolId::ALL {
+                assert!(parent.record_pool(pool, 100));
+            }
+            let mut child = child_with_share(&mut parent, 900);
+            for pool in PoolId::ALL {
+                child.refill_pool(pool, 100);
+            }
+            assert_eq!(pools(&child), [(1_000, -100); 3]);
+
+            handle_reservoir_remaining_gas(result, &mut parent, &mut child);
+
+            let settled = if result.is_ok() {
+                (1_000, 0)
+            } else {
+                (900, 100)
+            };
+            assert_eq!(pools(&parent), [settled; 3], "{result:?}");
+        }
+    }
+
+    /// With no pool set, the unlimited pools go out whole and come back, less only what was
+    /// drawn and kept, and the regular-gas settlement is what it was.
+    #[test]
+    fn test_unset_pools_settle_to_the_same_regular_gas() {
+        for result in [InstructionResult::Stop, InstructionResult::OutOfGas] {
+            let mut parent = GasTracker::new(1_000, 1_000, 0);
+            assert!(parent.record_regular_cost(500));
+            let mut with_pools = parent;
+            let mut child = child_with_share(&mut with_pools, u64::MAX);
+            assert!(child.record_regular_cost(200));
+            let mut plain_child = child;
+
+            handle_reservoir_remaining_gas(result, &mut with_pools, &mut child);
+            handle_reservoir_remaining_gas(result, &mut parent, &mut plain_child);
+
+            assert_eq!(with_pools.remaining(), parent.remaining(), "{result:?}");
+            assert_eq!(pools(&with_pools), [(u64::MAX, 0); 3], "{result:?}");
+        }
+    }
+
+    /// A caller that forwarded a share of its reservoir and kept the rest gets back, on top of
+    /// what it kept: what the child left when it succeeded, the whole share when it reverted or
+    /// halted, the child's state charges undone. Regular gas settles as it did.
+    #[test]
+    fn test_the_reservoir_a_child_returns_joins_what_its_caller_kept() {
+        for result in [
+            InstructionResult::Stop,
+            InstructionResult::Revert,
+            InstructionResult::OutOfGas,
+        ] {
+            let mut parent = GasTracker::new(10_000, 10_000, 1_000);
+            assert!(parent.record_regular_cost(5_000));
+            // 98% of 1,000 forwarded, 20 kept.
+            parent.forward_reservoir(980);
+            let mut child = GasTracker::new(5_000, 5_000, 980);
+            assert!(child.record_state_cost(300));
+
+            handle_reservoir_remaining_gas(result, &mut parent, &mut child);
+
+            let (reservoir, state) = if result.is_ok() {
+                (700, 300)
+            } else {
+                (1_000, 0)
+            };
+            assert_eq!(parent.reservoir(), reservoir, "{result:?}");
+            assert_eq!(parent.state_gas_spent(), state, "{result:?}");
+            let regular = if result.is_ok_or_revert() {
+                10_000
+            } else {
+                5_000
+            };
+            assert_eq!(parent.remaining(), regular, "{result:?}");
+        }
+    }
+
+    /// A child that spends more than its share spills onto its regular gas, as a frame with no
+    /// reservoir left does, though its caller kept part of the reservoir: the share is the
+    /// child's whole reservoir. A caller's later rollback restores the reservoir it started with
+    /// and gives the spill back to regular gas.
+    #[test]
+    fn test_a_child_spills_past_its_share_and_a_rollback_restores_the_callers_reservoir() {
+        let mut a = GasTracker::new(10_000, 10_000, 1_000);
+        assert!(a.record_regular_cost(10_000));
+        a.forward_reservoir(1_000);
+        let mut b = GasTracker::new(10_000, 10_000, 1_000);
+        assert!(b.record_regular_cost(5_000));
+        b.forward_reservoir(980);
+        let mut c = GasTracker::new(5_000, 5_000, 980);
+        assert!(c.record_state_cost(1_000));
+        assert_eq!(
+            (c.reservoir(), c.remaining(), c.state_gas_spilled()),
+            (0, 4_980, 20)
+        );
+
+        handle_reservoir_remaining_gas(InstructionResult::Stop, &mut b, &mut c);
+        assert_eq!(b.reservoir(), 20, "the part B kept is still there");
+        assert_eq!(b.state_gas_spilled(), 20);
+        assert_eq!(b.remaining(), 9_980);
+
+        handle_reservoir_remaining_gas(InstructionResult::Revert, &mut a, &mut b);
+        assert_eq!(a.reservoir(), 1_000);
+        assert_eq!(a.remaining(), 10_000);
+        assert_eq!(a.state_gas_spent(), 0);
+    }
+
+    /// A caller that kept part of its reservoir holds it beside the spill of a child that spent
+    /// past its share, which a whole forward cannot produce. A refill in the caller then keeps
+    /// EIP-8037's order, regular gas up to the outstanding spill first and the reservoir after,
+    /// whichever paid the charge it undoes: a charge the caller paid from its kept reservoir comes
+    /// back as regular gas. The sum of the two is conserved, and a rollback restores the reservoir
+    /// the caller started with. With the whole reservoir forwarded, the caller's charge spills
+    /// too, and its refill returns where the charge was taken.
+    #[test]
+    fn test_a_refill_beside_a_kept_reservoir_and_a_childs_spill_credits_regular_gas_first() {
+        // (reservoir, remaining, spilled, state gas spent) of a tracker.
+        let figures = |gas: &GasTracker| {
+            (
+                gas.reservoir(),
+                gas.remaining(),
+                gas.state_gas_spilled(),
+                gas.state_gas_spent(),
+            )
+        };
+        for (forwarded, after_child, after_charge, after_refill) in [
+            // 98%: B keeps 20 and C spills 20; B's charge comes from its reservoir, the refill
+            // goes to its regular gas.
+            (
+                980,
+                (20, 9_980, 20, 1_000),
+                (10, 9_980, 20, 1_010),
+                (10, 9_990, 10, 1_000),
+            ),
+            // The whole reservoir: B keeps none and C spills 0; B's charge spills, and the refill
+            // undoes that spill.
+            (
+                1_000,
+                (0, 10_000, 0, 1_000),
+                (0, 9_990, 10, 1_010),
+                (0, 10_000, 0, 1_000),
+            ),
+        ] {
+            // B holds 1,000 of reservoir and forwards 5,000 of regular gas; C charges 1,000.
+            let mut b = GasTracker::new(10_000, 10_000, 1_000);
+            assert!(b.record_regular_cost(5_000));
+            b.forward_reservoir(forwarded);
+            let mut c = GasTracker::new(5_000, 5_000, forwarded);
+            assert!(c.record_state_cost(1_000));
+            handle_reservoir_remaining_gas(InstructionResult::Stop, &mut b, &mut c);
+            assert_eq!(figures(&b), after_child, "{forwarded}: after C");
+
+            // B writes a slot, 10 of state gas, and puts it back, a refill of 10.
+            assert!(b.record_state_cost(10));
+            assert_eq!(figures(&b), after_charge, "{forwarded}: after B's charge");
+            b.refill_reservoir(10);
+            assert_eq!(figures(&b), after_refill, "{forwarded}: after B's refill");
+            assert_eq!(
+                b.reservoir() + b.remaining(),
+                10_000,
+                "{forwarded}: the sum is conserved"
+            );
+
+            b.rollback_state_gas();
+            assert_eq!(
+                (b.reservoir(), b.remaining()),
+                (1_000, 10_000),
+                "{forwarded}: B's rollback restores what it started with"
+            );
+        }
     }
 }
