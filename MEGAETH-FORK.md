@@ -471,6 +471,7 @@ An id the fork once used for an entry with another default is left unused rather
 ## Baseline behaviour the fork changes
 
 Picked upstream fixes change revm 40.0.3's results where 40.0.3 was wrong; that is why they are taken (see Tracking upstream), and each pick's pull request says what it changes.
+Once a consumer spec that runs on the fork is sealed, a pick that changes a result it can reach lands behind a switch that keeps the sealed result, or is not taken (see Tracking upstream).
 A pick that changes what the journal records lands with a switch back to the base line (see revm 40.0.3's journal semantics).
 One pick changes what the top-level entry points do with the journal, and has no switch.
 The pending-action check changes what an inspector that sets an action before a frame runs sees and gets, and has no switch either:
@@ -490,6 +491,7 @@ The pending-action check changes what an inspector that sets an action before a 
 The fork keeps its crate versions at the revm version the MegaETH node pins, today `40.0.3`; a newer upstream tag would bump every crate's major, so the fork takes single upstream commits until the node moves.
 
 Taken: changes to the EIP-8037 / EIP-2780 gas core whatever their prefix; fixes that change execution results (gas, state, logs, halt reasons, precompile output, bytecode analysis, serialized formats); correctness and safety fixes relevant to the consumers, including undefined behaviour, missing out-of-gas checks, panics, and dependency or build failures; performance improvements to execution, precompiles and the database; each with the test-fixture bump that comes with it.
+A change that moves an execution result is taken this way only until the consumer spec that runs on the fork is sealed; after that it follows the sealed-spec rule below, whatever its kind.
 Not taken: tooling-only changes, feature-gated additions the consumers do not use, and change/revert pairs, after checking that no taken commit depends on them.
 Picks are batched by crate or subsystem, one pull request per batch, so one reviewer can read a whole batch.
 The fork has no benchmark gate: a performance pick must leave execution results unchanged under the crate tests and the EEST run, and cite upstream's benchmark numbers in the pull request body.
@@ -497,7 +499,16 @@ A pick that touches a precompile is tested under mutually exclusive feature sets
 A pick that breaks the public API needs `api:exception`, the deviating items listed in the pull request body, and a check of every consumer that uses them.
 An upstream change that upstream later reverted but the fork still needs lands as a fork-owned opt-in switch (`mega:hook`) whose default keeps upstream's behaviour.
 A picked upstream fix that changes journal semantics lands with an opt-in switch back to the base line's behaviour when a consumer reproduces the base line exactly; the switch defaults to the picked behaviour, the consumer that needs the base line sets it, and nothing else reads it. `CfgEnv::legacy_journal_semantics` (the cold-slot re-baseline and the `CodeChange` revert of revm 40.0.3) is the first.
+
+**Sealed specs.** Once a consumer spec that runs on the fork is sealed, the fork must not move that spec's results.
+A pick that changes an execution result the sealed spec can reach then lands behind a switch, or is not taken.
+The switch follows the `legacy_journal_semantics` pattern: it keeps the result the spec was sealed with, its default is the picked behaviour, which is upstream's, and the consumer turns it on for each sealed spec, so a later spec can take the fix by leaving it off.
+A pick that cannot be put behind such a switch is not taken while a sealed spec runs on the fork, and its sweep records why.
+A pick that changes only results no sealed spec reaches, such as a fix to a feature the sealed specs leave off, lands without a switch, and its pull request says why no sealed spec reaches it.
+Whether a pick moves a sealed spec's results is settled by the consumer's outcome check on that spec, run against the pick, and the pull request records the result.
+
 Every pick is applied verbatim: `git show -U0 <commit> | git patch-id --verbatim` gives the same id for the pick and its upstream commit unless the pick's message records a conflict resolution; the pull request body, which becomes the squash message, lists each pick's `(cherry picked from commit <sha>)` line and its conflicts.
+A pick that lands behind a switch keeps the verbatim pick as its own branch commit, followed by the switch in a commit of its own, and the squash message records the switch as the pick's conflict resolution.
 
 For every upstream tag, a maintainer sweeps `<last swept tag>..<tag>` across the whole repository, fixtures, manifests and lockfile included, and records each commit as taken, candidate (with an owner and a disposition) or excluded (with the reason), with both tag SHAs, in the issue titled `Sweep <tag>` that the nightly workflow opens when the tag appears.
 The pull request that carries the picks links that issue; a sweep that takes nothing is closed with its classification in the issue.
