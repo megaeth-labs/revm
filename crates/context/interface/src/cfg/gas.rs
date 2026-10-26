@@ -213,8 +213,9 @@ pub struct GasTracker {
     /// In a format that carries field names, such as JSON, encodings made before this field existed
     /// decode it as zero.
     history_allowance: u64,
-    /// The start revm marked this tracker for ([`start_mark`](Self::start_mark)), in the padding
-    /// after `pool_crossings`. No part of the tracker's value, and not encoded.
+    /// The start revm marked this tracker for ([`start_mark`](Self::start_mark)). It fits padding
+    /// the tracker already had, so the tracker's size is unchanged. No part of the tracker's value,
+    /// and not encoded.
     start_mark: StartMark,
 }
 

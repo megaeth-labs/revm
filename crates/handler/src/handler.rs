@@ -161,7 +161,7 @@ pub trait Handler {
     /// Returns any errors without catching them or calling [`Handler::catch_error`].
     /// A caller that drops an error makes `catch_error`'s cleanup before it reuses
     /// the EVM, the frame stack's included: see the start lifecycle's "Reuse after
-    /// an error" ([`lifecycle`](crate::lifecycle)).
+    /// an error" ([`lifecycle`]).
     #[inline]
     fn run_without_catch_error(
         &mut self,

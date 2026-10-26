@@ -72,7 +72,7 @@ fn fatal<E>(error: StartLifecycleError) -> ContextError<E> {
 
 /// What a settlement reports of `result`'s status.
 #[inline]
-pub const fn settle_status(result: &FrameResult) -> SettleStatus {
+const fn settle_status(result: &FrameResult) -> SettleStatus {
     let result = result.instruction_result();
     if result.is_ok() {
         SettleStatus::Ok

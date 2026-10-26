@@ -106,7 +106,7 @@ impl core::error::Error for StartLifecycleError {}
 #[derive(Clone, Debug, Default)]
 pub(super) struct StartLifecycle {
     /// The last identity allocated in the transaction, 0 before the first.
-    next: u32,
+    last: u32,
     /// Whether a lifecycle is under way: its first start opened, and it has not ended.
     active: bool,
     /// The transaction's start.
@@ -133,7 +133,7 @@ impl StartLifecycle {
 
     #[inline]
     fn reset(&mut self) {
-        self.next = 0;
+        self.last = 0;
         self.active = false;
         self.root = None;
         self.children.clear();
@@ -157,7 +157,7 @@ impl<T> FrameStack<T> {
     pub fn open_start(&mut self, depth: usize) -> Result<FrameSplit, StartLifecycleError> {
         let record = &mut self.lifecycle;
         let id = record
-            .next
+            .last
             .checked_add(1)
             .ok_or(StartLifecycleError::Exhausted)?;
         let parent = match self.index {
@@ -186,7 +186,7 @@ impl<T> FrameStack<T> {
             id,
             ..Default::default()
         });
-        record.next = id;
+        record.last = id;
         record.active = true;
         Ok(FrameSplit { id, parent, depth })
     }
@@ -444,7 +444,7 @@ mod tests {
     fn test_an_exhausted_sequence_opens_nothing() {
         let mut stack = stack(1);
         open_nested(&mut stack, 0);
-        stack.lifecycle.next = u32::MAX - 1;
+        stack.lifecycle.last = u32::MAX - 1;
         stack.index = Some(0);
         assert_eq!(
             stack.open_start(1).map(|s| s.id),

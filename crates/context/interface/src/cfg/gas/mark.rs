@@ -2,10 +2,10 @@
 //! just after, to tell whether the callbacks put another value in the result's place: the
 //! [`StartMark`] on the result's gas tracker and the [`OutcomeMark`] on its outcome.
 //!
-//! A mark takes no part in the value it rides on: marks always compare equal, hash to nothing,
-//! print nothing and are not serialized (a decoded value carries none). So a marked tracker or
-//! outcome compares, hashes, prints and encodes as the same value unmarked. Each fits padding of
-//! the type that carries it, so neither grows.
+//! A mark takes no part in the value it rides on: marks always compare equal and hash to nothing,
+//! and the tracker and the outcomes leave them out of their debug output and their encoding (a
+//! decoded value carries none). So a marked tracker or outcome compares, hashes, prints and encodes
+//! as the same value unmarked. Each fits padding of the type that carries it, so neither grows.
 
 /// The mark of a start on a gas tracker: the start's identity, or none.
 ///
@@ -40,7 +40,8 @@ impl StartMark {
 /// an outcome that does not carry the mark after them is one the callbacks put in its place
 /// ([`FrameSettle::outcome_rebuilt`](crate::host::FrameSettle::outcome_rebuilt)), such as one a
 /// constructor built around the same result. A start's mark is never none, so a built outcome
-/// never carries it; two starts share a mark only when their identities are 65,535 apart.
+/// never carries it; two starts share a mark only when their identities are a multiple of 65,535
+/// apart.
 #[derive(Clone, Copy, Default)]
 pub struct OutcomeMark(u16);
 
@@ -61,7 +62,7 @@ impl OutcomeMark {
     }
 }
 
-macro_rules! transparent {
+macro_rules! transparent_mark {
     ($mark:ident) => {
         impl PartialEq for $mark {
             #[inline]
@@ -85,8 +86,8 @@ macro_rules! transparent {
     };
 }
 
-transparent!(StartMark);
-transparent!(OutcomeMark);
+transparent_mark!(StartMark);
+transparent_mark!(OutcomeMark);
 
 #[cfg(test)]
 mod tests {
