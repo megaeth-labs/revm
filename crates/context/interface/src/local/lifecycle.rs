@@ -105,17 +105,24 @@ impl core::error::Error for StartLifecycleError {}
 /// it is making.
 #[derive(Clone, Debug, Default)]
 pub(super) struct StartLifecycle {
-    /// The last identity allocated in the transaction, 0 before the first.
+    /// The last identity allocated in the transaction, 0 before the first. The first start opened
+    /// is always the transaction's, so a lifecycle is under way exactly when this is not 0.
     last: u32,
-    /// Whether a lifecycle is under way: its first start opened, and it has not ended.
-    active: bool,
+    /// How many of `children`'s slots hold an open start.
+    open_children: u32,
     /// The transaction's start.
     root: Option<PendingStart>,
-    /// The open start of the frame at each stack index.
+    /// The open start of the frame at each stack index. Its length grows with the frame stack's
+    /// capacity and never shrinks, so frames and transactions reuse the slots without resizing.
     children: Vec<Option<PendingStart>>,
 }
 
 impl StartLifecycle {
+    #[inline]
+    const fn active(&self) -> bool {
+        self.last != 0
+    }
+
     /// The slot the next start opens in, and the next settlement closes: the transaction's on an
     /// empty stack, else that of the frame on top, at `index`.
     #[inline]
@@ -127,16 +134,33 @@ impl StartLifecycle {
     }
 
     #[inline]
-    fn any_open(&self) -> bool {
-        self.root.is_some() || self.children.iter().any(Option::is_some)
+    const fn any_open(&self) -> bool {
+        self.root.is_some() || self.open_children != 0
     }
 
     #[inline]
     fn reset(&mut self) {
         self.last = 0;
-        self.active = false;
         self.root = None;
-        self.children.clear();
+        if self.open_children != 0 {
+            self.discard_children();
+        }
+    }
+
+    /// Empties the children's slots, which only a discarded lifecycle leaves open.
+    #[cold]
+    #[inline(never)]
+    fn discard_children(&mut self) {
+        self.children.fill(None);
+        self.open_children = 0;
+    }
+
+    /// Gives the record a slot for every frame the stack has room for, `len`: the first child
+    /// start, and the first after the frame stack grew.
+    #[cold]
+    #[inline(never)]
+    fn grow_children(&mut self, len: usize) {
+        self.children.resize(len, None);
     }
 }
 
@@ -155,13 +179,24 @@ impl<T> FrameStack<T> {
     /// [`StartLifecycleError::NoParent`] when the frame on top has no start of its own.
     #[inline]
     pub fn open_start(&mut self, depth: usize) -> Result<FrameSplit, StartLifecycleError> {
+        let capacity = self.stack.capacity();
         let record = &mut self.lifecycle;
         let id = record
             .last
             .checked_add(1)
             .ok_or(StartLifecycleError::Exhausted)?;
+        let start = Some(PendingStart {
+            id,
+            ..Default::default()
+        });
         let parent = match self.index {
-            None => None,
+            None => {
+                if record.root.is_some() {
+                    return Err(StartLifecycleError::Stale);
+                }
+                record.root = start;
+                None
+            }
             Some(i) => {
                 let parent = match i {
                     0 => record.root,
@@ -170,24 +205,19 @@ impl<T> FrameStack<T> {
                 let Some(parent) = parent else {
                     return Err(StartLifecycleError::NoParent);
                 };
-                if record.children.len() <= i {
-                    record.children.resize(i + 1, None);
+                if i >= record.children.len() {
+                    record.grow_children(capacity.max(i + 1));
                 }
+                let slot = &mut record.children[i];
+                if slot.is_some() {
+                    return Err(StartLifecycleError::Stale);
+                }
+                *slot = start;
+                record.open_children += 1;
                 Some(parent.id)
             }
         };
-        let slot = record
-            .slot(self.index)
-            .expect("the slot of the frame on top exists");
-        if slot.is_some() {
-            return Err(StartLifecycleError::Stale);
-        }
-        *slot = Some(PendingStart {
-            id,
-            ..Default::default()
-        });
         record.last = id;
-        record.active = true;
         Ok(FrameSplit { id, parent, depth })
     }
 
@@ -208,11 +238,18 @@ impl<T> FrameStack<T> {
         created: Option<bool>,
         held_reservoir: u64,
     ) -> Result<FrameSettle, StartLifecycleError> {
-        let start = self
-            .lifecycle
-            .slot(self.index)
-            .and_then(Option::take)
-            .ok_or(StartLifecycleError::NotOpen)?;
+        let record = &mut self.lifecycle;
+        let start = match self.index {
+            None => record.root.take(),
+            Some(i) => {
+                let start = record.children.get_mut(i).and_then(Option::take);
+                if start.is_some() {
+                    record.open_children -= 1;
+                }
+                start
+            }
+        }
+        .ok_or(StartLifecycleError::NotOpen)?;
         Ok(FrameSettle {
             id: start.id,
             depth,
@@ -250,12 +287,12 @@ impl<T> FrameStack<T> {
     /// boundary ended it.
     #[inline]
     pub const fn lifecycle_active(&self) -> bool {
-        self.lifecycle.active
+        self.lifecycle.active()
     }
 
     /// Whether every start opened in the transaction has settled.
     #[inline]
-    pub fn lifecycle_settled(&self) -> bool {
+    pub const fn lifecycle_settled(&self) -> bool {
         !self.lifecycle.any_open()
     }
 
@@ -273,7 +310,7 @@ impl<T> FrameStack<T> {
         if self.lifecycle.any_open() {
             return Err(StartLifecycleError::Unsettled);
         }
-        let end = self.lifecycle.active.then_some(LifecycleEnd::Settled);
+        let end = self.lifecycle.active().then_some(LifecycleEnd::Settled);
         self.lifecycle.reset();
         Ok(end)
     }
@@ -288,7 +325,7 @@ impl<T> FrameStack<T> {
     #[inline]
     #[must_use = "a lifecycle that was under way owes the consumer its end"]
     pub fn discard_lifecycle(&mut self) -> Option<LifecycleEnd> {
-        let end = self.lifecycle.active.then_some(LifecycleEnd::Discarded);
+        let end = self.lifecycle.active().then_some(LifecycleEnd::Discarded);
         self.lifecycle.reset();
         end
     }
@@ -502,6 +539,37 @@ mod tests {
         assert_eq!(stack.index(), Some(1), "the frame stack is clear's");
         stack.clear();
         assert_eq!(stack.open_start(0).map(|s| s.id), Ok(1));
+    }
+
+    /// The children's slots are sized with the frame stack and outlive the transaction: no
+    /// boundary shrinks them, and a discard empties them.
+    #[test]
+    fn test_the_slots_outlive_the_transaction() {
+        // Two frames on a stack with room for eight.
+        let mut stack = FrameStack::<u8>::new_prealloc(8);
+        let token = stack.start_init().consume();
+        unsafe { stack.end_init(token) };
+        let token = stack.get_next().consume();
+        unsafe { stack.push(token) };
+        open_nested(&mut stack, 2);
+        let slots = stack.lifecycle.children.len();
+        assert!(
+            slots >= stack.stack.capacity(),
+            "the first child gives a slot to every frame the stack has room for: {slots} of {}",
+            stack.stack.capacity()
+        );
+        assert_eq!(stack.discard_lifecycle(), Some(LifecycleEnd::Discarded));
+        assert_eq!(stack.lifecycle.children.len(), slots);
+        assert!(stack.lifecycle.children.iter().all(Option::is_none));
+
+        open_nested(&mut stack, 2);
+        stack.close_start(2, SettleStatus::Ok, None, 0).unwrap();
+        stack.index = Some(0);
+        stack.close_start(1, SettleStatus::Ok, None, 0).unwrap();
+        stack.clear();
+        stack.close_start(0, SettleStatus::Ok, None, 0).unwrap();
+        assert_eq!(stack.settle_lifecycle(), Ok(Some(LifecycleEnd::Settled)));
+        assert_eq!(stack.lifecycle.children.len(), slots);
     }
 
     #[test]
