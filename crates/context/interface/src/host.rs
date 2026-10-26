@@ -164,11 +164,13 @@ pub trait Host {
         let _ = split;
     }
 
-    /// Called when revm settles the start `settle.id` into its caller's `gas`: after revm's own
-    /// settlement of the frame's result, and, for the transaction's frame, before revm's halt rule
-    /// consumes the regular gas left on a halt.
+    /// Called when revm settles the start `settle.id` into its caller's `gas`, after revm's own
+    /// settlement of the frame's result.
     ///
-    /// The hook may debit and credit `gas`, which goes on as the hook left it.
+    /// The hook may debit and credit `gas`, which goes on as the hook left it, but for a halted
+    /// transaction's frame: there revm then consumes the hook's net credit of regular gas, the
+    /// regular gas `gas` holds above what revm's own settlement left in it, and keeps the gas that
+    /// settlement left. A hook that debits keeps its debit.
     ///
     /// The default touches nothing.
     #[inline]
