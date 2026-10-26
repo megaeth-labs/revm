@@ -188,8 +188,11 @@ where
 /// Closes the transaction's start into the transaction-level `gas`, after
 /// [`settle_first_frame`](crate::execution::settle_first_frame) settled `result` into it, and
 /// hands the settlement to [`Host::frame_settle`]. `held_reservoir` is the reservoir `gas` held
-/// before that settlement. After a halt, revm's halt rule follows the hook: the regular gas left
-/// in `gas` is consumed, as the settlement's own refunds are. The frame stack must be empty.
+/// before that settlement. The frame stack must be empty.
+///
+/// After a halt, the regular gas the hook credited to `gas` is consumed, so a halted transaction
+/// keeps none of its settlement hook's regular credits. What revm's own settlement left in `gas`
+/// is left as it is: a hook that credits nothing, the default, changes no figure.
 ///
 /// # Errors
 ///
@@ -210,11 +213,22 @@ pub fn close_transaction_start<EVM: EvmTr + ?Sized>(
     let settle = frame_stack
         .close_start(0, status, created(result), held_reservoir)
         .map_err(fatal)?;
+    let settled = gas.remaining();
     ctx.frame_settle(&settle, gas);
     if status == SettleStatus::Halt {
-        gas.spend_all();
+        consume_hook_credit(gas, settled);
     }
     Ok(())
+}
+
+/// Consumes the regular gas a halted transaction's settlement hook credited to `gas`: what `gas`
+/// holds above `settled`, the regular gas revm's settlement left in it before the hook. A hook
+/// that credited nothing, or debited, leaves `gas` as it is.
+#[inline]
+const fn consume_hook_credit(gas: &mut GasTracker, settled: u64) {
+    if gas.remaining() > settled {
+        gas.set_remaining(settled);
+    }
 }
 
 /// The successful boundary: every start the transaction opened must have settled. Ends the
@@ -299,5 +313,53 @@ pub const fn check_end_callbacks(result: &FrameResult, start: &mut PendingStart)
     };
     if !outcome_mark.is_for(id) {
         start.set_outcome_rebuilt();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consume_hook_credit;
+    use interpreter::GasTracker;
+
+    /// A transaction's gas after its settlement left it `remaining` regular gas, then credited
+    /// `credit` by refills a hook makes: one that unwinds the spill and one past it.
+    fn credited(remaining: u64, credit: u64) -> GasTracker {
+        let mut gas = GasTracker::new(1_000, remaining, 0);
+        gas.erase_cost(credit);
+        gas
+    }
+
+    #[test]
+    fn test_a_halt_consumes_only_what_the_hook_credited() {
+        let mut gas = credited(1, 40);
+        consume_hook_credit(&mut gas, 1);
+        assert_eq!(gas.remaining(), 1, "the settlement's own gas is kept");
+
+        let mut gas = credited(0, 40);
+        consume_hook_credit(&mut gas, 0);
+        assert_eq!(gas.remaining(), 0);
+    }
+
+    #[test]
+    fn test_a_halt_leaves_gas_a_hook_did_not_credit() {
+        let mut gas = credited(7, 0);
+        consume_hook_credit(&mut gas, 7);
+        assert_eq!(gas.remaining(), 7, "nothing credited, nothing consumed");
+
+        let mut gas = credited(7, 0);
+        assert!(gas.record_regular_cost(3));
+        consume_hook_credit(&mut gas, 7);
+        assert_eq!(gas.remaining(), 4, "a debit stands");
+    }
+
+    #[test]
+    fn test_a_halt_consumes_a_credit_to_the_withheld_part_too() {
+        let mut gas = GasTracker::new(1_000, 10, 0);
+        gas.withhold(4);
+        let settled = gas.remaining();
+        gas.erase_cost(5);
+        consume_hook_credit(&mut gas, settled);
+        assert_eq!(gas.remaining(), 10);
+        assert_eq!(gas.withheld(), 4, "the withheld part is kept");
     }
 }
