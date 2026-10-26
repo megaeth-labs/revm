@@ -105,7 +105,22 @@ pub fn open_frame_start<EVM: EvmTr + ?Sized>(
     init: &FrameInit,
 ) -> Result<(), ContextDbError<EVM::Context>> {
     let (ctx, _, _, frame_stack) = evm.all_mut();
-    let split = frame_stack.open_start(init.depth).map_err(fatal)?;
+    open_start(ctx, frame_stack, init.depth)
+}
+
+/// Opens the start of the frame at `depth` the next init makes, as [`open_frame_start`] does, from
+/// the pieces of an EVM: for a frame run that opens the start as the frame consumes its
+/// `NewFrame` action, before the init is built.
+#[inline]
+pub(crate) fn open_start<CTX, F, E>(
+    ctx: &mut CTX,
+    frame_stack: &mut FrameStack<F>,
+    depth: usize,
+) -> Result<(), ContextError<E>>
+where
+    CTX: Host + ?Sized,
+{
+    let split = frame_stack.open_start(depth).map_err(fatal)?;
     ctx.frame_split(&split);
     Ok(())
 }

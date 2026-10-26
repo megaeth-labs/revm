@@ -7,7 +7,10 @@ use crate::{
 use auto_impl::auto_impl;
 use context::{ContextTr, Database, Evm, FrameStack};
 use context_interface::context::ContextError;
-use interpreter::{interpreter::EthInterpreter, interpreter_action::FrameInit, InterpreterResult};
+use interpreter::{
+    interpreter::EthInterpreter, interpreter_action::FrameInit, InterpreterAction,
+    InterpreterResult,
+};
 
 /// Type alias for database error within a context
 pub type ContextDbError<CTX> = ContextError<ContextTrDbError<CTX>>;
@@ -253,12 +256,23 @@ where
             context,
         );
 
-        let next = frame.process_next_action::<_, ContextDbError<CTX>>(context, action)?;
-        match &next {
-            ItemOrResult::Item(init) => crate::lifecycle::open_frame_start(self, init)?,
-            ItemOrResult::Result(_) => frame.set_finished(true),
-        }
-        Ok(next)
+        // The frame's `NewFrame` action is consumed here: the child's start opens before the
+        // action becomes the child's init, whose depth is one below the frame's. Reading only the
+        // action's kind and the frame's depth leaves the init to be built in the return value.
+        let frame = if let InterpreterAction::NewFrame(_) = &action {
+            let depth = frame.depth + 1;
+            crate::lifecycle::open_start(&mut self.ctx, &mut self.frame_stack, depth)?;
+            self.frame_stack.get()
+        } else {
+            frame
+        };
+        frame
+            .process_next_action(&mut self.ctx, action)
+            .inspect(|i| {
+                if i.is_result() {
+                    frame.set_finished(true);
+                }
+            })
     }
 
     /// Returns the result of the frame to the caller, and closes its start. Frame is popped from
