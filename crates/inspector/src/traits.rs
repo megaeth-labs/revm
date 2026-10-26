@@ -2,7 +2,7 @@ use context::{ContextTr, FrameStack, JournalTr};
 use handler::{
     evm::{ContextDbError, FrameInitResult, FrameTr},
     instructions::InstructionProvider,
-    EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult,
+    lifecycle, EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult,
 };
 use interpreter::{
     interpreter::EthInterpreter, interpreter_action::FrameInit, interpreter_types::LoopControl,
@@ -104,9 +104,18 @@ pub trait InspectorEvmTr:
         &mut self,
         mut frame_init: <Self::Frame as FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        let (ctx, inspector) = self.ctx_inspector();
+        let (ctx, _, _, frame_stack, inspector) = self.all_mut_inspector();
         if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+            // The inspector answered the start revm opened for this init.
+            let start = frame_stack.pending_start();
+            if let Some(start) = &start {
+                lifecycle::mark_for_end_callbacks(&mut output, start);
+            }
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
+            if let Some(start) = start {
+                start.set_inspector_answer();
+                lifecycle::check_end_callbacks(&output, start);
+            }
             return Ok(ItemOrResult::Result(output));
         }
 
@@ -130,7 +139,14 @@ pub trait InspectorEvmTr:
                     inspector.log(ctx, log);
                 }
             }
+            if let Some(start) = self.frame_stack().pending_start() {
+                lifecycle::mark_for_end_callbacks(&mut output, start);
+            }
+            let (ctx, inspector) = self.ctx_inspector();
             frame_end(ctx, inspector, &frame_input, &mut output);
+            if let Some(start) = self.frame_stack().pending_start() {
+                lifecycle::check_end_callbacks(&output, start);
+            }
             return Ok(ItemOrResult::Result(output));
         }
 
@@ -155,7 +171,7 @@ pub trait InspectorEvmTr:
     /// run by [`EvmTr::frame_run`], and its result handed to [`EvmTr::frame_run_result`] only.
     ///
     /// A frame init it returns opens the child's start, as [`EvmTr::frame_run`] does
-    /// ([`handler::lifecycle::open_frame_start`]).
+    /// ([`lifecycle::open_frame_start`]).
     #[inline]
     fn inspect_frame_run(
         &mut self,
@@ -180,16 +196,23 @@ pub trait InspectorEvmTr:
         let mut result = frame.process_next_action(ctx, next_action);
         // revm consumed the frame's `NewFrame` action: the child's start opens.
         if let Ok(ItemOrResult::Item(init)) = &result {
-            handler::lifecycle::open_frame_start(self, init)?;
+            lifecycle::open_frame_start(self, init)?;
         }
 
         if let Ok(ItemOrResult::Result(frame_result)) = &mut result {
             self.frame_run_result(frame_result)?;
+            // The result settles the start the frame runs for.
+            if let Some(start) = self.frame_stack().running_start() {
+                lifecycle::mark_for_end_callbacks(frame_result, start);
+            }
             let (ctx, inspector, frame) = self.ctx_inspector_frame();
             // TODO When all_mut fn is added we can fetch inspector at the top of the function.s
             if let Some(frame) = frame.eth_frame() {
                 frame_end(ctx, inspector, &frame.input, frame_result);
                 frame.set_finished(true);
+            }
+            if let Some(start) = self.frame_stack().running_start() {
+                lifecycle::check_end_callbacks(frame_result, start);
             }
         };
         result

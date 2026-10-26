@@ -36,7 +36,9 @@ pub use context_interface::{
     context::{SStoreResult, SelfDestructResult, StateLoad},
     host, CreateScheme, Host,
 };
-pub use gas::{ChildShares, Gas, GasTracker, PoolAmounts, PoolId, StartCharge};
+pub use gas::{
+    ChildShares, Gas, GasTracker, OutcomeMark, PoolAmounts, PoolId, StartCharge, StartMark,
+};
 pub use instruction_context::InstructionContext;
 pub use instruction_result::*;
 pub use instructions::{

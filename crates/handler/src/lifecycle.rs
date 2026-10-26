@@ -22,6 +22,12 @@
 //! [`Host::frame_lifecycle_end`]). A step the record refuses ([`StartLifecycleError`]) is a fatal
 //! error of the transaction in every build.
 //!
+//! An inspector's end callbacks may put another gas tracker or another outcome in a result's
+//! place. revm marks the result for its start before them ([`mark_for_end_callbacks`]) and checks
+//! the marks after them ([`check_end_callbacks`]), and an inspector's answer to a start is
+//! recorded on it too ([`PendingStart::set_inspector_answer`]): the settlement reports all three
+//! ([`FrameSettle`](context_interface::host::FrameSettle)).
+//!
 //! A chain's handler that overrides one of these methods makes the call the mainnet method makes,
 //! in the same place: [`close_transaction_start`] in `last_frame_result`, [`finish_transaction`]
 //! in `execution_result` and [`discard_transaction`] in `catch_error`. An EVM that reimplements
@@ -51,9 +57,11 @@
 
 use crate::{evm::ContextDbError, EthFrame, EvmTr, FrameResult};
 use context_interface::{
-    context::ContextError, host::SettleStatus, FrameStack, Host, StartLifecycleError,
+    context::ContextError, host::SettleStatus, FrameStack, Host, PendingStart, StartLifecycleError,
 };
-use interpreter::{interpreter::EthInterpreter, interpreter_action::FrameInit, GasTracker};
+use interpreter::{
+    interpreter::EthInterpreter, interpreter_action::FrameInit, GasTracker, OutcomeMark, StartMark,
+};
 use std::string::ToString;
 
 /// A refused step as the transaction's fatal error.
@@ -254,5 +262,42 @@ pub fn discard_transaction<EVM: EvmTr + ?Sized>(evm: &mut EVM) {
     let (ctx, _, _, frame_stack) = evm.all_mut();
     if let Some(end) = frame_stack.discard_lifecycle() {
         ctx.frame_lifecycle_end(end);
+    }
+}
+
+/// Marks `result`, the result of `start`, for the start, just before an inspector's end
+/// callbacks (`frame_end`, `call_end`, `create_end`): its gas tracker with a [`StartMark`] and its
+/// outcome with an [`OutcomeMark`]. Neither mark is part of the values' public semantics.
+#[inline]
+pub const fn mark_for_end_callbacks(result: &mut FrameResult, start: &PendingStart) {
+    let id = start.id();
+    result
+        .gas_mut()
+        .tracker_mut()
+        .set_start_mark(StartMark::for_start(id));
+    let mark = OutcomeMark::for_start(id);
+    match result {
+        FrameResult::Call(outcome) => outcome.start_mark = mark,
+        FrameResult::Create(outcome) => outcome.start_mark = mark,
+    }
+}
+
+/// Records on `start`, just after an inspector's end callbacks, what they put in place of
+/// `result`'s gas tracker and outcome: a tracker without the start's mark
+/// ([`PendingStart::set_gas_replaced`]) and an outcome without it
+/// ([`PendingStart::set_outcome_rebuilt`]). A callback that edits the values in place, or copies
+/// them, keeps the marks.
+#[inline]
+pub const fn check_end_callbacks(result: &FrameResult, start: &mut PendingStart) {
+    let id = start.id();
+    if !result.gas().tracker().start_mark().is_for(id) {
+        start.set_gas_replaced();
+    }
+    let outcome_mark = match result {
+        FrameResult::Call(outcome) => outcome.start_mark,
+        FrameResult::Create(outcome) => outcome.start_mark,
+    };
+    if !outcome_mark.is_for(id) {
+        start.set_outcome_rebuilt();
     }
 }

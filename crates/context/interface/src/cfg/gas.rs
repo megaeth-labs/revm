@@ -8,11 +8,13 @@ mod encoding;
 mod failed_charge;
 mod forward;
 mod history_allowance;
+mod mark;
 mod pools;
 mod start_charge;
 mod withheld;
 
 pub use forward::ChildShares;
+pub use mark::{OutcomeMark, StartMark};
 pub use pools::{PoolAmounts, PoolId};
 pub use start_charge::StartCharge;
 pub use withheld::WithheldCrossing;
@@ -90,7 +92,11 @@ pub use withheld::WithheldCrossing;
 /// as with upstream's own field additions: it reads the old fields in their places and then
 /// looks for the new ones, so a tracker persisted in such a format must not cross an upgrade of
 /// this crate that adds a field.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// The tracker also carries the [`StartMark`] revm writes on a frame result's tracker before an
+/// inspector's end callbacks. The mark is no part of the tracker's value: equality, hashing, the
+/// debug output and the encoding leave it out, and a decoded tracker carries none.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(
     feature = "serde",
     derive(serde::Serialize, serde::Deserialize),
@@ -207,6 +213,32 @@ pub struct GasTracker {
     /// In a format that carries field names, such as JSON, encodings made before this field existed
     /// decode it as zero.
     history_allowance: u64,
+    /// The start revm marked this tracker for ([`start_mark`](Self::start_mark)), in the padding
+    /// after `pool_crossings`. No part of the tracker's value, and not encoded.
+    start_mark: StartMark,
+}
+
+impl core::fmt::Debug for GasTracker {
+    /// The output the derive gives the tracker's figures, in their order; the mark is left out.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GasTracker")
+            .field("gas_limit", &self.gas_limit)
+            .field("remaining", &self.remaining)
+            .field("reservoir", &self.reservoir)
+            .field("state_gas_spent", &self.state_gas_spent)
+            .field("state_gas_spilled", &self.state_gas_spilled)
+            .field("history_gas_spent", &self.history_gas_spent)
+            .field("refunded", &self.refunded)
+            .field("withheld", &self.withheld)
+            .field("withheld_crossing", &self.withheld_crossing)
+            .field("failed_charge_remaining", &self.failed_charge_remaining)
+            .field("failed_charge_recorded", &self.failed_charge_recorded)
+            .field("pools_remaining", &self.pools_remaining)
+            .field("pools_spent", &self.pools_spent)
+            .field("pool_crossings", &self.pool_crossings)
+            .field("history_allowance", &self.history_allowance)
+            .finish()
+    }
 }
 
 impl Default for GasTracker {
@@ -237,7 +269,22 @@ impl GasTracker {
             pools_spent: [0; PoolId::COUNT],
             pool_crossings: 0,
             history_allowance: 0,
+            start_mark: StartMark::NONE,
         }
+    }
+
+    /// The start revm marked this tracker for before an inspector's end callbacks, or
+    /// [`StartMark::NONE`].
+    #[inline]
+    pub const fn start_mark(&self) -> StartMark {
+        self.start_mark
+    }
+
+    /// Marks this tracker for a start. revm marks a start's result before an inspector's end
+    /// callbacks and reads the mark after them; a consumer has no reason to set it.
+    #[inline]
+    pub const fn set_start_mark(&mut self, mark: StartMark) {
+        self.start_mark = mark;
     }
 
     /// Creates a new `GasTracker` with the given used gas and reservoir.

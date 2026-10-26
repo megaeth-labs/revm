@@ -364,6 +364,46 @@ fn test_a_runner_that_skips_the_transactions_start_is_refused() {
     );
 }
 
+/// A marked tracker and outcome compare, hash and print as the same values unmarked.
+#[test]
+fn test_the_marks_take_no_part_in_the_values() {
+    use interpreter::{CreateOutcome, OutcomeMark, StartMark};
+    use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+    let hash =
+        |tracker: &GasTracker| BuildHasherDefault::<DefaultHasher>::default().hash_one(tracker);
+
+    let plain = GasTracker::new(100, 90, 5);
+    let mut marked = plain;
+    marked.set_start_mark(StartMark::for_start(7));
+    assert!(marked.start_mark().is_for(7));
+    assert_eq!(marked, plain);
+    assert_eq!(hash(&marked), hash(&plain));
+    assert_eq!(format!("{marked:?}"), format!("{plain:?}"));
+
+    let result = InterpreterResult::new(InstructionResult::Stop, Bytes::new(), Gas::new(10));
+    let call = CallOutcome::new(result.clone(), 0..0);
+    let marked_call = CallOutcome {
+        start_mark: OutcomeMark::for_start(7),
+        ..call.clone()
+    };
+    assert_eq!(marked_call, call);
+    assert_eq!(format!("{marked_call:?}"), format!("{call:?}"));
+    let create = CreateOutcome::new(result, None);
+    let marked_create = CreateOutcome {
+        start_mark: OutcomeMark::for_start(7),
+        ..create.clone()
+    };
+    assert_eq!(marked_create, create);
+    assert_eq!(format!("{marked_create:?}"), format!("{create:?}"));
+    for printed in [
+        format!("{marked:?}"),
+        format!("{marked_call:?}"),
+        format!("{marked_create:?}"),
+    ] {
+        assert!(!printed.contains("Mark"), "{printed}");
+    }
+}
+
 /// The events the hooks received, which the mirror the context keeps in debug builds records.
 #[cfg(debug_assertions)]
 mod events {
@@ -575,6 +615,192 @@ mod events {
             .expect("the system call runs");
         assert!(result.is_success());
         assert_eq!(events(&mut evm), PAIRED);
+    }
+
+    /// What an inspector does to a start's result, which revm reports on the settlement.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Flag {
+        /// `call` answers with an outcome a constructor built.
+        Answer,
+        /// `call_end` puts a constructor-built tracker in the result's gas.
+        ReplaceGas,
+        /// `call_end` restores the tracker it saved when the frame's interpreter started.
+        RestoreSnapshot,
+        /// `call_end` rewrites the status only.
+        RewriteStatus,
+        /// `call_end` builds a new outcome around the same result.
+        RebuildOutcome,
+        /// `call_end` rebuilds the outcome and its result, keeping the outcome's other fields and
+        /// the result's gas.
+        KeepOutcome,
+        /// `create_end` builds a new outcome around the same result and address.
+        RebuildCreation,
+    }
+
+    struct Rewrite {
+        flag: Flag,
+        target: Address,
+        snapshot: Option<Gas>,
+    }
+
+    impl Inspector<Ctx> for Rewrite {
+        fn initialize_interp(&mut self, interp: &mut Interpreter, _: &mut Ctx) {
+            if interp.input.target_address == self.target {
+                self.snapshot = Some(interp.gas);
+            }
+        }
+
+        fn call(&mut self, _: &mut Ctx, inputs: &mut CallInputs) -> Option<CallOutcome> {
+            (self.flag == Flag::Answer && inputs.target_address == self.target).then(|| {
+                CallOutcome::new(
+                    InterpreterResult::new(
+                        InstructionResult::Return,
+                        Bytes::new(),
+                        Gas::new(inputs.gas_limit),
+                    ),
+                    inputs.return_memory_offset.clone(),
+                )
+            })
+        }
+
+        fn call_end(&mut self, _: &mut Ctx, inputs: &CallInputs, outcome: &mut CallOutcome) {
+            if inputs.target_address != self.target {
+                return;
+            }
+            match self.flag {
+                Flag::ReplaceGas => outcome.result.gas = Gas::new(inputs.gas_limit),
+                Flag::RestoreSnapshot => {
+                    outcome.result.gas = self.snapshot.expect("the frame's interpreter started");
+                }
+                Flag::RewriteStatus => outcome.result.result = InstructionResult::Revert,
+                Flag::RebuildOutcome => {
+                    *outcome =
+                        CallOutcome::new(outcome.result.clone(), outcome.memory_offset.clone());
+                }
+                Flag::KeepOutcome => {
+                    let result = InterpreterResult::new(
+                        outcome.result.result,
+                        outcome.result.output.clone(),
+                        outcome.result.gas,
+                    );
+                    *outcome = CallOutcome {
+                        result,
+                        ..outcome.clone()
+                    };
+                }
+                Flag::Answer | Flag::RebuildCreation => {}
+            }
+        }
+
+        fn create_end(
+            &mut self,
+            _: &mut Ctx,
+            _: &interpreter::CreateInputs,
+            outcome: &mut interpreter::CreateOutcome,
+        ) {
+            if self.flag == Flag::RebuildCreation {
+                *outcome = interpreter::CreateOutcome::new(outcome.result.clone(), outcome.address);
+            }
+        }
+    }
+
+    /// The events of [`PARENT`]'s transaction, calling `callee`, under `flag`, or of
+    /// [`CREATOR`]'s for a creation's flag.
+    fn flagged(flag: Flag, target: Address, callee: Address) -> Vec<String> {
+        let mut evm = context(callee, SpecId::OSAKA).build_mainnet_with_inspector(Rewrite {
+            flag,
+            target,
+            snapshot: None,
+        });
+        let to = if flag == Flag::RebuildCreation {
+            CREATOR
+        } else {
+            PARENT
+        };
+        let result = evm.inspect_tx(tx(to, 0)).expect("runs");
+        assert!(result.result.is_success(), "{flag:?}: {:?}", result.result);
+        events(&mut evm)
+    }
+
+    /// [`PAIRED`] with the child's settlement as `child`.
+    fn paired_with(child: &str) -> Vec<String> {
+        let mut events = PAIRED.map(String::from).to_vec();
+        events[2] = child.to_string();
+        events
+    }
+
+    #[test]
+    fn test_an_inspectors_answer_is_flagged() {
+        assert_eq!(
+            flagged(Flag::Answer, CHILD, CHILD),
+            paired_with("settle 2 depth 1 Ok inspector-answer")
+        );
+    }
+
+    #[test]
+    fn test_an_inspectors_answer_to_the_transactions_frame_is_flagged() {
+        assert_eq!(
+            flagged(Flag::Answer, PARENT, CHILD),
+            [
+                "split 1 parent None depth 0",
+                "settle 1 depth 0 Ok inspector-answer",
+                "end Settled",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_a_replaced_tracker_is_flagged() {
+        assert_eq!(
+            flagged(Flag::ReplaceGas, CHILD, CHILD),
+            paired_with("settle 2 depth 1 Ok gas-replaced")
+        );
+        assert_eq!(
+            flagged(Flag::ReplaceGas, ECRECOVER, ECRECOVER),
+            paired_with("settle 2 depth 1 Ok gas-replaced"),
+            "a precompile's answer"
+        );
+    }
+
+    /// A snapshot taken before revm marked the result is a replacement, even of the same
+    /// start's tracker.
+    #[test]
+    fn test_a_restored_snapshot_is_flagged() {
+        assert_eq!(
+            flagged(Flag::RestoreSnapshot, CHILD, CHILD),
+            paired_with("settle 2 depth 1 Ok gas-replaced")
+        );
+    }
+
+    #[test]
+    fn test_a_status_only_rewrite_is_not_flagged() {
+        assert_eq!(
+            flagged(Flag::RewriteStatus, CHILD, CHILD),
+            paired_with("settle 2 depth 1 Revert")
+        );
+    }
+
+    #[test]
+    fn test_an_outcome_rebuilt_around_the_same_result_is_flagged() {
+        assert_eq!(
+            flagged(Flag::RebuildOutcome, CHILD, CHILD),
+            paired_with("settle 2 depth 1 Ok outcome-rebuilt")
+        );
+        assert_eq!(
+            flagged(Flag::RebuildCreation, CHILD, CHILD),
+            [
+                "split 1 parent None depth 0",
+                "split 2 parent Some(1) depth 1",
+                "settle 2 depth 1 Ok created true outcome-rebuilt",
+                "settle 1 depth 0 Ok",
+                "end Settled",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_a_rebuild_that_keeps_the_outcome_and_the_gas_is_not_flagged() {
+        assert_eq!(flagged(Flag::KeepOutcome, CHILD, CHILD), PAIRED);
     }
 
     /// The context hands every event to its mirror: one that does not fit fails the check.

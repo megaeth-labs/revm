@@ -87,6 +87,7 @@ impl From<Encoded> for GasTracker {
             pools_spent: encoded.pools_spent,
             pool_crossings: 0,
             history_allowance: encoded.history_allowance,
+            start_mark: super::StartMark::NONE,
         };
         tracker.set_failed_charge_remaining(encoded.failed_charge_remaining);
         for (pool, crossing) in PoolId::ALL.into_iter().zip(encoded.pool_crossings) {

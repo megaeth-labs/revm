@@ -18,7 +18,7 @@ use interpreter::{
     interpreter_types::ReturnData,
     CallInput, CallInputs, CallOutcome, CallValue, CreateInputs, CreateOutcome, CreateScheme,
     FrameInput, Gas, GasTracker, InputsImpl, InstructionResult, Interpreter, InterpreterAction,
-    InterpreterResult, InterpreterTypes, SharedMemory, StartCharge,
+    InterpreterResult, InterpreterTypes, OutcomeMark, SharedMemory, StartCharge,
 };
 use primitives::{
     constants::CALL_STACK_LIMIT,
@@ -183,6 +183,7 @@ impl EthFrame<EthInterpreter> {
                 charged_new_account_state_gas,
                 charged_state_gas_address,
                 charged_start,
+                start_mark: OutcomeMark::NONE,
             })))
         };
 
@@ -245,6 +246,7 @@ impl EthFrame<EthInterpreter> {
                 charged_new_account_state_gas,
                 charged_state_gas_address,
                 charged_start,
+                start_mark: OutcomeMark::NONE,
             })));
         }
 
@@ -330,6 +332,7 @@ impl EthFrame<EthInterpreter> {
                 charged_create_state_gas,
                 charged_state_gas_address,
                 charged_start,
+                start_mark: OutcomeMark::NONE,
             })))
         };
 

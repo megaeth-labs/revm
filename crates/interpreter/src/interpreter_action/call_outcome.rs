@@ -1,4 +1,4 @@
-use crate::{Gas, InstructionResult, InterpreterResult, PoolAmounts, StartCharge};
+use crate::{Gas, InstructionResult, InterpreterResult, OutcomeMark, PoolAmounts, StartCharge};
 use core::ops::Range;
 use primitives::{Address, Bytes, Log};
 use std::vec::Vec;
@@ -12,7 +12,7 @@ use std::vec::Vec;
 ///
 /// * `result` - The result of the interpreter's execution, including output data and gas usage.
 /// * `memory_offset` - The range in memory where the output data is located.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CallOutcome {
     /// The result of the interpreter's execution, including output data and gas usage
@@ -48,6 +48,31 @@ pub struct CallOutcome {
     /// decode it as no charge.
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_start: StartCharge,
+    /// The start revm marked this outcome for before an inspector's end callbacks
+    /// ([`OutcomeMark`]): none on an outcome a constructor builds. No part of the outcome's value:
+    /// equality, the debug output and the encoding leave it out, and a decoded outcome carries
+    /// none.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub start_mark: OutcomeMark,
+}
+
+impl core::fmt::Debug for CallOutcome {
+    /// The output the derive gives the outcome's other fields, in their order; the mark is left
+    /// out.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CallOutcome")
+            .field("result", &self.result)
+            .field("memory_offset", &self.memory_offset)
+            .field("was_precompile_called", &self.was_precompile_called)
+            .field("precompile_call_logs", &self.precompile_call_logs)
+            .field(
+                "charged_new_account_state_gas",
+                &self.charged_new_account_state_gas,
+            )
+            .field("charged_state_gas_address", &self.charged_state_gas_address)
+            .field("charged_start", &self.charged_start)
+            .finish()
+    }
 }
 
 impl CallOutcome {
@@ -68,6 +93,7 @@ impl CallOutcome {
             charged_new_account_state_gas: false,
             charged_state_gas_address: Address::ZERO,
             charged_start: StartCharge::new(0, PoolAmounts::ZERO),
+            start_mark: OutcomeMark::NONE,
         }
     }
 
