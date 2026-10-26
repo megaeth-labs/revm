@@ -194,8 +194,9 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
         value,
         gas_limit,
     );
-    let charged_start = frame_starting(&mut context.interpreter.gas, context.host, start)?;
-    let shares = forward_to_child(&mut context.interpreter.gas, context.host);
+    let (charged_start, reservoir) =
+        frame_starting(&mut context.interpreter.gas, context.host, start)?;
+    let shares = forward_to_child(&mut context.interpreter.gas, context.host, reservoir);
 
     create_inputs.set_gas_limit(gas_limit);
     create_inputs.set_reservoir(shares.reservoir);
@@ -285,8 +286,9 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
     };
     let transferred = value.transfer().unwrap_or_default();
     let start = FrameStart::new(kind, caller, Some(target_address), transferred, forward);
-    let charged_start = frame_starting(&mut context.interpreter.gas, context.host, start)?;
-    let shares = forward_to_child(&mut context.interpreter.gas, context.host);
+    let (charged_start, reservoir) =
+        frame_starting(&mut context.interpreter.gas, context.host, start)?;
+    let shares = forward_to_child(&mut context.interpreter.gas, context.host, reservoir);
 
     // Call host to interact with target contract
     context

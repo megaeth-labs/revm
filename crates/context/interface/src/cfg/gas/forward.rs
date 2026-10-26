@@ -47,8 +47,27 @@ impl GasTracker {
     /// gives the caller back exactly what it forwarded.
     #[inline]
     pub fn forward_to_child(&mut self, params: &GasParams) -> ChildShares {
-        let reservoir = params.reservoir_forward_share(self.reservoir);
-        self.forward_reservoir(reservoir);
+        self.forward_to_child_with_reservoir(params, None)
+    }
+
+    /// [`forward_to_child`](Self::forward_to_child), for a start whose child reservoir the
+    /// frame-start hook may have named (`FrameStart::reservoir`).
+    ///
+    /// `Some(reservoir)` is the child's reservoir, which the hook took out of this tracker itself:
+    /// no share of the reservoir is taken here, and the child starts with `reservoir`. `None` takes
+    /// the schedule's share, as `forward_to_child` does. The pools are forwarded by the schedule's
+    /// shares either way.
+    #[inline]
+    pub fn forward_to_child_with_reservoir(
+        &mut self,
+        params: &GasParams,
+        reservoir: Option<u64>,
+    ) -> ChildShares {
+        let reservoir = reservoir.unwrap_or_else(|| {
+            let share = params.reservoir_forward_share(self.reservoir);
+            self.forward_reservoir(share);
+            share
+        });
         let mut pools = PoolAmounts::ZERO;
         for pool in PoolId::ALL {
             let share = params.pool_forward_share(pool, self.pool_remaining(pool));

@@ -96,6 +96,9 @@ struct HookHost {
     charge: u64,
     verdict: WriteVerdict,
     admit: bool,
+    /// The reservoir the hook leaves the caller when it takes the child's reservoir itself and
+    /// names it on the start.
+    kept_reservoir: Option<u64>,
     /// Every write the hook saw, with the gas as the hook found it.
     writes: Vec<(Write, GasTracker)>,
     /// Every start the hook saw, with the gas as the hook found it.
@@ -116,6 +119,7 @@ impl HookHost {
             charge: 0,
             verdict: WriteVerdict::Continue,
             admit: true,
+            kept_reservoir: None,
             writes: Vec::new(),
             starts: Vec::new(),
         }
@@ -176,6 +180,11 @@ impl HookHost {
         self
     }
 
+    const fn keeping_reservoir(mut self, kept: u64) -> Self {
+        self.kept_reservoir = Some(kept);
+        self
+    }
+
     const fn refuses_cold(&self, skip_cold_load: bool) -> Result<(), LoadError> {
         if self.cold && skip_cold_load {
             Err(LoadError::ColdLoadSkipped)
@@ -214,6 +223,10 @@ impl Host for HookHost {
         self.starts.push((*start, *gas));
         if self.charge > 0 {
             let _ = gas.record_history_cost(self.charge);
+        }
+        if let Some(kept) = self.kept_reservoir {
+            start.reservoir = Some(gas.reservoir() - kept);
+            gas.set_reservoir(kept);
         }
         self.admit
     }
@@ -1073,6 +1086,53 @@ fn test_the_input_copies_the_reservoir_the_hook_left() {
                 "{name}, charge {charge}"
             );
         }
+    }
+}
+
+/// A hook that takes the child's reservoir out of the caller's itself names it on the start
+/// ([`FrameStart::reservoir`]): the frame's input carries it, and the instruction takes no
+/// reservoir share of its own, so the caller keeps what the hook left. The pools are forwarded by
+/// the schedule as without the hook's reservoir.
+#[test]
+fn test_the_input_carries_the_child_reservoir_the_hook_names() {
+    let spec = SpecId::AMSTERDAM;
+    let pools = |input: &FrameInput| match input {
+        FrameInput::Call(inputs) => inputs.pool_shares,
+        FrameInput::Create(inputs) => inputs.pool_shares(),
+        FrameInput::Empty => panic!("an empty frame input"),
+    };
+    for (name, code, _) in start_cases() {
+        let mut quiet = HookHost::new(spec);
+        let (quiet_action, quiet_gas) = run(spec, &code, AMPLE, 10_000, &mut quiet);
+        let quiet_input = started(quiet_action);
+
+        let mut host = HookHost::new(spec).keeping_reservoir(4_000);
+        let (action, gas) = run(spec, &code, AMPLE, 10_000, &mut host);
+        let input = started(action);
+
+        assert_eq!(
+            host.start().0.reservoir,
+            None,
+            "{name}: the hook is handed none"
+        );
+        assert_eq!(
+            input_gas(&input),
+            (input_gas(&quiet_input).0, 6_000),
+            "{name}"
+        );
+        assert_eq!(
+            gas.reservoir(),
+            4_000,
+            "{name}: the caller keeps what the hook left"
+        );
+        assert_eq!(
+            pools(&input),
+            pools(&quiet_input),
+            "{name}: the pools' shares"
+        );
+        let pools_left = |gas: &Gas| gas.tracker().pools_remaining();
+        assert_eq!(pools_left(&gas), pools_left(&quiet_gas), "{name}");
+        assert_eq!(gas.remaining(), quiet_gas.remaining(), "{name}");
     }
 }
 

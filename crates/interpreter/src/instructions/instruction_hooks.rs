@@ -44,17 +44,18 @@ fn revert<IT: ITy>(interpreter: &mut Interpreter<IT>, output: Bytes) -> Result {
 }
 
 /// Hands `start`, whose forward the running instruction has taken from `gas`, to
-/// [`Host::frame_starting`]. `true` returns the start charge the hook declared on `start`, for
-/// the frame's input; `false` fails the instruction out of gas, and the charge goes with the
-/// start it was declared for.
+/// [`Host::frame_starting`]. `true` returns what the hook declared on `start` for the frame: the
+/// start charge, for the frame's input, and the child's reservoir if the hook took it itself, for
+/// the forward ([`forward_to_child`]); `false` fails the instruction out of gas, and the charge
+/// goes with the start it was declared for.
 #[inline]
 pub(crate) fn frame_starting<H: Host + ?Sized>(
     gas: &mut Gas,
     host: &mut H,
     mut start: FrameStart,
-) -> core::result::Result<StartCharge, InstructionResult> {
+) -> core::result::Result<(StartCharge, Option<u64>), InstructionResult> {
     if host.frame_starting(&mut start, gas.tracker_mut()) {
-        Ok(start.charge)
+        Ok((start.charge, start.reservoir))
     } else {
         cold_path();
         Err(InstructionResult::OutOfGas)
@@ -97,8 +98,15 @@ pub(crate) fn running_account<H: Host + ?Sized>(
 /// schedule's `reservoir_kept_percent` and `pool_kept_percent`s, and returns them: what the child's
 /// tracker starts with ([`GasTracker::forward_to_child`](crate::GasTracker::forward_to_child)).
 /// Called once the frame-start hook has answered, so the shares are of the reservoir and the pools
-/// as the hook left them.
+/// as the hook left them. A child `reservoir` the hook named replaces the reservoir's share: the
+/// child starts with it, and the caller keeps the reservoir the hook left
+/// ([`GasTracker::forward_to_child_with_reservoir`](crate::GasTracker::forward_to_child_with_reservoir)).
 #[inline]
-pub(crate) fn forward_to_child<H: Host + ?Sized>(gas: &mut Gas, host: &H) -> ChildShares {
-    gas.tracker_mut().forward_to_child(host.gas_params())
+pub(crate) fn forward_to_child<H: Host + ?Sized>(
+    gas: &mut Gas,
+    host: &H,
+    reservoir: Option<u64>,
+) -> ChildShares {
+    gas.tracker_mut()
+        .forward_to_child_with_reservoir(host.gas_params(), reservoir)
 }
