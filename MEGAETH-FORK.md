@@ -289,7 +289,7 @@ An id the fork once used for an entry with another default is left unused rather
 ### Frame-start hook
 
 - **API.** `Host::frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool`, whose default returns `true`.
-  `FrameStart` (`#[non_exhaustive]`, built with `FrameStart::new`: `kind`, `caller`, `target`, `value`, `forward`, and `charge`, which `new` leaves empty) and `FrameStartKind` (`Call`, `CallCode`, `DelegateCall`, `StaticCall`, `Create`, `Create2`), in `revm_context_interface::host`.
+  `FrameStart` (`#[non_exhaustive]`, built with `FrameStart::new`: `kind`, `caller`, `target`, `value`, `forward`, `charge`, which `new` leaves empty, and `reservoir`, which `new` leaves `None`) and `FrameStartKind` (`Call`, `CallCode`, `DelegateCall`, `StaticCall`, `Create`, `Create2`), in `revm_context_interface::host`.
   `FrameStartKind` is exhaustive on purpose, as `CompletedWrite` is: mega-evm matches it to charge each start, so a new kind is a compile error in every consumer that matches it rather than a start that passes a wildcard arm uncharged, and adding one is an `api:exception` change.
 - **Contract.** `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2` call it after every charge they make and after the forward is taken from the caller's gas, before they build the frame's input, on the plain and the inspected path.
   `forward` is the regular gas taken: the frame's gas limit without a value call's stipend. `value` is the value transferred, zero for `DELEGATECALL` and `STATICCALL`.
@@ -299,8 +299,9 @@ An id the fork once used for an entry with another default is left unused rather
   It is `None` only for a creation the handler fails before it takes an address: an endowment above the caller's balance, a caller's nonce at its maximum, or a creating frame at the depth limit. Such a creation reaches the hook only with EIP-8037 off; with it on, the instruction ends the creation before the hook.
   The address is fixed when the hook sees it. Something that changes the caller's nonce between the instruction and the frame does not move it, as on upstream's EIP-8037 path. An inspector that changes the creation's caller, scheme or init code (`CreateInputs::set_call`, `set_scheme`, `set_init_code`) clears it, and the handler computes the new one.
   `gas` is the caller's tracker. The hook may debit and credit it, and the instruction uses it as the hook left it: nothing is charged after the hook, and the frame's input takes its share of the reservoir from it, so a frame the handler runs and one it answers without running (a precompile) both start from a share of the reservoir the hook left (see The reservoir share). A charge the hook makes that fails records as any failed charge does, whatever the answer.
-  `start` is the hook's to declare the start charge on (`charge`, see The start charge); the instruction reads nothing else back from it.
-  After the hook the instruction copies that charge onto the frame's input and takes the child's shares of the reservoir and of each pool off `gas` for it (`GasTracker::forward_to_child`, see The reservoir share and Resource pools); the shares are of the reservoir and the pools as the hook left them.
+  `start` is the hook's to declare the start charge on (`charge`, see The start charge) and, if it takes the child's reservoir itself, the child's reservoir (`reservoir`); the instruction reads nothing else back from it.
+  `FrameStart::reservoir` is `None` when the hook is called. `Some(r)` means the hook took the child's reservoir out of `gas` itself: the instruction takes no reservoir share, the frame's input carries `r`, and the caller keeps what the hook left it. `None` keeps the schedule's share (see The reservoir share). The instruction does not check `r` against what the hook took. The pools are forwarded by the schedule either way.
+  After the hook the instruction copies that charge onto the frame's input and takes the child's shares of the reservoir (unless the hook named it) and of each pool off `gas` for it (`GasTracker::forward_to_child_with_reservoir`, which `forward_to_child` calls with `None`, see The reservoir share and Resource pools); the shares are of the reservoir and the pools as the hook left them.
   `true` hands the start to the handler, which may still refuse it (call depth, balance) or answer it without a frame; what the hook did to `gas` stands either way. `false` fails the instruction out of gas and starts no frame: the forward stays taken unless the hook gave it back, and the halt records the regular gas the hook left unless a failed charge already did.
   A creation the instruction ends before its forward (EIP-8037's checks of the endowment, the nonce and the depth) is not offered.
 - **Consumer.** mega-evm charges a start's write records after the forward and before the frame inherits the caller's reservoir. Without the hook it wraps the call and creation instructions, rewrites the reservoir revm already copied into the input, and takes the input back when the charge fails.
@@ -360,8 +361,8 @@ An id the fork once used for an entry with another default is left unused rather
 ### The reservoir share
 
 - **API.** `GasId::reservoir_kept_percent` (id 249) and `GasParams::reservoir_forward_share(reservoir)`.
-  On `GasTracker`: `forward_reservoir(share)`, and `forward_to_child(&GasParams)` and `forward_all_to_child()`, which take the reservoir's share and every pool's share at once and return them as `ChildShares { reservoir, pools }` (`#[non_exhaustive]`).
-- **Contract.** At every `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, after `frame_starting` has answered, the instruction takes `reservoir_forward_share` of the caller's EIP-8037 reservoir out of the caller's tracker and puts it on the frame's input as `reservoir`, the child's reservoir when it starts, on a frame and on an answer alike.
+  On `GasTracker`: `forward_reservoir(share)`, `forward_to_child(&GasParams)`, `forward_to_child_with_reservoir(&GasParams, Option<u64>)` (the first with `None`) and `forward_all_to_child()`, which take the reservoir's share and every pool's share at once and return them as `ChildShares { reservoir, pools }` (`#[non_exhaustive]`).
+- **Contract.** At every `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, after `frame_starting` has answered, the instruction takes `reservoir_forward_share` of the caller's EIP-8037 reservoir (unless the frame-start hook named the child's reservoir, `FrameStart::reservoir`, in which case it takes none and the input carries the hook's) out of the caller's tracker and puts it on the frame's input as `reservoir`, the child's reservoir when it starts, on a frame and on an answer alike.
   `reservoir_forward_share` is the reservoir less the caller's part, `reservoir_kept_percent` per cent of it rounded down, taken away as `call_stipend_reduction` takes regular gas: at 2 kept the child receives `reservoir − reservoir × 2 / 100`, so a reservoir of 99 forwards 98, where a pool keeping 2 forwards 97 (its share is rounded down). Zero kept forwards the whole reservoir, as EIP-8037 does; a hundred or more forwards none.
   The two roundings are the fork's, not the schedule's: the reservoir's share takes the caller's part away as regular gas's forward does, and a pool's share is rounded down. A chain that needs the floor for the reservoir, or the subtraction for a pool, has no entry for it.
   The caller keeps the rest while the child runs; the share is all the child has, so a child whose state and history charges pass it spills onto its own regular gas, as a frame with an empty reservoir does, and one that cannot pay that fails out of gas.
@@ -475,13 +476,15 @@ An id the fork once used for an entry with another default is left unused rather
 ### Start lifecycle
 
 - **API.**
-  On `Host`, each with a no-op default: `frame_split(&mut self, split: &FrameSplit<'_>)`, `frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker)` and `frame_lifecycle_end(&mut self, end: LifecycleEnd)`.
-  `FrameSplit` (`id`, `parent`, `depth`, `start`), `FrameSettle` (`id`, `depth`, `status`, `created`, `inspector_answer`, `gas_replaced`, `outcome_rebuilt`, `held_reservoir`), `SettleStatus` (`Ok`, `Revert`, `Halt`) and `LifecycleEnd` (`Settled`, `Discarded`), in `revm_context_interface::host`.
-  `revm_handler::lifecycle`: `open_frame_start`, `open_transaction_start`, `close_transaction_start`, `finish_transaction`, `discard_transaction` and `settle_status`.
-  On `FrameStack`, the record: `open_start`, `close_start`, `lifecycle_active`, `lifecycle_settled` and `lifecycle_clear`.
-  `StartLifecycleError` (`Exhausted`, `Stale`, `NotOpen`, `NoParent`, `Unsettled`), `PendingStart`, `StartMark` and `OutcomeMark`.
-  `GasTracker::start_mark`, and `start_mark` on `CallOutcome` and `CreateOutcome` (a field).
-  `LocalContextTr::lifecycle_debug` and `LifecycleDebug`, the debug mirror (below).
+  On `Host`, each with a no-op default: `frame_split(&mut self, split: &FrameSplit)`, `frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker)` and `frame_lifecycle_end(&mut self, end: LifecycleEnd)`.
+  `FrameSplit` (`id`, `parent`, `depth`), `FrameSettle` (`id`, `depth`, `status`, `created`, `inspector_answer`, `gas_replaced`, `outcome_rebuilt`, `held_reservoir`), `SettleStatus` (`Ok`, `Revert`, `Halt`) and `LifecycleEnd` (`Settled`, `Discarded`), in `revm_context_interface::host`.
+  `FrameSplit` and `FrameSettle` are `#[non_exhaustive]` and have no public constructor: only the record builds them (`FrameStack::open_start`, `FrameStack::close_start`), so a hook is called by hand only with a value the record made, and a field added later breaks no consumer.
+  `SettleStatus` and `LifecycleEnd` are exhaustive.
+  `revm_handler::lifecycle`: `open_frame_start`, `open_transaction_start`, `Returning` and `close_frame_start`, `close_transaction_start`, `finish_transaction`, `discard_transaction`, `mark_for_end_callbacks` and `check_end_callbacks`.
+  On `FrameStack`, the record: `open_start`, `close_start`, `pending_start`, `running_start`, `lifecycle_active`, `lifecycle_settled`, and its two boundaries `settle_lifecycle` and `discard_lifecycle`.
+  `StartLifecycleError` (`Exhausted`, `Stale`, `NotOpen`, `NoParent`, `Unsettled`; `#[non_exhaustive]`), `PendingStart` (its fields are private: the identity can be read and not written, and only the three flags can be set), `StartMark` and `OutcomeMark`.
+  `GasTracker::start_mark` and `set_start_mark`, `GasTracker::forward_to_child_with_reservoir`, and `start_mark` on `CallOutcome` and `CreateOutcome` (a field).
+  `LocalContextTr::lifecycle_mirror`, `LifecycleMirror` and `LifecycleEvent` (`Split`, `Settle`, `End`), the debug mirror (below). The types and the method exist in every profile.
 - **Contract.** A *start* is one frame's beginning with the identity revm gave it; revm pairs every start it opens with exactly one settlement, last in first out, and the consumer does not pair them.
   *Where revm opens one.*
   - Where it consumes a `NewFrame` action: `Evm::frame_run` and `InspectorEvmTr::inspect_frame_run`, right after `process_next_action` returns the frame's init, so the child's start opens against the frame on top of the stack, its caller.
@@ -496,7 +499,7 @@ An id the fork once used for an entry with another default is left unused rather
   - `Evm::frame_return_result`, after `return_result` applied revm's own settlement, closes the start of the caller on top of the stack and calls `frame_settle` with the caller's tracker.
   - `Handler::last_frame_result`, after `settle_first_frame`, closes the transaction's start and calls `frame_settle` with the transaction's tracker, and a halt then consumes the regular gas the hook credited, as it does for the state refund.
 
-  `frame_split` is handed the start's `id`, a per-transaction number revm allocates from 1 with a checked add and never reuses within the transaction; the `parent` identity, the start of the frame that makes this one, `None` for the transaction's frame; the `depth`, read from revm's frame record and never from `interpreter.input`, which an inspector can write; and `start`, a `FrameStart` read from the init revm consumed (`kind`, `caller`, `target`, `value`, `forward`; no `charge`).
+  `frame_split` is handed the start's `id`, a per-transaction number revm allocates from 1 with a checked add and never reuses within the transaction; the `parent` identity, the start of the frame that makes this one, `None` for the transaction's frame; the `depth`, read from revm's frame record and never from `interpreter.input`, which an inspector can write; and nothing else: a start's kind, caller, target, value and forward are the frame's own input, which the consumer's `frame_init` is handed straight after the split, and what the consumer owes a start (its shares, its charge, its allowance) it parked at `frame_starting`.
   `frame_settle` is handed the same `id` and `depth` back, and the `status` (`Ok`, `Revert` or `Halt`), `created` (for a creation, whether it took an address), the three flags (below) and `held_reservoir`, the reservoir the caller held before revm settled the child into it.
   `frame_lifecycle_end` is called once at the end of a transaction's lifecycle: `Settled` at the successful boundary, with every start settled, and `Discarded` when a fatal error ends the transaction and the open starts are dropped unsettled.
   A transaction that ends before any start opened emits neither.
@@ -510,31 +513,34 @@ An id the fork once used for an entry with another default is left unused rather
   | It overrides or reimplements | It calls |
   |---|---|
   | `Handler::execution` or `InspectorHandler::inspect_execution` | `open_frame_start` where it makes the first frame's init |
-  | `Handler::runtime_oog_result`, building its own stand-in | `open_transaction_start`, with a `FrameStart` for the transaction, before it returns |
+  | `Handler::runtime_oog_result`, building its own stand-in | `open_transaction_start` before it returns |
   | `EvmTr::frame_run` or `InspectorEvmTr::inspect_frame_run` | `open_frame_start` after `process_next_action` returns an init |
-  | `EvmTr::frame_return_result` | `settle_status` before `return_result`, then `FrameStack::close_start` and `Host::frame_settle` with the caller's tracker after it |
+  | `EvmTr::frame_return_result` | `lifecycle::Returning::new(&result, caller)` before `return_result` consumes the result, then `lifecycle::close_frame_start` after it |
   | `Handler::last_frame_result` | `close_transaction_start` right after `settle_first_frame`, given the reservoir the caller's gas held before the settlement |
   | `Handler::execution_result` | `finish_transaction`, after the context's recorded error is taken and before the output is built |
-  | `Handler::catch_error` | `discard_transaction`, in the cleanup every error reaches, before the frame stack is cleared |
+  | `Handler::catch_error` | `discard_transaction`, first |
 
-  `finish_transaction` is the successful boundary: with every start settled it emits `LifecycleEnd::Settled` and resets the record.
-  `discard_transaction` is the fatal boundary: it emits `Discarded` only if a lifecycle is under way, resets the record, and is idempotent, so a cleanup that runs twice emits once.
+  `finish_transaction` is the successful boundary (`FrameStack::settle_lifecycle`): with every start settled it emits `LifecycleEnd::Settled` and resets the record.
+  `discard_transaction` is the fatal boundary (`FrameStack::discard_lifecycle`): it emits `Discarded` only if a lifecycle is under way, resets the record, and is idempotent, so a cleanup that runs twice emits once. It resets the lifecycle only; the frame stack is cleared separately (see Reuse after an uncaught error).
+  `close_frame_start` and `close_transaction_start` hand the settlement to `frame_settle` with the caller's tracker and the transaction's, and `close_transaction_start` applies the halt rule after the hook.
   A call sits where the mainnet method makes it and passes what that method passes.
 
-  *Fatal errors.* The record refuses these, in a release build as in a debug build, as a `ContextError::Custom` that fails the transaction and that `catch_error` reports:
+  *Fatal errors.* The record refuses these in every build, debug and release alike, as a `ContextError::Custom` carrying the error's `Display`, which fails the transaction and which `catch_error` reports:
   - `Stale`: a start opened where one is still open, so a boundary or a settlement was missed;
   - `NoParent`: a child start under a frame with no start of its own, so a runner drove the transaction's frame without opening its start;
   - `NotOpen`: a settlement found no start open;
   - `Exhausted`: the transaction opened 4,294,967,295 starts; the start does not open;
-  - `Unsettled`: `finish_transaction` found a start open. A debug build asserts; a release build clears the record, emits `Discarded` and fails the transaction.
+  - `Unsettled`: `finish_transaction` found a start open. It discards the lifecycle, emits `Discarded` and fails the transaction, so the `catch_error` that reports the error owes no second end.
 
-  *The marks and the flags.* Before it calls an inspector's end callbacks (`call_end`, `create_end`, `frame_end`) revm writes the start's identity on the result's tracker (`StartMark`, a `u32`) and a mark of the start on the outcome (`OutcomeMark`, a `u16`, `(id − 1) mod 65535 + 1`, never zero); after them it reads both.
+  The only `debug_assert!`s are on the helpers' own preconditions: the transaction's start opens and closes on an empty frame stack.
+
+  *The marks and the flags.* Before it calls an inspector's end callbacks (`call_end`, `create_end`, `frame_end`) revm writes the start's identity on the result's tracker (`StartMark`, a `u32`, with `GasTracker::set_start_mark`) and a mark of the start on the outcome (`OutcomeMark`, a `u16`, `(id − 1) mod 65535 + 1`, never zero) (`mark_for_end_callbacks`); after them it reads both (`check_end_callbacks`). A consumer has no reason to set a mark.
   `gas_replaced` is set on the start when the tracker's mark is no longer the start's, `outcome_rebuilt` when the outcome's is not, and `inspector_answer` when `frame_start`, `call` or `create` answered the start.
   A constructor (`Gas::new`, `CallOutcome::new`, `CreateOutcome::new`) and a literal that names the mark as `Default::default()` leave it zero, so a value built afresh is always seen; a copy of another start's value is seen unless the two identities are 65,535 apart, and a copy made in the previous transaction at the same sequence position is not.
   A tracker an inspector saved before the marking carries none, so restoring it at an end callback sets `gas_replaced` even when it came from the same start.
   The flags say what an inspector did, never what the consumer did: the consumer's own answers are made in `frame_init`, before any end callback, and are never flagged.
   Only the inspected path marks and flags; the plain path leaves all three clear.
-  Both marks take no part in equality, hashing, `Debug` or serde: they compare equal always, hash to nothing, are skipped by serde and decode as none, and `GasTracker`, `CallOutcome` and `CreateOutcome` have a hand-written `Debug` that lists the other fields in declaration order, so its output is the derived output without the mark.
+  Both marks take no part in equality, hashing, `Debug` or serde: they compare equal always, hash to nothing, are skipped by serde and decode as none, and `GasTracker`, `CallOutcome` and `CreateOutcome` have a hand-written `Debug` that lists the other fields in declaration order, so its output is the derived output without the mark, and `GasTracker`'s encoding has no mark.
   A change to a field of those three types changes that `Debug` too.
   An inspector can forge a mark or call a hook by hand through the `&mut` context: a forged mark changes only the flags, and a hand call desynchronises the consumer's own stack from the record without touching the record or its checks; both are outside the contract.
 
@@ -543,12 +549,13 @@ An id the fork once used for an entry with another default is left unused rather
   A frame stack left as the error left it makes the next transaction's opening a child under a frame whose start was discarded, and it fails with `NoParent`; a record left open fails the next opening with `Stale`.
   Calling `catch_error` does all of it.
 
-  *A hand-driven first frame.* A runner that makes and runs the transaction's first frame itself, or settles one it made, opens the transaction's start first (`open_transaction_start`, with a `FrameStart` for it), then closes it with `last_frame_result` or `close_transaction_start`, and ends the lifecycle with `execution_result` or `finish_transaction`.
+  *A hand-driven first frame.* A runner that makes and runs the transaction's first frame itself, or settles one it made, opens the transaction's start first (`open_frame_start` with the frame's init, or `open_transaction_start` for a frame it never initialises), then closes it with `last_frame_result` or `close_transaction_start`, and ends the lifecycle with `execution_result` or `finish_transaction`.
   Without the open, its first child fails with `NoParent` and a direct settlement with `NotOpen`.
   A test that settles a first frame by hand does the same.
 
-  *The debug mirror.* A debug build keeps, in `LocalContext`, a mirror of the hooks' order that `Context`'s own hooks check: a root split is at depth 0, a child's parent is the identity on top and its depth one more, a settle pops its own identity and depth, and `Settled` finds the mirror empty.
-  It runs only where a local context returns it from `lifecycle_debug`, and it resets at every root split, so a simulation on a cloned context or an independent EVM nested in an inspector callback checks itself from its own root.
+  *The debug mirror.* A debug build keeps, in `LocalContext`, a `LifecycleMirror` of the hooks' order that `Context`'s own hooks feed and that panics when an event does not fit: a root split is at depth 0, a child's parent is the identity on top and its depth one more, a settle pops its own identity and depth, and `Settled` finds the mirror empty. It holds the events as `LifecycleEvent`s (`events()`) and the open starts (`open()`).
+  The type and `LocalContextTr::lifecycle_mirror` exist in every profile, and a consumer's own ledger can be a `LifecycleMirror`; only `LocalContext`'s field and `Context`'s three hook overrides are debug-only, and a release build holds no mirror and calls none.
+  It runs only where a local context returns it from `lifecycle_mirror` (the default returns `None`), and it resets at every root split, so a simulation on a cloned context or an independent EVM nested in an inspector callback checks itself from its own root.
   A consumer's own ledger follows the same rule: it is initialised at the root split, not at construction or at clone time, and dropped at either end.
   A context type that wraps `Context` and implements `Host` itself forwards the three hooks to the inner context, or the mirror never runs; the record and its checks run either way.
 - **Consumer.** mega-evm keeps an entry of per-start accounting for each start on a stack of its own, driven only by `frame_split` and `frame_settle`, and ends it at `frame_lifecycle_end`.
@@ -557,13 +564,15 @@ An id the fork once used for an entry with another default is left unused rather
   The lifecycle carries no MegaETH figure; what a start's entry holds is the consumer's.
 - **Removal.** When upstream exposes an equivalent pairing of a frame's start with its settlement, or when mega-evm keeps no accounting per start.
 - **Default.** The hooks do nothing and are inlined away, the flags are set on the inspected path and read by no one, and every result and every callback is upstream's.
-  What a consumer that sets nothing pays is revm's own record and the marks, in bytes: the record is a `StartLifecycle` of 40 bytes in `FrameStack`, which grows from 40 to 80 bytes per EVM, and a slot of 8 bytes (`PendingStart`) per frame on the stack, on the heap and reused.
+  What a consumer that sets nothing pays is revm's own record and the marks, in bytes: the record adds 40 bytes to `FrameStack`, which grows from 40 to 80 bytes per EVM, and a slot of 8 bytes (`PendingStart`) per frame on the stack, on the heap and reused.
   The marks sit in the padding of the values they ride on, so `GasTracker` stays 144 bytes, `Gas` 160, `InterpreterResult` 200, `CallOutcome` and `FrameResult` 296 and `CreateOutcome` 280 (aarch64, the fork's release profile), and a release build's `LocalContext` stays 32 bytes; a debug build's is larger for the mirror.
   In instructions, a start costs a checked increment, a slot write and a parent read, a settlement a slot take, a transaction one reset at each boundary, and an inspected frame's end two stores and two compares; the cost per frame, in instructions, is measured separately and not given here.
   Where measured, the three hooks leave no symbol in an unstripped optimised build; what the loop gains is a call to `FrameStack::open_start`.
   `Host`, `LocalContextTr` and `FrameStack` gain only default methods and private fields, and `revm_handler` a module, so they break no code written for upstream's.
-  The outcomes' public `start_mark` field is the one item a consumer can trip on: an outcome literal names it as `start_mark: Default::default()`, and it extends the exception the outcome literals already carry (see The start charge).
-  In a debug build `LocalContext` gains a public field for the mirror, so a literal of it in a debug build names it.
+  The stage adds three breaks, which the pull request body lists as `api:exception` items with the consumers checked, and what a consumer does for each:
+  - The outcomes' public `start_mark` field (`CallOutcome` and `CreateOutcome`): a consumer that builds an outcome by literal names it as `start_mark: Default::default()`, or builds it with the constructors. It extends the exception the outcome literals already carry (see The start charge).
+  - `LocalContext` gains a private field in a debug build, so a debug build cannot build it with a struct literal; a consumer builds it with `LocalContext::default()` or `new`. A release build's is unchanged.
+  - A behaviour change no compiler finds: a runner that drives the transaction's frame, or settles it, without `Handler::execution` and `Handler::last_frame_result` must open and close the transaction's start (see A hand-driven first frame); otherwise the record refuses it with `NoParent` or `NotOpen`.
 
 ### The original account info by reference
 
