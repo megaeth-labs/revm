@@ -336,8 +336,8 @@ mod tests {
     use super::consume_hook_credit;
     use interpreter::GasTracker;
 
-    /// A transaction's gas after its settlement left it `remaining` regular gas, then credited
-    /// `credit` by refills a hook makes: one that unwinds the spill and one past it.
+    /// A transaction's gas whose settlement left it `remaining` regular gas, after a hook credited
+    /// it `credit` more.
     fn credited(remaining: u64, credit: u64) -> GasTracker {
         let mut gas = GasTracker::new(1_000, remaining, 0);
         gas.erase_cost(credit);

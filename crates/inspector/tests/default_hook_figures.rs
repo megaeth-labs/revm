@@ -953,10 +953,10 @@ fn test_default_hooks_change_no_figure_the_settlement_computes() {
     );
 }
 
-/// The reviewer's case: the transaction's frame answered with an out-of-gas outcome whose tracker
-/// hands back a reservoir of 1, which unwinds 1 of the transaction's spill into regular gas. The
-/// halt keeps that gas, as revm's settlement left it, whether an inspector or the consumer's
-/// `frame_init` answers.
+/// The transaction's frame answered with an out-of-gas outcome whose tracker hands back a
+/// reservoir of 1, which unwinds 1 of the transaction's spill into regular gas. The halt keeps that
+/// gas, as revm's settlement left it, whether an inspector or the consumer's `frame_init` answers:
+/// 999,999 of the 1,000,000 gas limit is spent.
 #[test]
 fn test_a_halted_answer_to_the_transactions_frame_keeps_the_gas_its_settlement_returned() {
     let answer = (InstructionResult::OutOfGas, Left::All, 1);
