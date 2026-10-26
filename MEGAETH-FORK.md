@@ -487,7 +487,9 @@ An id the fork once used for an entry with another default is left unused rather
   `LocalContextTr::lifecycle_mirror`, `LifecycleMirror` and `LifecycleEvent` (`Split`, `Settle`, `End`), the debug mirror (below). The types and the method exist in every profile.
 - **Contract.** A *start* is one frame's beginning with the identity revm gave it; revm pairs every start it opens with exactly one settlement, last in first out, and the consumer does not pair them.
   *Where revm opens one.*
-  - Where it consumes a `NewFrame` action: `Evm::frame_run` and `InspectorEvmTr::inspect_frame_run`, right after `process_next_action` returns the frame's init, so the child's start opens against the frame on top of the stack, its caller.
+  - Where it consumes a `NewFrame` action, so the child's start opens against the frame on top of the stack, its caller, at that frame's depth plus one, which is the init's depth:
+    the plain `Evm::frame_run` opens it as the frame consumes the action, before `process_next_action` builds the init, and `InspectorEvmTr::inspect_frame_run` right after `process_next_action` returns the init.
+    Nothing a consumer can observe happens between the two positions.
   - Where it makes the transaction's first frame: `Handler::execution` and `InspectorHandler::inspect_execution`.
   - In the default `Handler::runtime_oog_result`, for the stand-in result of a transaction whose EIP-2780 runtime phase ran out of gas.
 
@@ -497,7 +499,7 @@ An id the fork once used for an entry with another default is left unused rather
 
   *Where revm settles one.*
   - `Evm::frame_return_result`, after `return_result` applied revm's own settlement, closes the start of the caller on top of the stack and calls `frame_settle` with the caller's tracker.
-  - `Handler::last_frame_result`, after `settle_first_frame`, closes the transaction's start and calls `frame_settle` with the transaction's tracker, and a halt then consumes the regular gas the hook credited, as it does for the state refund.
+  - `Handler::last_frame_result`, after `settle_first_frame`, closes the transaction's start and calls `frame_settle` with the transaction's tracker, and after a halt revm consumes the hook's net credit of regular gas and keeps the gas its own settlement left.
 
   `frame_split` is handed the start's `id`, a per-transaction number revm allocates from 1 with a checked add and never reuses within the transaction; the `parent` identity, the start of the frame that makes this one, `None` for the transaction's frame; the `depth`, read from revm's frame record and never from `interpreter.input`, which an inspector can write; and nothing else: a start's kind, caller, target, value and forward are the frame's own input, which the consumer's `frame_init` is handed straight after the split, and what the consumer owes a start (its shares, its charge, its allowance) it parked at `frame_starting`.
   `frame_settle` is handed the same `id` and `depth` back, and the `status` (`Ok`, `Revert` or `Halt`), `created` (for a creation, whether it took an address), the three flags (below) and `held_reservoir`, the reservoir the caller held before revm settled the child into it.
@@ -522,7 +524,7 @@ An id the fork once used for an entry with another default is left unused rather
 
   `finish_transaction` is the successful boundary (`FrameStack::settle_lifecycle`): with every start settled it emits `LifecycleEnd::Settled` and resets the record.
   `discard_transaction` is the fatal boundary (`FrameStack::discard_lifecycle`): it emits `Discarded` only if a lifecycle is under way, resets the record, and is idempotent, so a cleanup that runs twice emits once. It resets the lifecycle only; the frame stack is cleared separately (see Reuse after an uncaught error).
-  `close_frame_start` and `close_transaction_start` hand the settlement to `frame_settle` with the caller's tracker and the transaction's, and `close_transaction_start` applies the halt rule after the hook.
+  `close_frame_start` and `close_transaction_start` hand the settlement to `frame_settle` with the caller's tracker and the transaction's, and `close_transaction_start` applies the halt rule after the hook: it consumes only the hook's net regular-gas credit, and a hook that credits nothing or debits leaves the gas as it is.
   A call sits where the mainnet method makes it and passes what that method passes.
 
   *Fatal errors.* The record refuses these in every build, debug and release alike, as a `ContextError::Custom` carrying the error's `Display`, which fails the transaction and which `catch_error` reports:
@@ -536,7 +538,7 @@ An id the fork once used for an entry with another default is left unused rather
 
   *The marks and the flags.* Before it calls an inspector's end callbacks (`call_end`, `create_end`, `frame_end`) revm writes the start's identity on the result's tracker (`StartMark`, a `u32`, with `GasTracker::set_start_mark`) and a mark of the start on the outcome (`OutcomeMark`, a `u16`, `(id − 1) mod 65535 + 1`, never zero) (`mark_for_end_callbacks`); after them it reads both (`check_end_callbacks`). A consumer has no reason to set a mark.
   `gas_replaced` is set on the start when the tracker's mark is no longer the start's, `outcome_rebuilt` when the outcome's is not, and `inspector_answer` when `frame_start`, `call` or `create` answered the start.
-  A constructor (`Gas::new`, `CallOutcome::new`, `CreateOutcome::new`) and a literal that names the mark as `Default::default()` leave it zero, so a value built afresh is always seen; a copy of another start's value is seen unless the two identities are 65,535 apart, and a copy made in the previous transaction at the same sequence position is not.
+  A constructor (`Gas::new`, `CallOutcome::new`, `CreateOutcome::new`) and a literal that names the mark as `Default::default()` leave it zero, so a value built afresh is always seen; a copy of another start's value is seen unless the two identities are a multiple of 65,535 apart, and a copy made in the previous transaction at the same sequence position is not.
   A tracker an inspector saved before the marking carries none, so restoring it at an end callback sets `gas_replaced` even when it came from the same start.
   The flags say what an inspector did, never what the consumer did: the consumer's own answers are made in `frame_init`, before any end callback, and are never flagged.
   Only the inspected path marks and flags; the plain path leaves all three clear.
@@ -564,7 +566,7 @@ An id the fork once used for an entry with another default is left unused rather
   The lifecycle carries no MegaETH figure; what a start's entry holds is the consumer's.
 - **Removal.** When upstream exposes an equivalent pairing of a frame's start with its settlement, or when mega-evm keeps no accounting per start.
 - **Default.** The hooks do nothing and are inlined away, the flags are set on the inspected path and read by no one, and every result and every callback is upstream's.
-  What a consumer that sets nothing pays is revm's own record and the marks, in bytes: the record adds 40 bytes to `FrameStack`, which grows from 40 to 80 bytes per EVM, and a slot of 8 bytes (`PendingStart`) per frame on the stack, on the heap and reused.
+  What a consumer that sets nothing pays is revm's own record and the marks, in bytes: the record adds 40 bytes to `FrameStack`, which grows from 40 to 80 bytes per EVM, and a slot of 8 bytes (`PendingStart`) on the heap and reused: the slots are sized with the frame stack's capacity (for zero-sized frames, one per frame that made a child), grown when a child first opens past them and never shrunk, so a transaction's boundary does no `Vec` work.
   The marks sit in the padding of the values they ride on, so `GasTracker` stays 144 bytes, `Gas` 160, `InterpreterResult` 200, `CallOutcome` and `FrameResult` 296 and `CreateOutcome` 280 (aarch64, the fork's release profile), and a release build's `LocalContext` stays 32 bytes; a debug build's is larger for the mirror.
   In instructions, a start costs a checked increment, a slot write and a parent read, a settlement a slot take, a transaction one reset at each boundary, and an inspected frame's end two stores and two compares; the cost per frame, in instructions, is measured separately and not given here.
   Where measured, the three hooks leave no symbol in an unstripped optimised build; what the loop gains is a call to `FrameStack::open_start`.
