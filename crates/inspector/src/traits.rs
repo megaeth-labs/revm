@@ -153,6 +153,9 @@ pub trait InspectorEvmTr:
     /// If frame has returned result it would hand it to [`EvmTr::frame_run_result`], then to the
     /// inspector's `frame_end`, and mark the frame as finished. A frame without an `EthFrame` is
     /// run by [`EvmTr::frame_run`], and its result handed to [`EvmTr::frame_run_result`] only.
+    ///
+    /// A frame init it returns opens the child's start, as [`EvmTr::frame_run`] does
+    /// ([`handler::lifecycle::open_frame_start`]).
     #[inline]
     fn inspect_frame_run(
         &mut self,
@@ -175,6 +178,10 @@ pub trait InspectorEvmTr:
             instructions.gas_table(),
         );
         let mut result = frame.process_next_action(ctx, next_action);
+        // revm consumed the frame's `NewFrame` action: the child's start opens.
+        if let Ok(ItemOrResult::Item(init)) = &result {
+            handler::lifecycle::open_frame_start(self, init)?;
+        }
 
         if let Ok(ItemOrResult::Result(frame_result)) = &mut result {
             self.frame_run_result(frame_result)?;

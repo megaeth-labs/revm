@@ -1,6 +1,8 @@
 use crate::{
-    instructions::InstructionProvider, item_or_result::FrameInitOrResult, EthFrame, FrameResult,
-    ItemOrResult, PrecompileProvider,
+    instructions::InstructionProvider,
+    item_or_result::FrameInitOrResult,
+    lifecycle::{close_frame_start, Returning},
+    EthFrame, FrameResult, ItemOrResult, PrecompileProvider,
 };
 use auto_impl::auto_impl;
 use context::{ContextTr, Database, Evm, FrameStack};
@@ -113,6 +115,10 @@ pub trait EvmTr {
     /// Run the frame from the top of the stack. Returns the frame init or result.
     ///
     /// If frame has returned result it would mark it as finished.
+    ///
+    /// A frame init it returns opens the child's start under the frame's own
+    /// ([`lifecycle::open_frame_start`](crate::lifecycle::open_frame_start)); a
+    /// reimplementation makes the same call for the init it consumed.
     fn frame_run(
         &mut self,
     ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>>;
@@ -153,6 +159,10 @@ pub trait EvmTr {
 
     /// Returns the result of the frame to the caller. Frame is popped from the frame stack.
     /// Consumes the frame result or returns it if there is more frames to run.
+    ///
+    /// A result returned into a caller closes the start the caller opened for it
+    /// ([`lifecycle::close_frame_start`](crate::lifecycle::close_frame_start)); a
+    /// reimplementation makes the same call after it returns the result.
     fn frame_return_result(
         &mut self,
         result: <Self::Frame as FrameTr>::FrameResult,
@@ -229,7 +239,8 @@ where
         }))
     }
 
-    /// Run the frame from the top of the stack. Returns the frame init or result.
+    /// Run the frame from the top of the stack. Returns the frame init or result, and opens the
+    /// start of a frame init.
     #[inline]
     fn frame_run(&mut self) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<CTX>> {
         let frame = self.frame_stack.get();
@@ -242,14 +253,16 @@ where
             context,
         );
 
-        frame.process_next_action(context, action).inspect(|i| {
-            if i.is_result() {
-                frame.set_finished(true);
-            }
-        })
+        let next = frame.process_next_action::<_, ContextDbError<CTX>>(context, action)?;
+        match &next {
+            ItemOrResult::Item(init) => crate::lifecycle::open_frame_start(self, init)?,
+            ItemOrResult::Result(_) => frame.set_finished(true),
+        }
+        Ok(next)
     }
 
-    /// Returns the result of the frame to the caller. Frame is popped from the frame stack.
+    /// Returns the result of the frame to the caller, and closes its start. Frame is popped from
+    /// the frame stack.
     #[inline]
     fn frame_return_result(
         &mut self,
@@ -261,9 +274,12 @@ where
         if self.frame_stack.index().is_none() {
             return Ok(Some(result));
         }
-        self.frame_stack
-            .get()
-            .return_result::<_, ContextDbError<Self::Context>>(&mut self.ctx, result)?;
+        let caller = self.frame_stack.get();
+        let returning = Returning::new(&result, caller);
+        caller.return_result::<_, ContextDbError<Self::Context>>(&mut self.ctx, result)?;
+        close_frame_start(&mut self.ctx, &mut self.frame_stack, returning, |caller| {
+            caller
+        })?;
         Ok(None)
     }
 }

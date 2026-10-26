@@ -100,6 +100,8 @@ where
         };
         // The runtime gas phase is complete: commit its state changes.
         evm.ctx().journal_mut().checkpoint_commit();
+        // The transaction's start opens with the frame init revm made for it.
+        handler::lifecycle::open_frame_start(evm, &first_frame_input)?;
 
         // Run execution loop
         let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;

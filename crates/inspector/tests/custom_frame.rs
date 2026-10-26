@@ -15,8 +15,8 @@ use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use handler::{
     evm::{ContextDbError, FrameInitResult, FrameTr},
     instructions::{EthInstructions, InstructionProvider},
-    EthFrame, EthPrecompiles, EvmTr, FrameInitOrResult, FrameResult, Handler, ItemOrResult,
-    MainContext, MainnetContext,
+    lifecycle, EthFrame, EthPrecompiles, EvmTr, FrameInitOrResult, FrameResult, Handler,
+    ItemOrResult, MainContext, MainnetContext,
 };
 use interpreter::{
     interpreter::EthInterpreter, interpreter_action::FrameInit, CallInputs, CallOutcome, FrameInput,
@@ -198,6 +198,10 @@ impl EvmTr for Consumer {
         if let Ok(ItemOrResult::Result(_)) = &result {
             frame.set_finished(true);
         }
+        // An EVM that runs its frames itself opens the start of the child init it consumed.
+        if let Ok(ItemOrResult::Item(init)) = &result {
+            lifecycle::open_frame_start(self, init)?;
+        }
         result
     }
 
@@ -214,10 +218,11 @@ impl EvmTr for Consumer {
         if frame_stack.index().is_none() {
             return Ok(Some(result));
         }
-        frame_stack
-            .get()
-            .0
-            .return_result::<_, ContextDbError<Ctx>>(ctx, result)?;
+        // An EVM that returns results itself settles the caller's open start after the return.
+        let caller = &mut frame_stack.get().0;
+        let returning = lifecycle::Returning::new(&result, caller);
+        caller.return_result::<_, ContextDbError<Ctx>>(ctx, result)?;
+        lifecycle::close_frame_start(ctx, frame_stack, returning, |frame| &mut frame.0)?;
         Ok(None)
     }
 }

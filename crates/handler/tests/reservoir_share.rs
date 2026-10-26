@@ -963,6 +963,8 @@ fn test_a_first_frame_settled_into_gas_with_unlimited_pools_and_no_reservoir_set
     let mut evm = Run::new(ends(Vec::new())).evm();
     let mut result = FrameResult::new_call_oog(GAS_LIMIT, 0..0, 0);
     let mut gas = GasTracker::new(GAS_LIMIT, 0, 0);
+    // A runner that settles a first frame it built itself opens the transaction's start first.
+    revm_handler::lifecycle::open_transaction_start(&mut evm).expect("the start opens");
 
     Mainnet::default()
         .last_frame_result(&mut evm, &mut result, &mut gas)
