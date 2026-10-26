@@ -112,8 +112,9 @@ pub(super) struct StartLifecycle {
     open_children: u32,
     /// The transaction's start.
     root: Option<PendingStart>,
-    /// The open start of the frame at each stack index. Its length grows with the frame stack's
-    /// capacity and never shrinks, so frames and transactions reuse the slots without resizing.
+    /// The open start of the frame at each stack index. Its length grows with the room the frame
+    /// stack has ([`FrameStack::frame_room`]), or by the slots the frames need for zero-sized
+    /// frames, and never shrinks, so frames and transactions reuse the slots without resizing.
     children: Vec<Option<PendingStart>>,
 }
 
@@ -155,8 +156,8 @@ impl StartLifecycle {
         self.open_children = 0;
     }
 
-    /// Gives the record a slot for every frame the stack has room for, `len`: the first child
-    /// start, and the first after the frame stack grew.
+    /// Gives the record `len` slots: a slot for every frame the stack has room for, at the first
+    /// child start and the first after the frame stack grew.
     #[cold]
     #[inline(never)]
     fn grow_children(&mut self, len: usize) {
@@ -165,6 +166,19 @@ impl StartLifecycle {
 }
 
 impl<T> FrameStack<T> {
+    /// How many frames the stack has room for before its vector reallocates: the slots the record
+    /// gives the children when it grows, so that it grows with the stack. A vector of zero-sized
+    /// frames never reallocates and reports a capacity of `usize::MAX`, which names no room: the
+    /// record then grows by the slots its frames need.
+    #[inline]
+    const fn frame_room(&self) -> usize {
+        if size_of::<T>() == 0 {
+            0
+        } else {
+            self.stack.capacity()
+        }
+    }
+
     /// Opens the start of the frame the next init makes, at `depth`: the child of the frame on
     /// top of the stack, or the transaction's start when the stack is empty. Returns the split to
     /// hand to [`Host::frame_split`](crate::Host::frame_split).
@@ -179,7 +193,7 @@ impl<T> FrameStack<T> {
     /// [`StartLifecycleError::NoParent`] when the frame on top has no start of its own.
     #[inline]
     pub fn open_start(&mut self, depth: usize) -> Result<FrameSplit, StartLifecycleError> {
-        let capacity = self.stack.capacity();
+        let room = self.frame_room();
         let record = &mut self.lifecycle;
         let id = record
             .last
@@ -206,7 +220,7 @@ impl<T> FrameStack<T> {
                     return Err(StartLifecycleError::NoParent);
                 };
                 if i >= record.children.len() {
-                    record.grow_children(capacity.max(i + 1));
+                    record.grow_children(room.max(i + 1));
                 }
                 let slot = &mut record.children[i];
                 if slot.is_some() {
@@ -570,6 +584,37 @@ mod tests {
         stack.close_start(0, SettleStatus::Ok, None, 0).unwrap();
         assert_eq!(stack.settle_lifecycle(), Ok(Some(LifecycleEnd::Settled)));
         assert_eq!(stack.lifecycle.children.len(), slots);
+    }
+
+    /// A stack of zero-sized frames, whose vector reports a capacity of `usize::MAX`, opens its
+    /// children as any stack does.
+    #[test]
+    fn test_a_stack_of_zero_sized_frames_opens_its_children() {
+        let mut stack = FrameStack::<()>::new_prealloc(1);
+        assert_eq!(stack.open_start(0).map(|s| s.id), Ok(1));
+        let token = stack.start_init().consume();
+        unsafe { stack.end_init(token) };
+        assert_eq!(stack.open_start(1).map(|s| s.id), Ok(2));
+    }
+
+    /// A stack of zero-sized frames gets one slot per frame a child opened under, the slots its
+    /// frames need, rather than the slots its vector's capacity would name.
+    #[test]
+    fn test_a_stack_of_zero_sized_frames_grows_its_slots_by_the_frames() {
+        let mut stack = FrameStack::<()>::new_prealloc(4);
+        stack.open_start(0).unwrap();
+        let token = stack.start_init().consume();
+        unsafe { stack.end_init(token) };
+        for depth in 1..=4 {
+            if depth > 1 {
+                let token = stack.get_next().consume();
+                unsafe { stack.push(token) };
+            }
+            assert_eq!(stack.open_start(depth).map(|s| s.id), Ok(depth as u32 + 1));
+        }
+        assert_eq!(stack.lifecycle.children.len(), 4);
+        assert_eq!(stack.discard_lifecycle(), Some(LifecycleEnd::Discarded));
+        assert!(stack.lifecycle.children.iter().all(Option::is_none));
     }
 
     #[test]
