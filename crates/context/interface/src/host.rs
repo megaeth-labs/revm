@@ -1,8 +1,10 @@
 //! Host interface for external blockchain state access.
 
 mod instruction_hooks;
+mod lifecycle;
 
 pub use instruction_hooks::{CompletedWrite, FrameStart, FrameStartKind, WriteVerdict};
+pub use lifecycle::{FrameSettle, FrameSplit, LifecycleEnd, SettleStatus};
 
 use crate::{
     cfg::{gas::GasTracker, GasId, GasParams, StateGasCharge, StateGasSite},
@@ -141,6 +143,46 @@ pub trait Host {
     fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
         let _ = (start, gas);
         true
+    }
+
+    /* Start lifecycle */
+
+    /// Called when revm opens a start ([`FrameSplit`]): it consumed a frame's init and
+    /// initialises the frame next. A frame's `NewFrame` action opens a child start under the
+    /// frame's own; the transaction's frame, or the stand-in for one that never runs, opens the
+    /// transaction's start, the first of its lifecycle.
+    ///
+    /// Every start opened is closed once by [`frame_settle`](Self::frame_settle), innermost first,
+    /// unless the lifecycle is discarded ([`frame_lifecycle_end`](Self::frame_lifecycle_end)). A
+    /// start revm never opened, such as a `NewFrame` an inspector dropped, is never settled.
+    ///
+    /// The default touches nothing.
+    #[inline]
+    fn frame_split(&mut self, split: &FrameSplit) {
+        let _ = split;
+    }
+
+    /// Called when revm settles the start `settle.id` into its caller's `gas`: after revm's own
+    /// settlement of the frame's result, and, for the transaction's frame, before revm's halt rule
+    /// consumes the regular gas left on a halt.
+    ///
+    /// The hook may debit and credit `gas`, which goes on as the hook left it.
+    ///
+    /// The default touches nothing.
+    #[inline]
+    fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
+        let _ = (settle, gas);
+    }
+
+    /// Called once when a transaction's lifecycle ends: [`LifecycleEnd::Settled`] at the
+    /// successful boundary, every start settled, or [`LifecycleEnd::Discarded`] at the fatal one,
+    /// the starts still open discarded. Not called for a transaction that failed before its start
+    /// opened.
+    ///
+    /// The default touches nothing.
+    #[inline]
+    fn frame_lifecycle_end(&mut self, end: LifecycleEnd) {
+        let _ = end;
     }
 
     /* Database */

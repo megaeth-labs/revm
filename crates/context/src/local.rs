@@ -1,4 +1,6 @@
 //! Local context that is filled by execution.
+#[cfg(debug_assertions)]
+use context_interface::LifecycleMirror;
 use context_interface::LocalContextTr;
 use core::cell::RefCell;
 use std::{rc::Rc, string::String, vec::Vec};
@@ -10,6 +12,10 @@ pub struct LocalContext {
     pub shared_memory_buffer: Rc<RefCell<Vec<u8>>>,
     /// Optional precompile error message to bubble up.
     pub precompile_error_message: Option<String>,
+    /// The start lifecycle's mirror, in debug builds only
+    /// ([`LocalContextTr::lifecycle_mirror`]).
+    #[cfg(debug_assertions)]
+    lifecycle_mirror: LifecycleMirror,
 }
 
 impl Default for LocalContext {
@@ -17,6 +23,8 @@ impl Default for LocalContext {
         Self {
             shared_memory_buffer: Rc::new(RefCell::new(Vec::with_capacity(1024 * 4))),
             precompile_error_message: None,
+            #[cfg(debug_assertions)]
+            lifecycle_mirror: LifecycleMirror::default(),
         }
     }
 }
@@ -26,6 +34,12 @@ impl LocalContextTr for LocalContext {
         // Sets len to 0 but it will not shrink to drop the capacity.
         unsafe { self.shared_memory_buffer.borrow_mut().set_len(0) };
         self.precompile_error_message = None;
+    }
+
+    #[cfg(debug_assertions)]
+    #[inline]
+    fn lifecycle_mirror(&mut self) -> Option<&mut LifecycleMirror> {
+        Some(&mut self.lifecycle_mirror)
     }
 
     fn shared_memory_buffer(&self) -> &Rc<RefCell<Vec<u8>>> {
