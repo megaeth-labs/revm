@@ -404,6 +404,47 @@ fn test_the_marks_take_no_part_in_the_values() {
     }
 }
 
+/// An EVM on Amsterdam, where a value transfer to an empty account pays the account's state in the
+/// transaction's runtime gas phase.
+fn runtime_out_of_gas_evm() -> MainEvm<()> {
+    Context::mainnet()
+        .with_db(db(CHILD))
+        .modify_cfg_chained(|cfg| {
+            cfg.set_spec_and_mainnet_gas_params(SpecId::AMSTERDAM);
+            cfg.tx_gas_limit_cap = Some(u64::MAX);
+        })
+        .build_mainnet()
+}
+
+/// A value transfer to an empty account funded for its intrinsic gas only: valid, and out of gas
+/// in the runtime gas phase.
+fn runtime_out_of_gas_tx() -> TxEnv {
+    use primitives::{eip2780, eip8038};
+    TxEnv::builder_for_bench()
+        .kind(TxKind::Call(address!(
+            "0x00000000000000000000000000000000000000ab"
+        )))
+        .value(U256::from(1))
+        .gas_price(0)
+        .gas_limit(eip2780::TX_BASE_COST + eip8038::COLD_ACCOUNT_ACCESS + eip2780::TX_VALUE_COST)
+        .build_fill()
+}
+
+/// The stand-in for the frame of a transaction whose runtime gas phase ran out of gas settles on
+/// the transaction's start, so the transaction is included as a halt and leaves the record clear.
+#[test]
+fn test_the_runtime_out_of_gas_stand_in_leaves_the_record_clear() {
+    let mut evm = runtime_out_of_gas_evm();
+    for _ in 0..2 {
+        assert!(evm
+            .transact(runtime_out_of_gas_tx())
+            .expect("included")
+            .result
+            .is_halt());
+        assert_clear(&mut evm);
+    }
+}
+
 /// The events the hooks received, which the mirror the context keeps in debug builds records.
 #[cfg(debug_assertions)]
 mod events {
@@ -578,24 +619,12 @@ mod events {
     /// on the transaction's start.
     #[test]
     fn test_the_runtime_out_of_gas_stand_in_settles_the_transactions_start() {
-        use primitives::{eip2780, eip8038};
-        let mut evm = Context::mainnet()
-            .with_db(db(CHILD))
-            .modify_cfg_chained(|cfg| {
-                cfg.set_spec_and_mainnet_gas_params(SpecId::AMSTERDAM);
-                cfg.tx_gas_limit_cap = Some(u64::MAX);
-            })
-            .build_mainnet();
-        let empty = address!("0x00000000000000000000000000000000000000ab");
-        let tx = TxEnv::builder_for_bench()
-            .kind(TxKind::Call(empty))
-            .value(U256::from(1))
-            .gas_price(0)
-            .gas_limit(
-                eip2780::TX_BASE_COST + eip8038::COLD_ACCOUNT_ACCESS + eip2780::TX_VALUE_COST,
-            )
-            .build_fill();
-        assert!(evm.transact(tx).expect("included").result.is_halt());
+        let mut evm = runtime_out_of_gas_evm();
+        assert!(evm
+            .transact(runtime_out_of_gas_tx())
+            .expect("included")
+            .result
+            .is_halt());
         assert_eq!(
             events(&mut evm),
             [
