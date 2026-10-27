@@ -1,8 +1,5 @@
 use crate::interpreter_types::MemoryTr;
-use context_interface::{
-    cfg::gas::{PoolAmounts, StartCharge},
-    ContextTr, LocalContextTr,
-};
+use context_interface::{ContextTr, LocalContextTr};
 use core::ops::Range;
 use primitives::{Address, Bytes, B256, U256};
 use state::Bytecode;
@@ -177,37 +174,6 @@ pub struct CallInputs {
     /// On revert/halt of the resulting frame the parent must refund this charge
     /// to the reservoir, matching the CREATE pattern.
     pub charged_new_account_state_gas: bool,
-    /// What the frame-start hook charged the caller for this call and the call's failure gives
-    /// back: history gas and an amount of each pool, refunded to the caller by `return_result`
-    /// when the call does not succeed, as `charged_new_account_state_gas` is.
-    ///
-    /// In a format that carries field names, such as JSON, encodings made before this field existed
-    /// decode it as no charge.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub charged_start: StartCharge,
-    /// The share of each of the caller's pools the call receives: its pools when it starts.
-    /// Taken out of the caller's pools by the call instruction, all but the schedule's
-    /// `pool_kept_percent` of each, and given back with what the call left of them when it
-    /// returns.
-    ///
-    /// In a format that carries field names, such as JSON, encodings made before this field existed
-    /// decode it as every pool unlimited.
-    #[cfg_attr(feature = "serde", serde(default = "unlimited_pools"))]
-    pub pool_shares: PoolAmounts,
-    /// History gas the call may spend before it charges its budget: the schedule's
-    /// `call_history_allowance` for a call that transfers value, set where the call instruction
-    /// adds the call stipend, and zero otherwise.
-    ///
-    /// In a format that carries field names, such as JSON, encodings made before this field existed
-    /// decode it as zero.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub history_allowance: u64,
-}
-
-/// The shares an encoding that predates the pools decodes to in a format that carries field names.
-#[cfg(feature = "serde")]
-const fn unlimited_pools() -> PoolAmounts {
-    PoolAmounts::UNLIMITED
 }
 
 impl CallInputs {

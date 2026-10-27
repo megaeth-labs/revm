@@ -18,7 +18,7 @@ use interpreter::{
     interpreter_types::ReturnData,
     CallInput, CallInputs, CallOutcome, CallValue, CreateInputs, CreateOutcome, CreateScheme,
     FrameInput, Gas, GasTracker, InputsImpl, InstructionResult, Interpreter, InterpreterAction,
-    InterpreterResult, InterpreterTypes, OutcomeMark, SharedMemory, StartCharge,
+    InterpreterResult, InterpreterTypes, OutcomeMark, SharedMemory,
 };
 use primitives::{
     constants::CALL_STACK_LIMIT,
@@ -159,16 +159,8 @@ impl EthFrame<EthInterpreter> {
         let reservoir_remaining_gas = inputs.reservoir;
         let charged_new_account_state_gas = inputs.charged_new_account_state_gas;
         let charged_state_gas_address = inputs.target_address;
-        let charged_start = inputs.charged_start;
-        // The child's pools are the shares its caller forwarded, and its history allowance what
-        // the call instruction gave it; both ride on the frame's gas, as the reservoir does,
-        // whether the handler runs the frame or answers the start without one.
-        let pool_shares = inputs.pool_shares;
-        let history_allowance = inputs.history_allowance;
-        let mut gas =
+        let gas =
             Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, reservoir_remaining_gas);
-        gas.tracker_mut().set_pools_remaining(pool_shares);
-        gas.set_history_allowance(history_allowance);
 
         let return_result = |instruction_result: InstructionResult| {
             Ok(ItemOrResult::Result(FrameResult::Call(CallOutcome {
@@ -182,7 +174,6 @@ impl EthFrame<EthInterpreter> {
                 precompile_call_logs: Vec::new(),
                 charged_new_account_state_gas,
                 charged_state_gas_address,
-                charged_start,
                 start_mark: OutcomeMark::NONE,
             })))
         };
@@ -219,14 +210,7 @@ impl EthFrame<EthInterpreter> {
         let is_static = inputs.is_static;
         let gas_limit = inputs.gas_limit;
 
-        if let Some(mut result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_string)? {
-            // The provider built the answer's gas from the inputs' regular gas and reservoir. The
-            // answer takes the caller's shares as the pools it started with, less what the
-            // provider drew on them (a draw past a share is held to it, with the pool's
-            // crossing), and the allowance the input carries, so the caller's settlement gets
-            // the shares back from the answer as it would from a frame.
-            result.gas.tracker_mut().adopt_pool_shares(pool_shares);
-            result.gas.set_history_allowance(history_allowance);
+        if let Some(result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_string)? {
             let mut logs = Vec::new();
             if result.result.is_ok() {
                 // Preserve the reservoir on the result gas so it can be reimbursed.
@@ -245,7 +229,6 @@ impl EthFrame<EthInterpreter> {
                 precompile_call_logs: logs,
                 charged_new_account_state_gas,
                 charged_state_gas_address,
-                charged_start,
                 start_mark: OutcomeMark::NONE,
             })));
         }
@@ -260,8 +243,7 @@ impl EthFrame<EthInterpreter> {
         }
 
         // Create interpreter and executes call and push new CallStackFrame.
-        let frame = this.get(EthFrame::invalid);
-        frame.clear(
+        this.get(EthFrame::invalid).clear(
             FrameData::Call(CallFrame {
                 return_memory_range: inputs.return_memory_offset.clone(),
             }),
@@ -276,15 +258,6 @@ impl EthFrame<EthInterpreter> {
             reservoir_remaining_gas,
             checkpoint,
         );
-        frame
-            .interpreter
-            .gas
-            .tracker_mut()
-            .set_pools_remaining(pool_shares);
-        frame
-            .interpreter
-            .gas
-            .set_history_allowance(history_allowance);
 
         Ok(ItemOrResult::Item(this.consume()))
     }
@@ -311,27 +284,19 @@ impl EthFrame<EthInterpreter> {
         // Recorded by whoever made the charge — the CREATE opcode or the EIP-2780 runtime phase
         // — because the created address is not derivable here on the early-fail paths.
         let charged_state_gas_address = inputs.charged_state_gas_address();
-        let charged_start = inputs.charged_start();
-        // The creation's pools are the shares its caller forwarded; they ride on the frame's
-        // gas, as the reservoir does, on an early failure too, so the caller's settlement gets
-        // them back.
-        let pool_shares = inputs.pool_shares();
         let return_error = |e| {
-            let mut gas = Gas::new_with_regular_gas_and_reservoir(
-                inputs.gas_limit(),
-                reservoir_remaining_gas,
-            );
-            gas.tracker_mut().set_pools_remaining(pool_shares);
             Ok(ItemOrResult::Result(FrameResult::Create(CreateOutcome {
                 result: InterpreterResult {
                     result: e,
-                    gas,
+                    gas: Gas::new_with_regular_gas_and_reservoir(
+                        inputs.gas_limit(),
+                        reservoir_remaining_gas,
+                    ),
                     output: Bytes::new(),
                 },
                 address: None,
                 charged_create_state_gas,
                 charged_state_gas_address,
-                charged_start,
                 start_mark: OutcomeMark::NONE,
             })))
         };
@@ -394,8 +359,7 @@ impl EthFrame<EthInterpreter> {
         };
         let gas_limit = inputs.gas_limit();
 
-        let frame = this.get(EthFrame::invalid);
-        frame.clear(
+        this.get(EthFrame::invalid).clear(
             FrameData::Create(CreateFrame { created_address }),
             FrameInput::Create(inputs),
             depth,
@@ -408,11 +372,6 @@ impl EthFrame<EthInterpreter> {
             reservoir_remaining_gas,
             checkpoint,
         );
-        frame
-            .interpreter
-            .gas
-            .tracker_mut()
-            .set_pools_remaining(pool_shares);
 
         Ok(ItemOrResult::Item(this.consume()))
     }
@@ -484,21 +443,16 @@ impl EthFrame<EthInterpreter> {
                 // Propagate EIP-8037 new-account state-gas flag from the frame
                 // input so the parent can refund the upfront charge if the call
                 // ends in revert/halt.
-                // The start charge rides along for the same refund.
-                let (charged_new_account_state_gas, charged_state_gas_address, charged_start) =
-                    match &self.input {
-                        FrameInput::Call(inputs) => (
-                            inputs.charged_new_account_state_gas,
-                            inputs.target_address,
-                            inputs.charged_start,
-                        ),
-                        _ => (false, Address::ZERO, StartCharge::default()),
-                    };
+                let (charged_new_account_state_gas, charged_state_gas_address) = match &self.input {
+                    FrameInput::Call(inputs) => {
+                        (inputs.charged_new_account_state_gas, inputs.target_address)
+                    }
+                    _ => (false, Address::ZERO),
+                };
                 let mut outcome =
                     CallOutcome::new(interpreter_result, frame.return_memory_range.clone());
                 outcome.charged_new_account_state_gas = charged_new_account_state_gas;
                 outcome.charged_state_gas_address = charged_state_gas_address;
-                outcome.charged_start = charged_start;
                 ItemOrResult::Result(FrameResult::Call(outcome))
             }
             FrameData::Create(frame) => {
@@ -515,18 +469,15 @@ impl EthFrame<EthInterpreter> {
                 // inputs carry the address the charge site recorded, which is the one the
                 // refund must use. An uncharged creation leaves it zero, so the field is
                 // meaningful only when `charged_create_state_gas` is set.
-                let (charged_create_state_gas, charged_state_gas_address, charged_start) =
-                    match &self.input {
-                        FrameInput::Create(inputs) => (
-                            inputs.charged_create_state_gas(),
-                            inputs.charged_state_gas_address(),
-                            inputs.charged_start(),
-                        ),
-                        _ => (false, Address::ZERO, StartCharge::default()),
-                    };
+                let (charged_create_state_gas, charged_state_gas_address) = match &self.input {
+                    FrameInput::Create(inputs) => (
+                        inputs.charged_create_state_gas(),
+                        inputs.charged_state_gas_address(),
+                    ),
+                    _ => (false, Address::ZERO),
+                };
                 create_outcome.charged_create_state_gas = charged_create_state_gas;
                 create_outcome.charged_state_gas_address = charged_state_gas_address;
-                create_outcome.charged_start = charged_start;
                 ItemOrResult::Result(FrameResult::Create(create_outcome))
             }
         };
@@ -563,10 +514,6 @@ impl EthFrame<EthInterpreter> {
             },
             None => None,
         };
-        // The start charge the frame-start hook charged this (parent) frame and declared on the
-        // start is refunded on the same condition, whole, by the same two refills a consumer's
-        // own take-back uses; it needs no price lookup, since the hook declared the amounts.
-        let refund_start_charge = result.refundable_start_charge();
 
         // Insert result to the top frame.
         match result {
@@ -657,12 +604,6 @@ impl EthFrame<EthInterpreter> {
         if let Some(charge) = refund_state_gas {
             self.interpreter.gas.refill_reservoir(charge);
         }
-        if let Some(charge) = refund_start_charge {
-            self.interpreter
-                .gas
-                .tracker_mut()
-                .refill_start_charge(charge);
-        }
 
         Ok(())
     }
@@ -690,14 +631,6 @@ impl EthFrame<EthInterpreter> {
 /// - net state gas, net history gas, the spilled portion, and the refund counter
 ///   persist only on success; on revert/halt the child's state changes roll back
 ///   and contribute nothing.
-/// - each pool settles as the reservoir does, not as regular gas: the child's
-///   rollback gives its draws back to its pools, so what it hands back is its
-///   remaining pool on success and the whole share it was given on revert *and on
-///   halt*, since a halted frame draws nothing; the parent, which kept what it
-///   did not forward, always absorbs it. The child's net draws merge into the
-///   parent's on success only, as the history net does, so a later rollback of
-///   the parent undoes the child's draws too. With no pool set, every figure here
-///   is the unlimited pool going out and coming back.
 #[inline]
 pub const fn handle_reservoir_remaining_gas(
     instruction_result: InstructionResult,
@@ -743,7 +676,6 @@ pub const fn handle_reservoir_remaining_gas(
         parent_gas.record_refund(child_gas.refunded());
     }
     parent_gas.absorb_returned_reservoir(child_gas.reservoir());
-    parent_gas.absorb_returned_pools(child_gas, instruction_result.is_ok());
 }
 
 /// Handles the result of a CREATE operation, including validation and state updates.
@@ -910,7 +842,6 @@ pub fn return_create<CTX: ContextTr>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use interpreter::PoolId;
 
     #[test]
     fn sibling_refill_restores_parent_regular_gas() {
@@ -945,135 +876,6 @@ mod tests {
         assert_eq!(parent.reservoir(), 0);
         assert_eq!(parent.state_gas_spent(), 0);
         assert_eq!(parent.state_gas_spilled(), 0);
-    }
-
-    /// A child with `share` of each of its caller's pools.
-    fn child_with_share(parent: &mut GasTracker, share: u64) -> GasTracker {
-        let mut child = GasTracker::new(500, 500, 0);
-        for pool in PoolId::ALL {
-            parent.forward_pool(pool, share);
-            child.set_pool_remaining(pool, share);
-        }
-        child
-    }
-
-    /// A tracker with every pool at 1,000.
-    fn pools_1000() -> GasTracker {
-        let mut tracker = GasTracker::new(1_000, 1_000, 0);
-        for pool in PoolId::ALL {
-            tracker.set_pool_remaining(pool, 1_000);
-        }
-        tracker
-    }
-
-    /// `(remaining, spent)` of every pool.
-    fn pools(tracker: &GasTracker) -> [(u64, i64); PoolId::COUNT] {
-        PoolId::ALL.map(|pool| (tracker.pool_remaining(pool), tracker.pool_spent(pool)))
-    }
-
-    /// A child that succeeds hands back what it left of each share and its net draws; one that
-    /// reverts or halts hands back the whole shares, its draws undone, and no net. The caller
-    /// kept what it did not forward either way, and each pool settles alone.
-    #[test]
-    fn test_the_pools_settle_like_the_reservoir_not_like_regular_gas() {
-        for result in [
-            InstructionResult::Stop,
-            InstructionResult::Revert,
-            InstructionResult::OutOfGas,
-        ] {
-            let mut parent = pools_1000();
-            for pool in PoolId::ALL {
-                assert!(parent.record_pool(pool, 100));
-            }
-            let mut child = child_with_share(&mut parent, 800);
-            assert_eq!(pools(&parent), [(100, 100); 3], "{result:?}: kept back");
-            let [first, second, third] = PoolId::ALL;
-            assert!(child.record_pool(first, 300));
-            assert!(child.record_pool(second, 1));
-            child.refill_pool(third, 10);
-
-            handle_reservoir_remaining_gas(result, &mut parent, &mut child);
-
-            if result.is_ok() {
-                assert_eq!(pools(&parent), [(600, 400), (899, 101), (910, 90)]);
-                assert_eq!(pools(&child), [(500, 300), (799, 1), (810, -10)]);
-            } else {
-                assert_eq!(pools(&parent), [(900, 100); 3], "{result:?}");
-                assert_eq!(
-                    pools(&child),
-                    [(800, 0); 3],
-                    "{result:?}: a failed child's pools read as its shares"
-                );
-            }
-        }
-    }
-
-    /// A caller's rollback undoes the draws of a child that succeeded inside it: B's revert
-    /// gives A back the whole share it forwarded, C's draws included.
-    #[test]
-    fn test_a_callers_rollback_undoes_a_successful_childs_draws() {
-        let mut a = pools_1000();
-        let mut b = child_with_share(&mut a, 1_000);
-        for pool in PoolId::ALL {
-            assert!(b.record_pool(pool, 100));
-        }
-        let mut c = child_with_share(&mut b, 900);
-        for pool in PoolId::ALL {
-            assert!(c.record_pool(pool, 100));
-        }
-
-        handle_reservoir_remaining_gas(InstructionResult::Stop, &mut b, &mut c);
-        assert_eq!(pools(&b), [(800, 200); 3]);
-
-        handle_reservoir_remaining_gas(InstructionResult::Revert, &mut a, &mut b);
-        assert_eq!(pools(&a), [(1_000, 0); 3]);
-    }
-
-    /// A child that gives back a draw its caller made goes below zero, and merging it into the
-    /// caller on success nets the two out, as a history refill does; on failure the refill is
-    /// undone with the rest.
-    #[test]
-    fn test_a_childs_refill_of_a_callers_draw_nets_out_on_success_only() {
-        for result in [InstructionResult::Stop, InstructionResult::Revert] {
-            let mut parent = pools_1000();
-            for pool in PoolId::ALL {
-                assert!(parent.record_pool(pool, 100));
-            }
-            let mut child = child_with_share(&mut parent, 900);
-            for pool in PoolId::ALL {
-                child.refill_pool(pool, 100);
-            }
-            assert_eq!(pools(&child), [(1_000, -100); 3]);
-
-            handle_reservoir_remaining_gas(result, &mut parent, &mut child);
-
-            let settled = if result.is_ok() {
-                (1_000, 0)
-            } else {
-                (900, 100)
-            };
-            assert_eq!(pools(&parent), [settled; 3], "{result:?}");
-        }
-    }
-
-    /// With no pool set, the unlimited pools go out whole and come back, less only what was
-    /// drawn and kept, and the regular-gas settlement is what it was.
-    #[test]
-    fn test_unset_pools_settle_to_the_same_regular_gas() {
-        for result in [InstructionResult::Stop, InstructionResult::OutOfGas] {
-            let mut parent = GasTracker::new(1_000, 1_000, 0);
-            assert!(parent.record_regular_cost(500));
-            let mut with_pools = parent;
-            let mut child = child_with_share(&mut with_pools, u64::MAX);
-            assert!(child.record_regular_cost(200));
-            let mut plain_child = child;
-
-            handle_reservoir_remaining_gas(result, &mut with_pools, &mut child);
-            handle_reservoir_remaining_gas(result, &mut parent, &mut plain_child);
-
-            assert_eq!(with_pools.remaining(), parent.remaining(), "{result:?}");
-            assert_eq!(pools(&with_pools), [(u64::MAX, 0); 3], "{result:?}");
-        }
     }
 
     /// A caller that forwarded a share of its reservoir and kept the rest gets back, on top of

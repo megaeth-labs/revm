@@ -5,7 +5,7 @@
 use crate::{frame::handle_reservoir_remaining_gas, FrameResult};
 use context::result::FromStringError;
 use context_interface::{context::take_error, ContextTr, Database};
-use interpreter::{GasTracker, PoolId};
+use interpreter::GasTracker;
 use std::string::ToString;
 
 /// Settles the transaction's frame, the first frame, into the transaction-level `gas`, every step
@@ -15,20 +15,16 @@ use std::string::ToString;
 /// The steps, each with the halt rule it takes:
 /// - `gas` spends all its regular gas, which was forwarded to the frame, and the frame settles
 ///   into it as a child settles into its caller ([`handle_reservoir_remaining_gas`]): a failing
-///   frame rolls back its state gas, history gas and pool draws, a halt consumes its regular gas,
-///   and what the frame left returns to `gas`, its reservoir and its pools added to what `gas`
-///   kept, which is nothing, since the frame took them whole;
+///   frame rolls back its state gas and history gas, a halt consumes its regular gas, and what
+///   the frame left returns to `gas`, its reservoir added to what `gas` kept, which is nothing,
+///   since the frame took it whole;
 /// - the EIP-2780 refundable first-frame charge is refunded when no account leaf was created,
 ///   priced through [`Host::state_gas_charge`](context_interface::Host::state_gas_charge) as it
-///   was charged; after a halt the regular gas the refund credited is consumed;
-/// - the start charge a consumer declared on the first frame's input
-///   ([`FrameResult::refundable_start_charge`]) is refunded whole when the frame failed; after a
-///   halt the regular gas the refund credited is consumed.
+///   was charged; after a halt the regular gas the refund credited is consumed.
 ///
-/// `gas` holds no reservoir and no limited pool on entry: the first frame took them whole
+/// `gas` holds no reservoir on entry: the first frame took it whole
 /// ([`GasTracker::forward_all_to_child`]), and the settlement adds back what the frame left, so
 /// gas that still held what the frame was given would count it twice. A debug build asserts it.
-/// An unlimited pool is exempt, since what comes back saturates at it.
 ///
 /// A chain whose handler overrides `last_frame_result` calls this rather than copying the mainnet
 /// body, so a step the fork adds here reaches its handler too. It applies its own rules to `gas`
@@ -58,13 +54,6 @@ where
         gas.reservoir() == 0,
         "the transaction's gas still holds the reservoir its frame was given; the settlement \
          would count it twice (take it with `GasTracker::forward_all_to_child`)"
-    );
-    debug_assert!(
-        PoolId::ALL
-            .into_iter()
-            .all(|pool| matches!(gas.pool_remaining(pool), 0 | u64::MAX)),
-        "the transaction's gas still holds a pool its frame was given; the settlement would \
-         count it twice (take it with `GasTracker::forward_all_to_child`)"
     );
 
     // All regular gas was forwarded to the first frame: consume it on the
@@ -99,16 +88,6 @@ where
         // Unlike an inner frame's caller, the transaction ends here: an
         // exceptional halt consumes all regular gas, including the
         // spilled portion the refill just credited back to `remaining`.
-        if instruction_result.is_halt() {
-            gas.spend_all();
-        }
-    }
-
-    // Refund the start charge a consumer put on the first frame's input for what it charged
-    // the transaction's gas, whole, on the same condition and with the same halt rule,
-    // exactly like `EthFrame::return_result` refunds the start charges of inner frames.
-    if let Some(charge) = frame_result.refundable_start_charge() {
-        gas.refill_start_charge(charge);
         if instruction_result.is_halt() {
             gas.spend_all();
         }

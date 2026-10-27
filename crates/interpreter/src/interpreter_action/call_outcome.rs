@@ -1,4 +1,4 @@
-use crate::{Gas, InstructionResult, InterpreterResult, OutcomeMark, PoolAmounts, StartCharge};
+use crate::{Gas, InstructionResult, InterpreterResult, OutcomeMark};
 use core::ops::Range;
 use primitives::{Address, Bytes, Log};
 use std::vec::Vec;
@@ -40,14 +40,6 @@ pub struct CallOutcome {
     /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_state_gas_address: Address,
-    /// Copied from `CallInputs::charged_start`: what the frame-start hook charged the caller for
-    /// this call and the call's failure gives back, so the parent can refund it when the call
-    /// does not succeed.
-    ///
-    /// In a format that carries field names, such as JSON, encodings made before this field existed
-    /// decode it as no charge.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub charged_start: StartCharge,
     /// The start revm marked this outcome for before an inspector's end callbacks
     /// ([`OutcomeMark`]): none on an outcome a constructor builds. No part of the outcome's value:
     /// equality, the debug output and the encoding leave it out, and a decoded outcome carries
@@ -70,7 +62,6 @@ impl core::fmt::Debug for CallOutcome {
                 &self.charged_new_account_state_gas,
             )
             .field("charged_state_gas_address", &self.charged_state_gas_address)
-            .field("charged_start", &self.charged_start)
             .finish()
     }
 }
@@ -92,7 +83,6 @@ impl CallOutcome {
             precompile_call_logs: Vec::new(),
             charged_new_account_state_gas: false,
             charged_state_gas_address: Address::ZERO,
-            charged_start: StartCharge::new(0, PoolAmounts::ZERO),
             start_mark: OutcomeMark::NONE,
         }
     }

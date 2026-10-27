@@ -334,17 +334,13 @@ pub trait Handler {
         // start.
         lifecycle::open_transaction_start(evm)?;
         let tx_gas_limit = evm.ctx().tx().gas_limit();
-        // The stand-in takes the whole reservoir and every pool out of the transaction's gas, as
-        // the first frame would (`create_init_frame`), so the settle adds them back once.
+        // The stand-in takes the whole reservoir out of the transaction's gas, as the first frame
+        // would (`create_init_frame`), so the settle adds it back once.
         let shares = gas.forward_all_to_child();
         let mut frame_result = match evm.ctx().tx().kind() {
             TxKind::Call(_) => FrameResult::new_call_oog(tx_gas_limit, 0..0, shares.reservoir),
             TxKind::Create => FrameResult::new_create_oog(tx_gas_limit, shares.reservoir),
         };
-        frame_result
-            .gas_mut()
-            .tracker_mut()
-            .set_pools_remaining(shares.pools);
         self.last_frame_result(evm, &mut frame_result, gas)?;
         Ok(frame_result)
     }
@@ -522,8 +518,7 @@ pub trait Handler {
     /// The settled transaction-level gas is written back to the frame result,
     /// which carries it into the post-execution phase.
     ///
-    /// The settlement is [`execution::settle_first_frame`], which also refunds
-    /// the first frame's start charge. It is followed by the close of the
+    /// The settlement is [`execution::settle_first_frame`]. It is followed by the close of the
     /// transaction's start ([`lifecycle::close_transaction_start`], given the
     /// reservoir the gas held before the settlement). An override calls both
     /// rather than copying this body, and copies the gas into the frame result

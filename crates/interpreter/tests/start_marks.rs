@@ -9,22 +9,17 @@ use revm_interpreter::{
 
 /// The derived debug output of these values before the marks existed.
 const TRACKER: &str = "GasTracker { gas_limit: 100, remaining: 90, reservoir: 5, \
-    state_gas_spent: 0, state_gas_spilled: 0, history_gas_spent: 0, refunded: 0, withheld: 0, \
-    withheld_crossing: None, failed_charge_remaining: 0, failed_charge_recorded: false, \
-    pools_remaining: [18446744073709551615, 18446744073709551615, 18446744073709551615], \
-    pools_spent: [0, 0, 0], pool_crossings: 0, history_allowance: 3 }";
+    state_gas_spent: 0, state_gas_spilled: 0, history_gas_spent: 0, refunded: 3, withheld: 0, \
+    withheld_crossing: None, failed_charge_remaining: 0, failed_charge_recorded: false }";
 const RESULT: &str = "InterpreterResult { result: Stop, output: 0x, gas: Gas { tracker: \
     GasTracker { gas_limit: 10, remaining: 10, reservoir: 0, state_gas_spent: 0, \
     state_gas_spilled: 0, history_gas_spent: 0, refunded: 0, withheld: 0, withheld_crossing: \
-    None, failed_charge_remaining: 0, failed_charge_recorded: false, pools_remaining: \
-    [18446744073709551615, 18446744073709551615, 18446744073709551615], pools_spent: [0, 0, 0], \
-    pool_crossings: 0, history_allowance: 0 }, memory: MemoryGas { words_num: 0, \
-    expansion_cost: 0 } } }";
-const START_CHARGE: &str = "StartCharge { history: 0, pools: PoolAmounts([0, 0, 0]) }";
+    None, failed_charge_remaining: 0, failed_charge_recorded: false }, memory: MemoryGas { \
+    words_num: 0, expansion_cost: 0 } } }";
 
 const fn tracker() -> GasTracker {
     let mut tracker = GasTracker::new(100, 90, 5);
-    tracker.set_history_allowance(3);
+    tracker.record_refund(3);
     tracker.set_start_mark(StartMark::for_start(7));
     tracker
 }
@@ -57,16 +52,14 @@ fn test_marked_values_print_as_the_derived_output_did() {
         format!(
             "CallOutcome {{ result: {RESULT}, memory_offset: 1..2, was_precompile_called: false, \
              precompile_call_logs: [], charged_new_account_state_gas: false, \
-             charged_state_gas_address: 0x0000000000000000000000000000000000000000, \
-             charged_start: {START_CHARGE} }}"
+             charged_state_gas_address: 0x0000000000000000000000000000000000000000 }}"
         )
     );
     assert_eq!(
         format!("{:?}", create()),
         format!(
             "CreateOutcome {{ result: {RESULT}, address: None, charged_create_state_gas: false, \
-             charged_state_gas_address: 0x0000000000000000000000000000000000000000, \
-             charged_start: {START_CHARGE} }}"
+             charged_state_gas_address: 0x0000000000000000000000000000000000000000 }}"
         )
     );
 }

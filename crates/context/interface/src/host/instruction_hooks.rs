@@ -6,10 +6,7 @@
 //! and credit it; the instruction goes on with the gas as the hook left it. Their defaults touch
 //! nothing and let the instruction go on.
 
-use crate::{
-    cfg::gas::{PoolAmounts, StartCharge},
-    context::{SStoreResult, SelfDestructResult},
-};
+use crate::context::{SStoreResult, SelfDestructResult};
 use primitives::{Address, Bytes, StorageKey, U256};
 
 /// A state write an instruction completed: the write is in the journal, and every charge the
@@ -93,9 +90,8 @@ pub enum FrameStartKind {
 /// A frame an instruction is about to start: every charge the instruction makes has been made, the
 /// gas it forwards has been taken from the caller, and the frame's input is not built yet.
 ///
-/// The hook is handed it mutably to declare the start's [`charge`](Self::charge) and, if it takes
-/// the child's reservoir itself, the child's [`reservoir`](Self::reservoir); the instruction reads
-/// nothing else back.
+/// The hook is handed it mutably to name the child's [`reservoir`](Self::reservoir) if it takes
+/// that itself; the instruction reads nothing else back.
 ///
 /// Built with [`FrameStart::new`], so a later field is not a breaking change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,18 +120,14 @@ pub struct FrameStart {
     /// The regular gas the instruction took from the caller for the frame: the frame's gas limit
     /// without a value call's stipend, which the caller does not pay.
     pub forward: u64,
-    /// The start charge: what the hook charged the caller for this start that the frame's failure
-    /// gives back. Empty when the hook is called; the hook declares it here after charging it,
-    /// and the instruction copies it onto the frame's input if the hook admits the start.
-    pub charge: StartCharge,
     /// The child's reservoir, when the hook took it out of the caller's reservoir itself. `None`
     /// when the hook is called.
     ///
     /// `None` leaves the forward to the instruction, which takes the schedule's share of the
     /// caller's reservoir as the hook left it ([`GasTracker::forward_to_child`]). `Some` is the
     /// reservoir the frame's input carries: the instruction takes no share of its own, and the
-    /// caller keeps the reservoir the hook left it. The pools are forwarded by the schedule
-    /// either way. The instruction does not check the amount against what the hook took.
+    /// caller keeps the reservoir the hook left it. The instruction does not check the amount
+    /// against what the hook took.
     ///
     /// [`GasTracker::forward_to_child`]: crate::cfg::gas::GasTracker::forward_to_child
     pub reservoir: Option<u64>,
@@ -157,7 +149,6 @@ impl FrameStart {
             target,
             value,
             forward,
-            charge: StartCharge::new(0, PoolAmounts::ZERO),
             reservoir: None,
         }
     }

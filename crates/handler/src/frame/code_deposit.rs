@@ -10,14 +10,13 @@ use primitives::Address;
 /// ([`ContextTr::admit_code_deposit`]), and returns whether it did.
 ///
 /// `interpreter_result` holds the code and the creating frame's gas with every deposit charge
-/// recorded; `gas_before_deposit` is that gas before the first of them. The hook reads a copy of
-/// the frame's gas as the deposit's `gas_after` and is lent the gas itself, which it may charge. A
-/// refused deposit reverts `checkpoint`, puts the frame's gas back to `gas_before_deposit`, which
-/// undoes whatever the hook did to it, and turns the result into a `Revert` carrying the output
-/// the context named; `return_create` then returns without committing.
+/// recorded; `gas_before_deposit` is that gas before the first of them. A refused deposit reverts
+/// `checkpoint`, puts the frame's gas back to `gas_before_deposit` and turns the result into a
+/// `Revert` carrying the output the context named; `return_create` then returns without
+/// committing.
 ///
-/// Inlined into `return_create`, so under the default hook, which admits and touches nothing, it
-/// compiles away with the copies of the frame's gas it reads.
+/// Inlined into `return_create`, so under the default hook, which admits, it compiles away with
+/// the copy of the frame's gas it reads.
 #[inline(always)]
 pub(super) fn admit_code_deposit<CTX: ContextTr>(
     context: &mut CTX,
@@ -26,16 +25,12 @@ pub(super) fn admit_code_deposit<CTX: ContextTr>(
     gas_before_deposit: &Gas,
     address: Address,
 ) -> bool {
-    let gas_after_deposit = interpreter_result.gas;
-    let admitted = context.admit_code_deposit(
-        &CodeDeposit::new(
-            address,
-            &interpreter_result.output,
-            gas_before_deposit.tracker(),
-            gas_after_deposit.tracker(),
-        ),
-        interpreter_result.gas.tracker_mut(),
-    );
+    let admitted = context.admit_code_deposit(&CodeDeposit::new(
+        address,
+        &interpreter_result.output,
+        gas_before_deposit.tracker(),
+        interpreter_result.gas.tracker(),
+    ));
     let Err(output) = admitted else {
         return true;
     };

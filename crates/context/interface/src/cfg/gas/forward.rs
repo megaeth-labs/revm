@@ -1,27 +1,24 @@
 //! What a frame start takes out of its caller's [`GasTracker`] for the child frame, beside the
-//! regular gas: a share of the EIP-8037 reservoir and of each pool.
+//! regular gas: a share of the EIP-8037 reservoir.
 //!
 //! The caller keeps the rest while the child runs, and the child's return adds what the child left
-//! back to what the caller kept ([`absorb_returned_reservoir`](GasTracker::absorb_returned_reservoir),
-//! [`absorb_returned_pools`](GasTracker::absorb_returned_pools)). The shares are the schedule's
-//! ([`GasParams::reservoir_forward_share`], [`GasParams::pool_forward_share`]); every schedule
-//! defined here forwards the whole reservoir and every whole pool, which is upstream's forward.
+//! back to what the caller kept ([`absorb_returned_reservoir`](GasTracker::absorb_returned_reservoir)).
+//! The share is the schedule's ([`GasParams::reservoir_forward_share`]); every schedule defined
+//! here forwards the whole reservoir, which is upstream's forward.
 
-use super::{GasTracker, PoolAmounts, PoolId};
+use super::GasTracker;
 use crate::cfg::GasParams;
 
 /// What a child frame's tracker starts with beside its regular gas, taken out of its caller's: its
-/// reservoir and its pools.
+/// reservoir.
 ///
 /// Returned by [`GasTracker::forward_to_child`] and [`GasTracker::forward_all_to_child`]; the
-/// frame's input carries it (`reservoir` and `pool_shares`).
+/// frame's input carries it (`reservoir`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct ChildShares {
     /// The child's reservoir.
     pub reservoir: u64,
-    /// The child's pools.
-    pub pools: PoolAmounts,
 }
 
 impl GasTracker {
@@ -37,12 +34,12 @@ impl GasTracker {
         self.reservoir = self.reservoir.saturating_sub(share);
     }
 
-    /// Takes the schedule's shares of the reservoir and of each pool out of this, the caller's,
-    /// tracker for a child frame, and returns them: what the child's tracker starts with.
+    /// Takes the schedule's share of the reservoir out of this, the caller's, tracker for a child
+    /// frame, and returns it: what the child's tracker starts with.
     ///
     /// The `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2` instructions
-    /// call it once the frame-start hook has answered, so the shares are of the reservoir and the
-    /// pools as the hook left them. A consumer that builds a child frame's input itself calls it
+    /// call it once the frame-start hook has answered, so the share is of the reservoir as the
+    /// hook left it. A consumer that builds a child frame's input itself calls it
     /// too, so that the child's return, which adds what the child left to what the caller kept,
     /// gives the caller back exactly what it forwarded.
     #[inline]
@@ -55,8 +52,7 @@ impl GasTracker {
     ///
     /// `Some(reservoir)` is the child's reservoir, which the hook took out of this tracker itself:
     /// no share of the reservoir is taken here, and the child starts with `reservoir`. `None` takes
-    /// the schedule's share, as `forward_to_child` does. The pools are forwarded by the schedule's
-    /// shares either way.
+    /// the schedule's share, as `forward_to_child` does.
     #[inline]
     pub fn forward_to_child_with_reservoir(
         &mut self,
@@ -68,49 +64,36 @@ impl GasTracker {
             self.forward_reservoir(share);
             share
         });
-        let mut pools = PoolAmounts::ZERO;
-        for pool in PoolId::ALL {
-            let share = params.pool_forward_share(pool, self.pool_remaining(pool));
-            self.forward_pool(pool, share);
-            pools.set(pool, share);
-        }
-        ChildShares { reservoir, pools }
+        ChildShares { reservoir }
     }
 
-    /// Takes the whole reservoir and every whole pool out of this tracker for a child frame, and
-    /// returns them.
+    /// Takes the whole reservoir out of this tracker for a child frame, and returns it.
     ///
-    /// For the transaction's frame, which takes everything the transaction's tracker holds: the
-    /// schedule's shares apply to the frames below it.
+    /// For the transaction's frame, which takes the transaction's whole reservoir: the schedule's
+    /// share applies to the frames below it.
     #[inline]
     pub const fn forward_all_to_child(&mut self) -> ChildShares {
         let shares = ChildShares {
             reservoir: self.reservoir,
-            pools: self.pools_remaining(),
         };
         self.reservoir = 0;
-        self.set_pools_remaining(PoolAmounts::ZERO);
         shares
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChildShares, GasTracker, PoolAmounts, PoolId};
+    use super::{ChildShares, GasTracker};
     use crate::cfg::{GasId, GasParams};
     use primitives::hardfork::SpecId;
 
-    /// A caller with a reservoir of 1,000 and pools of 1,000, 500 and 100.
+    /// A caller with a reservoir of 1,000.
     fn caller() -> GasTracker {
-        let mut tracker = GasTracker::new(10_000, 10_000, 1_000);
-        for (pool, amount) in PoolId::ALL.into_iter().zip([1_000, 500, 100]) {
-            tracker.set_pool_remaining(pool, amount);
-        }
-        tracker
+        GasTracker::new(10_000, 10_000, 1_000)
     }
 
-    /// Every schedule forwards everything: the child gets the whole reservoir and every whole
-    /// pool, and the caller keeps nothing of them while the child runs.
+    /// Every schedule forwards the whole reservoir, and the caller keeps none of it while the
+    /// child runs.
     #[test]
     fn test_every_schedule_forwards_everything() {
         for spec in [SpecId::FRONTIER, SpecId::OSAKA, SpecId::AMSTERDAM] {
@@ -120,13 +103,7 @@ mod tests {
             let shares = tracker.forward_to_child(&params);
 
             assert_eq!(shares.reservoir, 1_000, "{spec:?}");
-            assert_eq!(
-                PoolId::ALL.map(|pool| shares.pools.get(pool)),
-                [1_000, 500, 100],
-                "{spec:?}"
-            );
             assert_eq!(tracker.reservoir(), 0, "{spec:?}");
-            assert_eq!(tracker.pools_remaining(), PoolAmounts::ZERO, "{spec:?}");
             assert_eq!(
                 tracker.remaining(),
                 10_000,
@@ -135,55 +112,31 @@ mod tests {
         }
     }
 
-    /// Each figure is forwarded by its own share, rounded down, and the caller keeps the rest.
+    /// The reservoir is forwarded by the schedule's share, and the caller keeps the rest.
     #[test]
     fn test_each_share_is_the_schedules() {
         let mut params = GasParams::new_spec(SpecId::AMSTERDAM);
-        params.override_gas([
-            (GasId::reservoir_kept_percent(), 2),
-            (GasId::pool_kept_percent(PoolId::new(0)), 2),
-            (GasId::pool_kept_percent(PoolId::new(1)), 50),
-            (GasId::pool_kept_percent(PoolId::new(2)), 100),
-        ]);
+        params.override_gas([(GasId::reservoir_kept_percent(), 2)]);
         let mut tracker = caller();
         assert!(tracker.record_state_cost(1));
 
         let shares = tracker.forward_to_child(&params);
 
-        // The reservoir's 999 less the caller's 2%, rounded down (19), is 980; 98% of 1,000 is
-        // 980; half of 500 is 250.
+        // The reservoir's 999 less the caller's 2%, rounded down (19), is 980.
         assert_eq!(shares.reservoir, 980);
-        assert_eq!(
-            PoolId::ALL.map(|pool| shares.pools.get(pool)),
-            [980, 250, 0]
-        );
         assert_eq!(tracker.reservoir(), 19);
-        assert_eq!(
-            PoolId::ALL.map(|pool| tracker.pool_remaining(pool)),
-            [20, 250, 100]
-        );
         assert_eq!(tracker.state_gas_spent(), 1, "a forward is not a charge");
     }
 
-    /// The transaction's frame takes everything, whatever the schedule.
+    /// The transaction's frame takes the whole reservoir, whatever the schedule.
     #[test]
     fn test_the_first_frame_takes_everything() {
         let mut tracker = caller();
 
         let shares = tracker.forward_all_to_child();
 
-        assert_eq!(
-            shares,
-            ChildShares {
-                reservoir: 1_000,
-                pools: PoolAmounts::ZERO
-                    .with(PoolId::new(0), 1_000)
-                    .with(PoolId::new(1), 500)
-                    .with(PoolId::new(2), 100),
-            }
-        );
+        assert_eq!(shares, ChildShares { reservoir: 1_000 });
         assert_eq!(tracker.reservoir(), 0);
-        assert_eq!(tracker.pools_remaining(), PoolAmounts::ZERO);
     }
 
     /// A caller that kept part of its reservoir when it forwarded a share gets the child's

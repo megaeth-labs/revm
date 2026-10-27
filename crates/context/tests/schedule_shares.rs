@@ -1,12 +1,9 @@
-//! A configuration whose gas schedule lacks the fork's share entries forwards a child frame the
-//! whole reservoir and every whole pool, as upstream does: the schedule a consumer builds raw and
+//! A configuration whose gas schedule lacks the fork's share entry forwards a child frame the
+//! whole reservoir, as upstream does: the schedule a consumer builds raw and
 //! hands to the configuration, and the one it decodes from a configuration encoded before the
 //! entries existed.
 
-use context_interface::{
-    cfg::{gas::PoolId, GasParams},
-    Cfg,
-};
+use context_interface::{cfg::GasParams, Cfg};
 use primitives::hardfork::SpecId;
 use revm_context::CfgEnv;
 use std::sync::Arc;
@@ -39,15 +36,12 @@ fn tables_without_the_share_entries() -> [(&'static str, [u64; 256]); 4] {
     ]
 }
 
-/// Whether `cfg`'s schedule forwards the whole reservoir and every whole pool.
+/// Whether `cfg`'s schedule forwards the whole reservoir.
 fn forwards_everything(cfg: &CfgEnv) -> bool {
     let params = cfg.gas_params();
-    [0, 1, 99, 1_000, u64::MAX].into_iter().all(|amount| {
-        params.reservoir_forward_share(amount) == amount
-            && PoolId::ALL
-                .into_iter()
-                .all(|pool| params.pool_forward_share(pool, amount) == amount)
-    })
+    [0, 1, 99, 1_000, u64::MAX]
+        .into_iter()
+        .all(|amount| params.reservoir_forward_share(amount) == amount)
 }
 
 /// Each way to give a configuration a schedule other than the spec's default: at construction,

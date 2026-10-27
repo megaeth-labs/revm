@@ -131,14 +131,11 @@ pub trait Host {
     /// charging nothing after the hook: the frame's input takes the schedule's share of the
     /// reservoir in `gas`, or the child's reservoir the hook names on `start` if it took that out
     /// of `gas` itself ([`FrameStart::reservoir`]). A charge the hook makes that fails records as
-    /// any failed charge does
-    /// ([`GasTracker::failed_charge_remaining`]), whatever the answer. The part of its charge
-    /// that the frame's failure gives back, the hook declares on `start`
-    /// ([`FrameStart::charge`]). `true` goes on to start the frame, which the handler may still
-    /// refuse or answer without running it, and the frame's input carries the declared charge.
-    /// `false` fails the instruction out of gas and starts no frame: the forward stays taken
-    /// unless the hook gave it back, the declared charge goes with the start, and the halt
-    /// records the regular gas the hook left unless a failed charge already did.
+    /// any failed charge does ([`GasTracker::failed_charge_remaining`]), whatever the answer.
+    /// `true` goes on to start the frame, which the handler may still refuse or answer without
+    /// running it. `false` fails the instruction out of gas and starts no frame: the forward stays
+    /// taken unless the hook gave it back, and the halt records the regular gas the hook left
+    /// unless a failed charge already did.
     ///
     /// The default returns `true` and touches nothing.
     #[inline]

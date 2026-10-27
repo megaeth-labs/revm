@@ -28,7 +28,7 @@ use context_interface::{
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use interpreter::{
     interpreter::EthInterpreter, interpreter_action::FrameInit, FrameInput, GasTracker,
-    Instruction, InstructionContext, InstructionExecResult, InstructionResult, PoolAmounts, PoolId,
+    Instruction, InstructionContext, InstructionExecResult, InstructionResult,
 };
 use primitives::{
     address, constants::CALL_STACK_LIMIT, hardfork::SpecId, Address, Bytes, TxKind, U256,
@@ -106,21 +106,6 @@ const fn returned(result: &FrameResult) -> Returned {
     )
 }
 
-fn pool_shares_of(input: &FrameInput) -> PoolAmounts {
-    match input {
-        FrameInput::Call(inputs) => inputs.pool_shares,
-        FrameInput::Create(inputs) => inputs.pool_shares(),
-        FrameInput::Empty => unreachable!(),
-    }
-}
-
-/// Finite pools a consumer gives the transaction's gas: a system call's in
-/// [`ShareHandler::tx_gas`], or any transaction's with [`ShareHandler::tx_pools`].
-const LIMITED_POOLS: PoolAmounts = PoolAmounts::ZERO
-    .with(PoolId::new(0), 1_000)
-    .with(PoolId::new(1), 500)
-    .with(PoolId::new(2), 100);
-
 fn reservoir_of(input: &FrameInput) -> u64 {
     match input {
         FrameInput::Call(inputs) => inputs.reservoir,
@@ -139,8 +124,6 @@ struct ShareHandler {
     /// A reservoir to give the transaction's gas, as a consumer that splits a system call's gas
     /// does; mainnet gives a system call none.
     system_reservoir: Option<u64>,
-    /// Pools to give the transaction's gas, as a consumer that limits its figures does.
-    tx_pools: Option<PoolAmounts>,
     starts: Vec<u64>,
     returned: Vec<Returned>,
     /// The transaction's reservoir and net state gas after the first frame settled into it.
@@ -149,10 +132,6 @@ struct ShareHandler {
     tx_reservoir: core::cell::Cell<Option<u64>>,
     /// The transaction's reservoir once the first frame's input was built.
     after_first_input: Option<u64>,
-    /// Every frame's pool shares as it started.
-    pool_starts: Vec<PoolAmounts>,
-    /// The transaction's pools after the first frame settled into them.
-    settled_pools: Option<PoolAmounts>,
 }
 
 impl ShareHandler {
@@ -161,14 +140,11 @@ impl ShareHandler {
             mainnet: Mainnet::default(),
             too_deep: false,
             system_reservoir: None,
-            tx_pools: None,
             starts: Vec::new(),
             returned: Vec::new(),
             settled: None,
             tx_reservoir: core::cell::Cell::new(None),
             after_first_input: None,
-            pool_starts: Vec::new(),
-            settled_pools: None,
         }
     }
 }
@@ -183,11 +159,6 @@ impl Handler for ShareHandler {
         if let Some(reservoir) = self.system_reservoir {
             gas.set_remaining(gas.remaining() - reservoir);
             gas.set_reservoir(reservoir);
-            // And pools, as a consumer that limits a system call's figures sets them.
-            gas.set_pools_remaining(LIMITED_POOLS);
-        }
-        if let Some(pools) = self.tx_pools {
-            gas.set_pools_remaining(pools);
         }
         self.tx_reservoir.set(Some(gas.reservoir()));
         gas
@@ -213,8 +184,6 @@ impl Handler for ShareHandler {
     ) -> Result<FrameResult, TestError> {
         self.starts
             .push(reservoir_of(&first_frame_input.frame_input));
-        self.pool_starts
-            .push(pool_shares_of(&first_frame_input.frame_input));
         if let ItemOrResult::Result(result) = evm.frame_init(first_frame_input)? {
             self.returned.push(returned(&result));
             return Ok(result);
@@ -223,7 +192,6 @@ impl Handler for ShareHandler {
             let result = match evm.frame_run()? {
                 ItemOrResult::Item(mut init) => {
                     self.starts.push(reservoir_of(&init.frame_input));
-                    self.pool_starts.push(pool_shares_of(&init.frame_input));
                     if self.too_deep {
                         init.depth = CALL_STACK_LIMIT as usize + 1;
                     }
@@ -253,7 +221,6 @@ impl Handler for ShareHandler {
     ) -> Result<(), TestError> {
         self.mainnet.last_frame_result(evm, frame_result, gas)?;
         self.settled = Some((gas.reservoir(), gas.state_gas_spent()));
-        self.settled_pools = Some(gas.pools_remaining());
         Ok(())
     }
 }
@@ -716,7 +683,7 @@ fn test_an_answer_without_a_frame_hands_the_share_back() {
 }
 
 /// A system call's frame takes the whole reservoir its gas holds, a consumer's split of the
-/// system call's gas, and every whole pool, and its children their shares, as a transaction's do.
+/// system call's gas, and its children their shares, as a transaction's do.
 #[test]
 fn test_a_system_call_forwards_and_settles_its_reservoir() {
     for percent in [None, Some(PERCENT)] {
@@ -748,10 +715,6 @@ fn test_a_system_call_forwards_and_settles_its_reservoir() {
             Some((RESERVOIR - CHARGED, CHARGED as i64)),
             "{percent:?}"
         );
-        // The pools go the same way: the system call's frame takes them whole, the schedule
-        // forwards them whole, and they come back as they were, nothing drawn.
-        assert_eq!(handler.pool_starts, [LIMITED_POOLS; 2], "{percent:?}");
-        assert_eq!(handler.settled_pools, Some(LIMITED_POOLS), "{percent:?}");
     }
 }
 
@@ -885,11 +848,10 @@ fn test_a_runtime_out_of_gas_returns_the_reservoir_once() {
     }
 }
 
-/// The same for a creation transaction, whose runtime phase charges the account it would create,
-/// on a transaction's gas a consumer gave finite pools: the stand-in takes the whole reservoir
-/// and every pool, and both settle back once.
+/// The same for a creation transaction, whose runtime phase charges the account it would create:
+/// the stand-in takes the whole reservoir, which settles back once.
 #[test]
-fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_and_the_pools_once() {
+fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_once() {
     const LIMIT: u64 = 160_000;
     const CAP: u64 = 60_000;
     for percent in [None, Some(PERCENT)] {
@@ -905,10 +867,7 @@ fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_and_the
                 .gas_limit(LIMIT)
                 .build_fill(),
         );
-        let mut handler = ShareHandler::new();
-        handler.tx_pools = Some(LIMITED_POOLS);
-
-        let (result, handler) = run.with(handler);
+        let (result, handler) = run.with(ShareHandler::new());
 
         assert!(
             matches!(result, ExecutionResult::Halt { .. }),
@@ -917,7 +876,6 @@ fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_and_the
         let reservoir = handler.tx_reservoir.get().expect("tx_gas ran");
         assert!(reservoir > 0, "{percent:?}");
         assert_eq!(handler.settled, Some((reservoir, 0)), "{percent:?}");
-        assert_eq!(handler.settled_pools, Some(LIMITED_POOLS), "{percent:?}");
         assert_eq!(
             result.gas().total_gas_spent(),
             LIMIT - reservoir,
@@ -926,7 +884,7 @@ fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_and_the
     }
 }
 
-/// The transaction's frame took the whole reservoir and every whole pool, and its settlement adds
+/// The transaction's frame took the whole reservoir, and its settlement adds
 /// back what it left. A runner that settles the frame into gas that still holds what the frame was
 /// given, because it built the frame without taking it or seeded the gas from the frame's own
 /// figures, would count it twice; a debug build refuses the settlement.
@@ -941,25 +899,9 @@ fn test_a_first_frame_settled_into_gas_that_kept_the_reservoir_panics_in_a_debug
     let _ = Mainnet::default().last_frame_result(&mut evm, &mut result, &mut gas);
 }
 
-/// The same for a pool the transaction's gas still holds.
-#[cfg(debug_assertions)]
+/// A runner that builds the gas with `GasTracker::new`, with no reservoir, settles as before.
 #[test]
-#[should_panic(expected = "the transaction's gas still holds a pool its frame was given")]
-fn test_a_first_frame_settled_into_gas_that_kept_a_pool_panics_in_a_debug_build() {
-    let mut evm = Run::new(ends(Vec::new())).evm();
-    let mut result = FrameResult::new_call_oog(GAS_LIMIT, 0..0, 0);
-    let mut gas = GasTracker::new(GAS_LIMIT, 0, 0);
-    gas.set_pools_remaining(PoolAmounts::ZERO);
-    gas.set_pool_remaining(PoolId::new(2), 1_000);
-
-    let _ = Mainnet::default().last_frame_result(&mut evm, &mut result, &mut gas);
-}
-
-/// An unlimited pool the transaction's gas still holds cannot be counted twice, since what comes
-/// back saturates at it: a runner that builds the gas with `GasTracker::new` and draws no pool,
-/// with no reservoir, settles as before.
-#[test]
-fn test_a_first_frame_settled_into_gas_with_unlimited_pools_and_no_reservoir_settles() {
+fn test_a_first_frame_settled_into_gas_with_no_reservoir_settles() {
     let mut evm = Run::new(ends(Vec::new())).evm();
     let mut result = FrameResult::new_call_oog(GAS_LIMIT, 0..0, 0);
     let mut gas = GasTracker::new(GAS_LIMIT, 0, 0);
@@ -970,6 +912,5 @@ fn test_a_first_frame_settled_into_gas_with_unlimited_pools_and_no_reservoir_set
         .last_frame_result(&mut evm, &mut result, &mut gas)
         .expect("the frame settles");
 
-    assert_eq!(gas.pools_remaining(), PoolAmounts::UNLIMITED);
     assert_eq!(gas.reservoir(), 0);
 }

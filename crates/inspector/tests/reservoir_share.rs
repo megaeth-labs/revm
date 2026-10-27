@@ -19,7 +19,7 @@ use handler::{
 };
 use interpreter::{
     interpreter::EthInterpreter, CallInputs, CallOutcome, CreateInputs, CreateOutcome, Gas,
-    InstructionResult, InterpreterResult, PoolAmounts,
+    InstructionResult, InterpreterResult,
 };
 use primitives::{address, hardfork::SpecId, Address, Bytes, TxKind, U256};
 use revm_inspector::{InspectEvm, Inspector};
@@ -71,7 +71,7 @@ enum Answer {
     Runs,
     /// Answers it with a revert built on `Gas::new`, as a tool does.
     AsBuilt,
-    /// Answers it with a revert that carries the input's reservoir and pool shares.
+    /// Answers it with a revert that carries the input's reservoir.
     WithTheShares,
 }
 
@@ -84,18 +84,16 @@ struct Answering {
 }
 
 impl Answering {
-    /// The gas of the answer to a start of `gas_limit` given `reservoir` and `pools`, or `None`
-    /// to let the start run.
-    const fn gas(&mut self, gas_limit: u64, reservoir: u64, pools: PoolAmounts) -> Option<Gas> {
+    /// The gas of the answer to a start of `gas_limit` given `reservoir`, or `None` to let the
+    /// start run.
+    const fn gas(&mut self, gas_limit: u64, reservoir: u64) -> Option<Gas> {
         self.given = Some(reservoir);
         match self.answer {
             Answer::Runs => None,
             Answer::AsBuilt => Some(Gas::new(gas_limit)),
-            Answer::WithTheShares => {
-                let mut gas = Gas::new_with_regular_gas_and_reservoir(gas_limit, reservoir);
-                gas.tracker_mut().set_pools_remaining(pools);
-                Some(gas)
-            }
+            Answer::WithTheShares => Some(Gas::new_with_regular_gas_and_reservoir(
+                gas_limit, reservoir,
+            )),
         }
     }
 }
@@ -105,7 +103,7 @@ impl Inspector<Ctx, EthInterpreter> for Answering {
         if inputs.target_address != OK {
             return None;
         }
-        let gas = self.gas(inputs.gas_limit, inputs.reservoir, inputs.pool_shares)?;
+        let gas = self.gas(inputs.gas_limit, inputs.reservoir)?;
         Some(CallOutcome::new(
             InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
             inputs.return_memory_offset.clone(),
@@ -113,7 +111,7 @@ impl Inspector<Ctx, EthInterpreter> for Answering {
     }
 
     fn create(&mut self, _: &mut Ctx, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
-        let gas = self.gas(inputs.gas_limit(), inputs.reservoir(), inputs.pool_shares())?;
+        let gas = self.gas(inputs.gas_limit(), inputs.reservoir())?;
         let mut outcome = CreateOutcome::new(
             InterpreterResult::new(InstructionResult::Revert, Bytes::new(), gas),
             None,
@@ -121,7 +119,6 @@ impl Inspector<Ctx, EthInterpreter> for Answering {
         if let Answer::WithTheShares = self.answer {
             outcome.charged_create_state_gas = inputs.charged_create_state_gas();
             outcome.charged_state_gas_address = inputs.charged_state_gas_address();
-            outcome.charged_start = inputs.charged_start();
         }
         Some(outcome)
     }

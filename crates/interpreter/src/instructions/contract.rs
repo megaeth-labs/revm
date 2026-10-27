@@ -194,14 +194,11 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
         value,
         gas_limit,
     );
-    let (charged_start, reservoir) =
-        frame_starting(&mut context.interpreter.gas, context.host, start)?;
+    let reservoir = frame_starting(&mut context.interpreter.gas, context.host, start)?;
     let shares = forward_to_child(&mut context.interpreter.gas, context.host, reservoir);
 
     create_inputs.set_gas_limit(gas_limit);
     create_inputs.set_reservoir(shares.reservoir);
-    create_inputs.set_charged_start(charged_start);
-    create_inputs.set_pool_shares(shares.pools);
     context
         .interpreter
         .bytecode
@@ -245,14 +242,8 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
         get_memory_input_and_out_ranges(context.interpreter, context.host.gas_params())?;
 
     let is_call = KIND == CALL;
-    let (
-        gas_limit,
-        bytecode,
-        bytecode_hash,
-        charged_new_account_state_gas,
-        forward,
-        history_allowance,
-    ) = load_acc_and_calc_forward(&mut context, to, has_transfer, is_call, local_gas_limit)?;
+    let (gas_limit, bytecode, bytecode_hash, charged_new_account_state_gas, forward) =
+        load_acc_and_calc_forward(&mut context, to, has_transfer, is_call, local_gas_limit)?;
 
     let target_address = if matches!(KIND, CALLCODE | DELEGATECALL) {
         context.interpreter.input.target_address()
@@ -286,8 +277,7 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
     };
     let transferred = value.transfer().unwrap_or_default();
     let start = FrameStart::new(kind, caller, Some(target_address), transferred, forward);
-    let (charged_start, reservoir) =
-        frame_starting(&mut context.interpreter.gas, context.host, start)?;
+    let reservoir = frame_starting(&mut context.interpreter.gas, context.host, start)?;
     let shares = forward_to_child(&mut context.interpreter.gas, context.host, reservoir);
 
     // Call host to interact with target contract
@@ -308,9 +298,6 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
                 return_memory_offset,
                 reservoir: shares.reservoir,
                 charged_new_account_state_gas,
-                charged_start,
-                pool_shares: shares.pools,
-                history_allowance,
             },
         ))));
     Err(InstructionResult::Suspend)

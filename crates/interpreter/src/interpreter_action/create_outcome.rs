@@ -1,4 +1,4 @@
-use crate::{Gas, InstructionResult, InterpreterResult, OutcomeMark, PoolAmounts, StartCharge};
+use crate::{Gas, InstructionResult, InterpreterResult, OutcomeMark};
 use primitives::{Address, Bytes};
 
 /// Represents the outcome of a create operation in an interpreter.
@@ -27,14 +27,6 @@ pub struct CreateOutcome {
     /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_state_gas_address: Address,
-    /// Copied from `CreateInputs::charged_start`: what the frame-start hook charged the caller
-    /// for this creation and the creation's failure gives back, so the parent can refund it when
-    /// the creation fails.
-    ///
-    /// In a format that carries field names, such as JSON, encodings made before this field existed
-    /// decode it as no charge.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub charged_start: StartCharge,
     /// The start revm marked this outcome for before an inspector's end callbacks
     /// ([`OutcomeMark`]): none on an outcome a constructor builds. No part of the outcome's value:
     /// equality, the debug output and the encoding leave it out, and a decoded outcome carries
@@ -52,7 +44,6 @@ impl core::fmt::Debug for CreateOutcome {
             .field("address", &self.address)
             .field("charged_create_state_gas", &self.charged_create_state_gas)
             .field("charged_state_gas_address", &self.charged_state_gas_address)
-            .field("charged_start", &self.charged_start)
             .finish()
     }
 }
@@ -74,7 +65,6 @@ impl CreateOutcome {
             address,
             charged_create_state_gas: false,
             charged_state_gas_address: Address::ZERO,
-            charged_start: StartCharge::new(0, PoolAmounts::ZERO),
             start_mark: OutcomeMark::NONE,
         }
     }

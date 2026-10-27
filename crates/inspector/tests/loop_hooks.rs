@@ -98,8 +98,8 @@ struct Plan {
 enum AtStart {
     /// A return carrying [`AT_START`].
     Return,
-    /// A creation with no init code on [`CREATION_GAS`] and the shares of the frame's reservoir
-    /// and pools; once it returned into [`CHILD`], a return carrying [`AFTER_ITS_CHILD`].
+    /// A creation with no init code on [`CREATION_GAS`] and the share of the frame's reservoir;
+    /// once it returned into [`CHILD`], a return carrying [`AFTER_ITS_CHILD`].
     Create,
     /// The creation of [`AtStart::Create`]; once it returned into [`CHILD`], nothing, so
     /// [`CHILD`] runs its code.
@@ -274,7 +274,7 @@ impl EvmTr for Consumer {
                         "the frame pays the creation"
                     );
                     let shares = gas.tracker_mut().forward_to_child(&params);
-                    let mut inputs = CreateInputs::new(
+                    let inputs = CreateInputs::new(
                         CHILD,
                         CreateScheme::Create,
                         U256::ZERO,
@@ -282,7 +282,6 @@ impl EvmTr for Consumer {
                         CREATION_GAS,
                         shares.reservoir,
                     );
-                    inputs.set_pool_shares(shares.pools);
                     InterpreterAction::NewFrame(FrameInput::Create(Box::new(inputs)))
                 }
             };

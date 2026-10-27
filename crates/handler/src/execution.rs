@@ -6,7 +6,7 @@ use context_interface::{
 };
 use interpreter::{
     CallInput, CallInputs, CallScheme, CallValue, CreateInputs, CreateScheme, FrameInput,
-    GasTracker, PoolAmounts, StartCharge,
+    GasTracker,
 };
 use primitives::{Address, TxKind};
 use state::Bytecode;
@@ -16,11 +16,10 @@ mod first_frame;
 pub use first_frame::settle_first_frame;
 
 /// Creates the first [`FrameInput`] from the transaction and the
-/// transaction-level `gas`, forwarding all remaining regular gas, the
-/// reservoir and every pool to the frame. The reservoir and the pools are taken
-/// out of `gas` ([`GasTracker::forward_all_to_child`]), as a frame start takes
-/// a child's shares out of its caller's, and come back when the frame settles
-/// into `gas`.
+/// transaction-level `gas`, forwarding all remaining regular gas and the
+/// reservoir to the frame. The reservoir is taken out of `gas`
+/// ([`GasTracker::forward_all_to_child`]), as a frame start takes a child's share
+/// out of its caller's, and comes back when the frame settles into `gas`.
 ///
 /// Under EIP-2780 this completes the runtime gas phase started at
 /// pre-execution (the authorization charges): the target is loaded once and
@@ -125,8 +124,8 @@ pub fn create_init_frame<CTX: ContextTr>(
                 }
             }
 
-            // The transaction's frame gets the whole reservoir and every whole pool, taken out
-            // of the transaction's gas: the schedule's shares are for the frames below it.
+            // The transaction's frame gets the whole reservoir, taken out of the transaction's
+            // gas: the schedule's share is for the frames below it.
             let shares = gas.forward_all_to_child();
             Ok(Some(FrameInput::Call(Box::new(CallInputs {
                 input: CallInput::Bytes(input),
@@ -141,12 +140,6 @@ pub fn create_init_frame<CTX: ContextTr>(
                 return_memory_offset: 0..0,
                 reservoir: shares.reservoir,
                 charged_new_account_state_gas,
-                // No start charge until a consumer that charged the transaction's gas for the
-                // frame puts one on this input (`Handler::first_frame_input`), and no allowance,
-                // which is a value call's below the transaction.
-                charged_start: StartCharge::new(0, PoolAmounts::ZERO),
-                pool_shares: shares.pools,
-                history_allowance: 0,
             }))))
         }
         TxKind::Create => {
@@ -192,7 +185,6 @@ pub fn create_init_frame<CTX: ContextTr>(
             );
             inputs.set_charged_create_state_gas(charged_create_state_gas);
             inputs.set_charged_state_gas_address(charged_state_gas_address);
-            inputs.set_pool_shares(shares.pools);
             Ok(Some(FrameInput::Create(Box::new(inputs))))
         }
     }

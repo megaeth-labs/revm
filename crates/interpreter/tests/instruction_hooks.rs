@@ -24,7 +24,7 @@ use revm_interpreter::{
     instructions::gas_table_spec,
     interpreter::{EthInterpreter, ExtBytecode},
     FrameInput, Gas, GasTracker, Host, InputsImpl, InstructionResult, Interpreter,
-    InterpreterAction, PoolAmounts, SharedMemory,
+    InterpreterAction, SharedMemory,
 };
 use state::AccountInfo;
 use std::borrow::Cow;
@@ -850,7 +850,7 @@ fn input_gas(input: &FrameInput) -> (u64, u64) {
 
 /// Each frame-starting instruction hands its start to the hook once the forward is taken, and
 /// charges nothing after it: the instruction leaves the gas the hook was handed, apart from the
-/// reservoir and the pools, whose shares go to the frame after the hook, and the frame's input carries the
+/// reservoir, whose share goes to the frame after the hook, and the frame's input carries the
 /// forward, with a value call's stipend on top.
 #[test]
 fn test_a_start_reaches_the_hook_with_the_forward_taken() {
@@ -895,12 +895,10 @@ fn test_a_start_reaches_the_hook_with_the_forward_taken() {
         );
         let mut after_the_forward = at_hook;
         after_the_forward.set_reservoir(0);
-        after_the_forward.set_pools_remaining(PoolAmounts::ZERO);
         assert_eq!(
             *gas.tracker(),
             after_the_forward,
-            "{name}: nothing is charged after the hook; the whole reservoir and every whole pool \
-             are forwarded"
+            "{name}: nothing is charged after the hook; the whole reservoir is forwarded"
         );
         let stipend = if matches!(op, CALL | CALLCODE) {
             params.call_stipend()
@@ -1091,16 +1089,10 @@ fn test_the_input_copies_the_reservoir_the_hook_left() {
 
 /// A hook that takes the child's reservoir out of the caller's itself names it on the start
 /// ([`FrameStart::reservoir`]): the frame's input carries it, and the instruction takes no
-/// reservoir share of its own, so the caller keeps what the hook left. The pools are forwarded by
-/// the schedule as without the hook's reservoir.
+/// reservoir share of its own, so the caller keeps what the hook left.
 #[test]
 fn test_the_input_carries_the_child_reservoir_the_hook_names() {
     let spec = SpecId::AMSTERDAM;
-    let pools = |input: &FrameInput| match input {
-        FrameInput::Call(inputs) => inputs.pool_shares,
-        FrameInput::Create(inputs) => inputs.pool_shares(),
-        FrameInput::Empty => panic!("an empty frame input"),
-    };
     for (name, code, _) in start_cases() {
         let mut quiet = HookHost::new(spec);
         let (quiet_action, quiet_gas) = run(spec, &code, AMPLE, 10_000, &mut quiet);
@@ -1125,13 +1117,6 @@ fn test_the_input_carries_the_child_reservoir_the_hook_names() {
             4_000,
             "{name}: the caller keeps what the hook left"
         );
-        assert_eq!(
-            pools(&input),
-            pools(&quiet_input),
-            "{name}: the pools' shares"
-        );
-        let pools_left = |gas: &Gas| gas.tracker().pools_remaining();
-        assert_eq!(pools_left(&gas), pools_left(&quiet_gas), "{name}");
         assert_eq!(gas.remaining(), quiet_gas.remaining(), "{name}");
     }
 }

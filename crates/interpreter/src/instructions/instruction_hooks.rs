@@ -4,7 +4,7 @@
 use crate::{
     interpreter_types::{InterpreterTypes as ITy, LoopControl},
     ChildShares, CreateInputs, Gas, Host, InstructionExecResult as Result, InstructionResult,
-    Interpreter, InterpreterAction, StartCharge,
+    Interpreter, InterpreterAction,
 };
 use context_interface::host::{CompletedWrite, FrameStart, WriteVerdict};
 use primitives::{constants::CALL_STACK_LIMIT, hints_util::cold_path, Address, Bytes, U256};
@@ -44,18 +44,17 @@ fn revert<IT: ITy>(interpreter: &mut Interpreter<IT>, output: Bytes) -> Result {
 }
 
 /// Hands `start`, whose forward the running instruction has taken from `gas`, to
-/// [`Host::frame_starting`]. `true` returns what the hook declared on `start` for the frame: the
-/// start charge, for the frame's input, and the child's reservoir if the hook took it itself, for
-/// the forward ([`forward_to_child`]); `false` fails the instruction out of gas, and the charge
-/// goes with the start it was declared for.
+/// [`Host::frame_starting`]. `true` returns the child's reservoir if the hook took it itself and
+/// named it on `start`, for the forward ([`forward_to_child`]); `false` fails the instruction out
+/// of gas.
 #[inline]
 pub(crate) fn frame_starting<H: Host + ?Sized>(
     gas: &mut Gas,
     host: &mut H,
     mut start: FrameStart,
-) -> core::result::Result<(StartCharge, Option<u64>), InstructionResult> {
+) -> core::result::Result<Option<u64>, InstructionResult> {
     if host.frame_starting(&mut start, gas.tracker_mut()) {
-        Ok((start.charge, start.reservoir))
+        Ok(start.reservoir)
     } else {
         cold_path();
         Err(InstructionResult::OutOfGas)
@@ -94,11 +93,10 @@ pub(crate) fn running_account<H: Host + ?Sized>(
     Ok((account.balance, account.nonce))
 }
 
-/// Takes the child's shares of the caller's reservoir and pools out of `gas`, all but the
-/// schedule's `reservoir_kept_percent` and `pool_kept_percent`s, and returns them: what the child's
-/// tracker starts with ([`GasTracker::forward_to_child`](crate::GasTracker::forward_to_child)).
-/// Called once the frame-start hook has answered, so the shares are of the reservoir and the pools
-/// as the hook left them. A child `reservoir` the hook named replaces the reservoir's share: the
+/// Takes the child's share of the caller's reservoir out of `gas`, all but the schedule's
+/// `reservoir_kept_percent`, and returns it: what the child's tracker starts with
+/// ([`GasTracker::forward_to_child`](crate::GasTracker::forward_to_child)). Called once the
+/// frame-start hook has answered, so the share is of the reservoir as the hook left it. A child `reservoir` the hook named replaces the reservoir's share: the
 /// child starts with it, and the caller keeps the reservoir the hook left
 /// ([`GasTracker::forward_to_child_with_reservoir`](crate::GasTracker::forward_to_child_with_reservoir)).
 #[inline]
