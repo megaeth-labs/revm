@@ -855,8 +855,9 @@ fn test_a_child_that_cannot_pay_past_its_share_runs_out_of_gas() {
 
 /// A child that clears a slot its caller created gets the slot's state gas back as an EIP-8037
 /// restoration, into its own reservoir; when it succeeds, the caller gets it back with the rest of
-/// the share and the part the consumer kept, and is back where it was before it created the slot. When it reverts,
-/// the restoration is undone with the rest of its frame and the caller gets the share back.
+/// the share and the part the consumer kept, and is back where it was before it created the slot.
+/// When it reverts, the restoration is undone with the rest of its frame and the caller gets the
+/// share back.
 #[test]
 fn test_a_restoration_in_the_child_comes_back_to_its_caller() {
     for (restorer, kept) in [(RESTORER, true), (RESTORER_REVERTS, false)] {

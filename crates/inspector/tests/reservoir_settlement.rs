@@ -452,8 +452,8 @@ fn test_an_answer_the_inspector_builds_settles_its_reservoir_as_built() {
 }
 
 /// A creation's answer settles as a call's: as built, the caller gets back the part the consumer
-/// kept, and keeps the creation's charge; with the shares and the input's charges, the caller gets back what it held
-/// before the creation's start.
+/// kept, and keeps the creation's charge; with the share and the input's charges, the caller gets
+/// back what it held before the creation's start.
 #[test]
 fn test_an_answer_the_inspector_builds_for_a_creation_settles_its_reservoir_as_built() {
     for (answer, whole, kept_98) in [
