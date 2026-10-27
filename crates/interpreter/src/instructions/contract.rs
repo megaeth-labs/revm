@@ -197,7 +197,7 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
     let reservoir = frame_starting(&mut context.interpreter.gas, context.host, start)?;
 
     create_inputs.set_gas_limit(gas_limit);
-    create_inputs.set_reservoir(reservoir.unwrap_or(context.interpreter.gas.reservoir()));
+    create_inputs.set_reservoir(reservoir);
     context
         .interpreter
         .bytecode
@@ -294,7 +294,7 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
                 scheme,
                 is_static,
                 return_memory_offset,
-                reservoir: reservoir.unwrap_or(context.interpreter.gas.reservoir()),
+                reservoir,
                 charged_new_account_state_gas,
             },
         ))));

@@ -44,17 +44,17 @@ fn revert<IT: ITy>(interpreter: &mut Interpreter<IT>, output: Bytes) -> Result {
 }
 
 /// Hands `start`, whose forward the running instruction has taken from `gas`, to
-/// [`Host::frame_starting`]. `true` returns the child's reservoir if the hook took it itself and
-/// named it on `start`, which the frame's input carries in place of the caller's reservoir;
-/// `false` fails the instruction out of gas.
+/// [`Host::frame_starting`]. `true` returns the reservoir the frame's input carries: the child's
+/// reservoir if the hook took it itself and named it on `start`, or else a copy of the reservoir
+/// the hook left in `gas`. `false` fails the instruction out of gas.
 #[inline]
 pub(crate) fn frame_starting<H: Host + ?Sized>(
     gas: &mut Gas,
     host: &mut H,
     mut start: FrameStart,
-) -> core::result::Result<Option<u64>, InstructionResult> {
+) -> core::result::Result<u64, InstructionResult> {
     if host.frame_starting(&mut start, gas.tracker_mut()) {
-        Ok(start.reservoir)
+        Ok(start.reservoir.unwrap_or(gas.reservoir()))
     } else {
         cold_path();
         Err(InstructionResult::OutOfGas)

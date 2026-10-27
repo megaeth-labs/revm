@@ -124,9 +124,10 @@ pub struct FrameStart {
     /// when the hook is called.
     ///
     /// `None` leaves the forward to the instruction, whose frame's input copies the caller's
-    /// reservoir as the hook left it, and the caller keeps it, as upstream's instructions do. `Some`
-    /// is the reservoir the frame's input carries in its place, and the caller keeps the reservoir
-    /// the hook left it. The instruction does not check the amount against what the hook took.
+    /// reservoir as the hook left it, and the caller keeps it, as upstream's instructions do.
+    /// `Some` is the reservoir the frame's input carries in its place, and the caller keeps the
+    /// reservoir the hook left it. The instruction does not check the amount against what the hook
+    /// took.
     ///
     /// Either way the child's settlement replaces the caller's reservoir with the one the child
     /// returns. A hook that kept part of the caller's reservoir for it adds that back when the
