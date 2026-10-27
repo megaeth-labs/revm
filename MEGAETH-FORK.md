@@ -37,33 +37,20 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
    The `Semver` workflow checks every pull request against its base; a deviation passes only with the `api:exception` label, and the pull request body lists every deviating item with the consumers it was checked against.
    Each consumer's own CI builds against the tagged fork.
    The fork carries accepted exceptions, and each entry under Hooks names its own.
-   One of them changes what upstream functions do without changing a signature, so neither the compiler nor the `Semver` workflow finds it: the reservoir settlement adds.
-   `handle_reservoir_remaining_gas` and `GasTracker::absorb_returned_reservoir` add the reservoir a frame returns to what its caller kept, where upstream's replace the caller's reservoir with it, and the forward takes the reservoir out of the caller where upstream's left it there (see The reservoir share).
-   A consumer that starts and settles frames only through revm's instructions and handler, on a schedule that keeps none of the reservoir, gets upstream's results, since the caller then holds nothing when the child returns.
-   It affects three kinds of consumer:
-   - code that hands a frame a reservoir or a pool without taking it from the caller, such as a child's input or a first-frame result built by hand, an override of `Handler::first_frame_input` or `Handler::runtime_oog_result`, or a runner that settles its own first frame: it compiles and counts the reservoir twice (see The settlement adds);
-   - an inspector that reads a caller's gas while its child runs, at a `CALL` or `CREATE` instruction's `step_end`: it sees the part the caller kept, zero by default, where upstream's showed the forwarded reservoir;
-   - a consumer whose schedule keeps part of the reservoir (`GasId::reservoir_kept_percent`), whose results differ from upstream's by design.
-
-   Another changes the signature of an upstream function the fork picked with the EIP-8037 / EIP-2780 gas core: `pre_execution::apply_auth_list_eip2780`.
+   One changes the signature of an upstream function the fork picked with the EIP-8037 / EIP-2780 gas core: `pre_execution::apply_auth_list_eip2780`.
    The fork's takes the context, the authorization list as `&[Eip7702AuthFacts]` and whether EIP-8037 is on, where upstream's takes the journal, an iterator of authorizations and the two state-gas prices, so that every authorization's charge is priced through `Host::state_gas_price` (see State-gas price).
    The base line has no such function, so the change breaks no code written for it.
    A consumer that runs the authorization phase through `pre_execution::apply_eip7702_auth_list` or `Handler::apply_eip7702_auth_list`, whose signatures are upstream's, is unaffected.
    It affects code that calls `apply_auth_list_eip2780` itself, written for upstream's signature: it does not compile against the fork until it passes the context and the list `Eip7702AuthFacts::collect` builds.
 2. **Hooks and data, and a bounded set of MegaETH accounting.**
    The fork adds hooks and data.
-   It also carries, today, a named, bounded set of MegaETH accounting inside revm's forwarding and settlement; the set is what the fork carries now, and the test for an addition (below) is stricter:
+   It also carries a named, bounded set of MegaETH accounting inside revm's charges and settlement:
    - withheld regular gas and its crossing record, which every regular charge reads;
-   - the history-gas dimension, charged reservoir-first, unwound with state gas, and charged for deployed code inside `return_create`;
-   - the resource pools, per-frame budgets forwarded to a child, given back by a failed one and settled with the reservoir;
-   - the reservoir kept share, and the additive settlement it needs (rule 1);
-   - the start charge, and its refund when the frame fails;
-   - the history allowance.
+   - the history-gas dimension, charged reservoir-first, unwound with state gas, and charged for deployed code inside `return_create`.
 
-   Some of these a consumer could keep beside revm's gas through the hooks, at a cost in code and in the gas figures it has to restore; the next base-line move may take them out (see What the fork carries).
    Each item has its entry under Hooks, whose Default keeps upstream's results for a consumer that sets nothing.
    Nothing else that implements MegaETH semantics enters the fork.
-   The start lifecycle carries no MegaETH figure, so it is a generic hook and the set does not grow with it (see Start lifecycle).
+   What a consumer decides per frame start, such as a budget, a charge the frame's failure gives back, an allowance or a part of the caller's reservoir it keeps, it keeps beside revm's gas, driven by the start lifecycle's hooks; the lifecycle carries no MegaETH figure, so it is a generic hook and the set does not grow with it (see Start lifecycle).
    An addition to the set needs all of these, argued in its pull request:
    - no hook that sees only the state revm exposes at that point can make the same decision, because the figure is read or written inside a charge, or has to be ordered with revm's own settlement; the pull request says why the consumer cannot keep it beside revm's gas;
    - it is mechanism, not policy: every amount, share, price and limit comes from the consumer, through the gas schedule or a hook, and a detail the fork has to fix itself, such as a rounding, is named in its entry;
@@ -101,11 +88,11 @@ The sizes are the lines of `crates/`, without tests, that `git blame <base>..<fo
 
 | Class | What | Size | At the next base-line move |
 |---|---|---|---|
-| Upstream gas core | The EIP-8037 / EIP-2780 gas core, picked from later upstream releases | about 2,600 lines | Goes away once the new base contains every pick; the sweep issues record which tag first contains each. The settlement code the fork's MegaETH accounting is written into is upstream's own (`handle_reservoir_remaining_gas`, `EthFrame::return_result`, `create_init_frame`, `last_frame_result`), so that accounting is re-applied to the new base's versions of it. |
+| Upstream gas core | The EIP-8037 / EIP-2780 gas core, picked from later upstream releases | about 2,600 lines | Goes away once the new base contains every pick; the sweep issues record which tag first contains each. The settlement code the fork's MegaETH accounting is written into is upstream's own (`handle_reservoir_remaining_gas`, `rollback_state_gas`, `return_create`), so that accounting is re-applied to the new base's versions of it. |
 | Other upstream picks | Fixes and performance picks | about 140 lines | Goes away once the new base contains them; a pick the base lacks is picked again or dropped, as its sweep decides. A behaviour a switch takes back stays switchable (see Consumer switches). |
-| Generic hooks | State-gas price, precompile price, code-deposit admission, the failed-charge record, the completed-write and frame-start hooks, the pending action, the frame-run-result hook and the start lifecycle | not counted | Each is proposed upstream, in a form upstream can take: without MegaETH vocabulary in its types (`FrameStart::charge` leaves `FrameStart` first), as an instruction-level helper rather than a `Host` method where one serves, and with no cost on the default path that upstream would not accept. It is carried until upstream has an equivalent (its Removal). |
+| Generic hooks | State-gas price, precompile price, code-deposit admission, the failed-charge record, the completed-write and frame-start hooks, the pending action, the frame-run-result hook and the start lifecycle | not counted | Each is proposed upstream, in a form upstream can take: without MegaETH vocabulary in its types, as an instruction-level helper rather than a `Host` method where one serves, and with no cost on the default path that upstream would not accept. It is carried until upstream has an equivalent (its Removal). |
 | Consumer switches | Amsterdam opcodes and EIP-7708 below Amsterdam, the base line's journal semantics | about 300 lines | Carried until their Removal conditions. The Amsterdam switch is proposed in the shape of upstream's per-EIP activation switches, which already cover three of its four opcodes; the base line's journal semantics are not proposed. |
-| MegaETH accounting (rule 2) | Withheld regular gas, the history-gas dimension, the resource pools, the reservoir kept share, the start charge, the history allowance | about 2,150 lines, of which the pools, the kept share, the start charge and the allowance are about 1,450 | Carried and re-applied to the new base, or replaced: an item a later design keeps in `mega-evm` instead, with the same results for the consumer that uses it, leaves the fork, and its entry's Removal says when. The items that ride on the frame results (the pools, the start charge, the allowance) are the first candidates, since every consumer pays their size. |
+| MegaETH accounting (rule 2) | Withheld regular gas, the history-gas dimension | about 700 lines | Carried and re-applied to the new base, or replaced: an item a later design keeps in `mega-evm` instead, with the same results for the consumer that uses it, leaves the fork, and its entry's Removal says when. |
 
 ## Hooks
 
@@ -119,7 +106,7 @@ A format that encodes a struct by position, such as bincode, cannot read such an
 
 A gas schedule (`GasParams`) is a table of 256 entries, not named fields, so `serde(default)` cannot reach an entry: a table built raw (`GasParams::new`) or decoded from an encoding made before an entry existed holds zero there.
 Every entry the fork adds is therefore zero by default, and zero is upstream's behaviour: such a table behaves as the default schedule does.
-An id the fork once used for an entry with another default is left unused rather than given a new meaning, so a table encoded then does not read as a setting.
+An id the fork once used for an entry is left unused rather than given a new meaning, so a table encoded then does not read as a setting: ids 246 to 254 are such ids.
 
 ### State-gas price
 
@@ -138,6 +125,7 @@ An id the fork once used for an entry with another default is left unused rather
   With the nonce check off and a transaction nonce that differs from the caller's account nonce, as for an OP deposit, upstream's checks, charges and warms an address the transaction does not deploy at, and the fork's the address it deploys at.
   There, whether the creation pays `create_state_gas` can differ from upstream's, and so can the gas of a later access to the other address, which upstream's leaves warm and the fork's leaves cold.
   The refund carries one address more in the frame inputs and outcomes, and under EIP-2780 an EIP-7702 transaction's authorization list is buffered before the authorization phase, one 88-byte entry per authorization that can apply.
+  `CallOutcome` and `CreateOutcome` are constructible by literal and carry `charged_state_gas_address`, which upstream's do not, so an outcome literal written for upstream's fields does not compile against the fork until it names it (`Address::ZERO` with nothing charged).
 
 ### History gas
 
@@ -208,7 +196,7 @@ An id the fork once used for an entry with another default is left unused rather
 - **Consumer.** mega-evm's gas detention reads what a halting frame burned. An `OutOfGas` halt zeroes the frame's regular gas inside the interpreter, before the frame's result reaches any boundary mega-evm owns.
 - **Removal.** When upstream keeps a halting frame's regular gas readable, or when mega-evm no longer reads what a halting frame burned.
 - **Default.** Each record is written on the failure side only: the tracker's in cold, out-of-line functions, the interpreter's in its cold out-of-gas halt, the handler's on a precompile's out-of-gas. A deduction or load that succeeds runs the same code.
-  It takes two words of the tracker, a number and a flag, and the flag's word also holds the pools' crossings (see Resource pools); every copy of the tracker, and of every `Gas` and frame result that holds one, carries both words.
+  It takes two words of the tracker, a number and a flag, and the flag's word also holds the start mark (see Start lifecycle); every copy of the tracker, and of every `Gas` and frame result that holds one, carries both words.
   Encoded, the record is an optional number in the field's place.
   Where measured (callgrind, the fork's release profile), the field left a transfer and a precompile call unchanged and cost about 0.1% of the instructions of a creation; the records written on the failure side add nothing measurable.
 
@@ -236,28 +224,22 @@ An id the fork once used for an entry with another default is left unused rather
 
 ### Code-deposit admission
 
-- **API.** `ContextTr::admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>, gas: &mut GasTracker) -> Result<(), Bytes>`, whose default admits and leaves `gas` alone.
+- **API.** `ContextTr::admit_code_deposit(&mut self, deposit: &CodeDeposit<'_>) -> Result<(), Bytes>`, whose default admits.
   `CodeDeposit` carries `address`, `code`, `gas_before` and `gas_after`; `regular_gas`, `state_gas` and `history_gas` read the deposit's charges off the two trackers.
   It is `#[non_exhaustive]` and built with `CodeDeposit::new`, so a later field is not a breaking change.
 - **Contract.** `return_create` calls it once for every creation it deploys, on the plain and the inspected path: after the code passed every check and every deposit charge is recorded, before the journal checkpoint is committed.
   A creation `return_create` fails itself, out of gas on a deposit charge included, is never offered.
   Before Homestead a deposit the frame cannot pay does not fail: `return_create` deploys empty code instead, and offers that deposit with empty code and no charge.
   If the failed charge was a crossing of the frame's withheld gas, `gas_after` carries its crossing record and `gas_before` does not, so an admitted deposit keeps the record and a refusal discards it.
-  `gas` is the creating frame's tracker, which `gas_after` reads a copy of: the hook may debit and credit it, for instance draw the deployed code from one of the frame's pools (see Resource pools), and a charge it makes that fails records as any failed charge does.
-  `Ok(())` admits, and the frame returns with `gas` as the hook left it.
-  `Err(output)` refuses: the checkpoint is reverted, the frame's gas is put back to `gas_before`, which undoes whatever the hook did to `gas`, a crossing its failed draw recorded included, and the creation ends as a `Revert` with `output`, settling as a creation whose init code reverted.
+  `Err(output)` refuses: the checkpoint is reverted, the frame's gas is put back to `gas_before`, and the creation ends as a `Revert` with `output`, settling as a creation whose init code reverted.
   A hook that fails fatally records the cause in the context error and refuses; the transaction returns the error.
   The deposit's charges, and with them its state-gas price lookup through `Host::state_gas_price`, are made before it is offered, so that lookup is made whether or not the deposit is admitted; a refusal does not undo what the lookup recorded.
 - **Reach.** The hook is on the context `return_create` is called with, so a consumer that wraps `EthFrame`, runs `process_next_action` from its own `frame_run`, or customises `Handler` reaches it by implementing `ContextTr` for its context.
   A context that wraps another and implements `ContextTr` by hand must forward the method, or it gets the admitting default.
-- **Consumer.** mega-evm refuses a deposit its own rules reject, after revm's checks and charges and before the creation commits, and holds the deployed code to the creating frame's byte budget there. That point is inside `return_create`, between its last charge and the checkpoint commit, and no other hook is lent the frame's gas between the two.
+- **Consumer.** mega-evm refuses a deposit its own rules reject, after revm's checks and charges and before the creation commits, and counts the deployed code against the creating frame's budget there. That point is inside `return_create`, between its last charge and the checkpoint commit.
 - **Removal.** When upstream has an equivalent admission point, or when mega-evm stops refusing deposits.
 - **Default.** `return_create` compiles to the same code, on its own and inlined into the handler on the plain and the inspected path.
   Inlined into a consumer's own function, the admitting default may shift its block layout; where measured, that cost one unconditional branch on one out-of-gas path and changed no success path.
-  Where measured (callgrind, the fork's release profile), lending `gas` costs nothing: a top-level creation runs the same instruction count as without it, and a nested `CREATE` 0.06 fewer.
-  The `gas` parameter is an exception to rule 1 (`api:exception`): an override written for the signature without it does not compile until it takes `gas: &mut GasTracker`, and an override that leaves `gas` alone behaves as it did without it.
-  A context that forwards the method to another forwards `gas` with it.
-  Nothing built against upstream revm overrides the hook, since the hook is the fork's.
 
 ### revm 40.0.3's journal semantics
 
@@ -289,7 +271,7 @@ An id the fork once used for an entry with another default is left unused rather
 ### Frame-start hook
 
 - **API.** `Host::frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool`, whose default returns `true`.
-  `FrameStart` (`#[non_exhaustive]`, built with `FrameStart::new`: `kind`, `caller`, `target`, `value`, `forward`, `charge`, which `new` leaves empty, and `reservoir`, which `new` leaves `None`) and `FrameStartKind` (`Call`, `CallCode`, `DelegateCall`, `StaticCall`, `Create`, `Create2`), in `revm_context_interface::host`.
+  `FrameStart` (`#[non_exhaustive]`, built with `FrameStart::new`: `kind`, `caller`, `target`, `value`, `forward`, and `reservoir`, which `new` leaves `None`) and `FrameStartKind` (`Call`, `CallCode`, `DelegateCall`, `StaticCall`, `Create`, `Create2`), in `revm_context_interface::host`.
   `FrameStartKind` is exhaustive on purpose, as `CompletedWrite` is: mega-evm matches it to charge each start, so a new kind is a compile error in every consumer that matches it rather than a start that passes a wildcard arm uncharged, and adding one is an `api:exception` change.
 - **Contract.** `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2` call it after every charge they make and after the forward is taken from the caller's gas, before they build the frame's input, on the plain and the inspected path.
   `forward` is the regular gas taken: the frame's gas limit without a value call's stipend. `value` is the value transferred, zero for `DELEGATECALL` and `STATICCALL`.
@@ -298,10 +280,10 @@ An id the fork once used for an entry with another default is left unused rather
   A creation's address is computed once, into the creation's input, and the handler builds the frame at it without computing it again. With EIP-8037 on, the instruction's EIP-8037 branch computes it. With EIP-8037 off, the instruction computes it after the same checks, reading the caller's balance and nonce from the journal.
   It is `None` only for a creation the handler fails before it takes an address: an endowment above the caller's balance, a caller's nonce at its maximum, or a creating frame at the depth limit. Such a creation reaches the hook only with EIP-8037 off; with it on, the instruction ends the creation before the hook.
   The address is fixed when the hook sees it. Something that changes the caller's nonce between the instruction and the frame does not move it, as on upstream's EIP-8037 path. An inspector that changes the creation's caller, scheme or init code (`CreateInputs::set_call`, `set_scheme`, `set_init_code`) clears it, and the handler computes the new one.
-  `gas` is the caller's tracker. The hook may debit and credit it, and the instruction uses it as the hook left it: nothing is charged after the hook, and the frame's input takes its share of the reservoir from it, so a frame the handler runs and one it answers without running (a precompile) both start from a share of the reservoir the hook left (see The reservoir share). A charge the hook makes that fails records as any failed charge does, whatever the answer.
-  `start` is the hook's to declare the start charge on (`charge`, see The start charge) and, if it takes the child's reservoir itself, the child's reservoir (`reservoir`); the instruction reads nothing else back from it.
-  `FrameStart::reservoir` is `None` when the hook is called. `Some(r)` means the hook took the child's reservoir out of `gas` itself: the instruction takes no reservoir share, the frame's input carries `r`, and the caller keeps what the hook left it. `None` keeps the schedule's share (see The reservoir share). The instruction does not check `r` against what the hook took. The pools are forwarded by the schedule either way.
-  After the hook the instruction copies that charge onto the frame's input and takes the child's shares of the reservoir (unless the hook named it) and of each pool off `gas` for it (`GasTracker::forward_to_child_with_reservoir`, which `forward_to_child` calls with `None`, see The reservoir share and Resource pools); the shares are of the reservoir and the pools as the hook left them.
+  `gas` is the caller's tracker. The hook may debit and credit it, and the instruction uses it as the hook left it: nothing is charged after the hook, and the frame's input copies the reservoir the hook left in it, so a frame the handler runs and one it answers without running (a precompile) both start from that reservoir. A charge the hook makes that fails records as any failed charge does, whatever the answer.
+  `start` is the hook's to name the child's reservoir on (`reservoir`), if it takes that out of `gas` itself; the instruction reads nothing else back from it.
+  `FrameStart::reservoir` is `None` when the hook is called. `None` leaves the frame's input a copy of the reservoir in `gas`, which the caller keeps while the child runs, as upstream's instructions do. `Some(r)` means the hook took the child's reservoir out of `gas` itself: the frame's input carries `r` instead, and the caller keeps what the hook left it. The instruction does not check `r` against what the hook took.
+  Either way the child's settlement replaces the caller's reservoir with the one the child returns, as upstream's does; a consumer that kept part of the caller's reservoir adds it back when revm settles the child (`FrameSettle::held_reservoir`, see Start lifecycle).
   `true` hands the start to the handler, which may still refuse it (call depth, balance) or answer it without a frame; what the hook did to `gas` stands either way. `false` fails the instruction out of gas and starts no frame: the forward stays taken unless the hook gave it back, and the halt records the regular gas the hook left unless a failed charge already did.
   A creation the instruction ends before its forward (EIP-8037's checks of the endowment, the nonce and the depth) is not offered.
 - **Consumer.** mega-evm charges a start's write records after the forward and before the frame inherits the caller's reservoir. Without the hook it wraps the call and creation instructions, rewrites the reservoir revm already copied into the input, and takes the input back when the charge fails.
@@ -309,134 +291,13 @@ An id the fork once used for an entry with another default is left unused rather
 - **Removal.** When upstream exposes an equivalent point, or when mega-evm stops charging frame starts.
 - **Default.** Returns `true` and touches nothing.
   Where measured (callgrind, the fork's release profile), a call runs one instruction more than without the hook: the store of the forward its helper returns, about 0.05% of a call to a contract that stops.
-  For `CREATE` and `CREATE2` the hook's only cost is the start's address; the resource pools' forward is counted under Resource pools.
+  For `CREATE` and `CREATE2` the hook's only cost is the start's address.
   With EIP-8037 off, the default spec's path, the address costs a warm journal read of the caller and the three checks: 149 instructions per `CREATE` and 147 per `CREATE2` from a contract (+0.95% and +0.73%). The read is a `Host::load_account_info_skip_cold_load` call that upstream's instruction does not make, so a `Host` that counts or refuses loads sees one more per creation.
   The instruction computes the address and a `CREATE2`'s init-code hash, and the handler reuses them, so a creation the handler builds or fails computes the same hashes as upstream's.
   A start that never reaches the handler's frame building computes them for the hook alone: one hash for a `CREATE`, two for a `CREATE2`. That is a start the hook refuses, and a creation answered without a frame, by an inspector's `create` or by a consumer's own `frame_init`. Upstream's EIP-8037 path computes them before the hook in the same way.
   With EIP-8037 on, the start reads the address the EIP-8037 branch already computed from the input; that path was not measured.
   `CreateInputs`' derived `PartialEq` compares the cached address and hash, which the input of a creation the instruction starts holds with EIP-8037 on and off, so it compares unequal to an otherwise equal input that has computed nothing, and to its own serde round trip, which skips the cache.
   A consumer tells a creation from a call by `kind`, not by `target`: `target` is `None` only for the creations the Contract names, and for every other start an address, which for a creation is the one it would take.
-
-### Resource pools
-
-- **API.** `PoolId` (`new(index)`, `index`, `COUNT` = 3, `ALL`) and `PoolAmounts` (an amount per pool: `ZERO`, `UNLIMITED`, `get`, `set`, `with`, `is_zero`), in `revm_context_interface::cfg::gas`, re-exported from `revm_interpreter`.
-  On `GasTracker`, forwarded on `Gas`: `pool_remaining`, `set_pool_remaining`, `pool_spent`, `set_pool_spent`, `record_pool`, `refill_pool`, `pool_crossing`, `clear_pool_crossing`, `set_pool_crossing`, each taking the `PoolId`.
-  On `GasTracker` alone, the fork's own plumbing: `pools_remaining`, `set_pools_remaining`, `add_pool_spent`, `forward_pool`, `absorb_returned_pool`, `absorb_returned_pools`, `adopt_pool_share`, `adopt_pool_shares`, and `forward_to_child` and `forward_all_to_child` with their `ChildShares` (see The reservoir share).
-  `GasId::pool_kept_percent(pool)` (ids 248, 247 and 246) and `GasParams::pool_forward_share(pool, remaining)`.
-  `pool_shares` on `CallInputs` (a field) and `CreateInputs` (`pool_shares`, `set_pool_shares`).
-- **Contract.** A tracker carries `PoolId::COUNT` pools, budgets beside its gas whose meaning the consumer gives (bytes a frame may append, records it may write, entries it may create); the fork knows them by index only.
-  For each pool, `pool_remaining` is what the frame may still draw and `pool_spent` its net draw, signed as `history_gas_spent` is.
-  `record_pool(pool, n)` draws; a draw the pool cannot pay takes nothing, returns `false` and sets the pool's crossing (`pool_crossing(pool)` is `true`), which survives `spend_all`, starts clear in every child, is not taken over by a caller, and stays until cleared; a consumer marks a result it produced itself with `set_pool_crossing`.
-  A crossing is a bit per pool: it says that a draw failed, not what the draw asked for, which the hook that drew knows when it fails.
-  No halt touches a pool, so a halted frame's result still reads each pool as the failed draw found it, until its caller settles it.
-  `refill_pool(pool, n)` gives back and lowers the net, below zero when the draw was a caller's.
-  Amounts are bounded as the tracker bounds gas amounts: every draw and refill is at most `i64::MAX`, and each net with its children's nets merged in stays within `±i64::MAX`, so it can be negated; a debug build asserts it where a net moves, and past it a release build saturates the net, so a rollback no longer restores the pool exactly.
-  Each pool is a figure of its own: nothing the fork does to one moves another, and a consumer that draws several for one write draws them one by one, in the order its rules give.
-  A consumer draws deployed code where the deposit is admitted: `ContextTr::admit_code_deposit` is lent the creating frame's tracker (see Code-deposit admission).
-  The transaction's frame gets every whole pool of the transaction's tracker, set by a consumer at `tx_gas` or in pre-execution (`forward_all_to_child`, from `create_init_frame` and from the stand-in `Handler::runtime_oog_result` builds when the EIP-2780 runtime phase runs out of gas).
-  At every `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, after `frame_starting` has answered, the instruction takes `pool_forward_share(pool, …)` of each of the caller's pools out of it and puts the shares on the frame's input as `pool_shares`: the child's pools when it starts, on the frame the handler runs and on an answer it gives without one (a precompile, a refused start).
-  `pool_forward_share` is `100 − pool_kept_percent` per cent of what the caller has left of the pool, rounded down, and the caller keeps the rest: zero kept forwards the whole pool, a hundred or more none.
-  A forward is not a draw.
-  The settlement is in `handle_reservoir_remaining_gas` (`absorb_returned_pools`) and follows the reservoir, not regular gas: a child that reverts or halts has its draws on every pool undone by `rollback_state_gas`, which gives each pool's net back to it, so what the caller absorbs of each pool is the child's remaining pool on success and the whole share on revert *and on halt*, since a halted frame draws nothing; the caller kept what it did not forward.
-  The child's nets merge into the caller's on success only, as the history net does, so a caller's rollback undoes its children's draws too.
-  `rollback_state_gas` rolls every pool back with state and history gas, so a consumer that rolls a frame back by hand rolls the pools back with it.
-  The first frame's return settles into the transaction's tracker the same way (`last_frame_result`, through `execution::settle_first_frame`, see The start charge), whose `pool_spent` of each pool is then the transaction's net draw.
-  A precompile's answer adopts the shares as the pools it started with (`adopt_pool_shares`): each pool is the share less what its provider drew on it, so its pools and nets add up to the shares as a frame's do; a provider that draws on its answer starts the answer's pools at the input's `pool_shares` first, so a draw a share cannot pay fails.
-  A provider that drew more than a share anyway, on pools it did not start at the shares, fails closed on that pool: the adoption empties the pool, caps its net at the share and sets its crossing, so the caller gets back no more than it forwarded whether the answer succeeds or fails, and the consumer classifies the crossing as it classifies a refused draw. The answer's result is the provider's, so a successful answer can carry a crossing.
-  An outcome an inspector builds to answer a start carries whatever pools its gas was built with, unlimited ones with `CallOutcome::new` and `CreateOutcome::new`, and the settlement absorbs them as they are.
-  A consumer that answers a start itself, without a frame or a provider, sets the answer's pools to the shares it was given (`set_pools_remaining(inputs.pool_shares)`), and a consumer that builds a child's input itself takes the child's shares with `forward_to_child`.
-  The pools are not reported on `ResultGas`.
-- **Consumer.** mega-evm keeps per-frame budgets of what a transaction adds to the chain: the bytes it appends to the state and the history, the write records it makes and the state entries it creates, each forwarded to a child at 98/100 of what its caller has left, each given back by a failed frame and handed to its caller by a successful one, and each held to a per-transaction and a per-block limit. That is what the tracker does for the reservoir, and only the tracker's forward and settlement can carry figures that move with a frame's gas.
-- **Removal.** When upstream carries equivalent per-frame budgets on its gas, or when mega-evm stops limiting these per frame.
-- **Default.** Every tracker starts with every pool unlimited (`u64::MAX`), every schedule keeps none of a pool and so forwards every whole pool, and nothing in the workspace draws one, so every figure of the pools is the unlimited pool going out and coming back and every result is upstream's.
-  A table without the entries, built raw or decoded from an encoding that predates them, keeps none too (see Hooks).
-  Three pools, because mega-evm limits three figures per frame: data size, write records and state growth. A fourth would carry one more figure the engine keeps beside the pools today (the transfer-log bytes it subtracts from the history bytes), but the engine's per-start entry stays for the take-back credit and the creator-record overdraft in any case, and the pool would cost every consumer 16 bytes more on every frame result. A later pool is a size change, not an API change: it moves `PoolId::COUNT` and `PoolId::ALL`, gives the pool's kept percentage the next id below the pools' (245) and a name, and changes the tests that count them.
-  The tracker is 144 bytes (88 without the fork's figures, 112 with one pool): two words per pool, the pool and its net, a word for the allowance (see The history allowance), and the crossings, a bit per pool, in the word the failed-charge record's flag takes (see The failed-charge record). In a format that carries field names, encodings that predate the fields decode with unlimited pools, no crossing and zero for the rest, and a positional format cannot read them (see Hooks).
-  `Gas` is 160 bytes (104 at the base without the fork's figures), `InterpreterResult` 200 (144), `CallOutcome` and `FrameResult` 296 (208), `CreateOutcome` 280 (192), the outcomes with the start charge's four words (see The start charge).
-  Where measured (callgrind, aarch64, the fork's release profile), against the single byte pool before these pools: a transfer costs 215 instructions more (+3.9%), each `CALL` about 258 more (+10.9% on a transaction of 64 calls), a top-level creation 273 more (+1.5%), a nested `CREATE` 331 more (+2.1%) and a `SELFDESTRUCT` transaction 285 more (+3.5%).
-  Nearly all of it is the size: the same code with one pool, at the earlier sizes, cost 2, 8, 7, 10 and 1 instructions on the same workloads. At 296 bytes the frame result passes what the compiler copies inline, and the moves of the frame results through the handler's `Result` and `ItemOrResult` wrappers (about seven per `CALL`) become library `memcpy` calls.
-  Against the base without any of the fork's figures, a transfer costs 336 more (+6.2%) and each `CALL` about 398 more (+17.9% on a transaction of 64 calls).
-  A precompile's answer runs 11 instructions more than with an adoption that does not check each pool's net against its share (see Contract); measured against the head before the check, a transfer runs 1 instruction less, each `CALL` 1.9 less, a top-level creation 3 less and a nested `CREATE` 7.75 less, and a `SELFDESTRUCT` transaction 4 more, from code layout, not from the check.
-
-### The reservoir share
-
-- **API.** `GasId::reservoir_kept_percent` (id 249) and `GasParams::reservoir_forward_share(reservoir)`.
-  On `GasTracker`: `forward_reservoir(share)`, `forward_to_child(&GasParams)`, `forward_to_child_with_reservoir(&GasParams, Option<u64>)` (the first with `None`) and `forward_all_to_child()`, which take the reservoir's share and every pool's share at once and return them as `ChildShares { reservoir, pools }` (`#[non_exhaustive]`).
-- **Contract.** At every `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2`, after `frame_starting` has answered, the instruction takes `reservoir_forward_share` of the caller's EIP-8037 reservoir (unless the frame-start hook named the child's reservoir, `FrameStart::reservoir`, in which case it takes none and the input carries the hook's) out of the caller's tracker and puts it on the frame's input as `reservoir`, the child's reservoir when it starts, on a frame and on an answer alike.
-  `reservoir_forward_share` is the reservoir less the caller's part, `reservoir_kept_percent` per cent of it rounded down, taken away as `call_stipend_reduction` takes regular gas: at 2 kept the child receives `reservoir − reservoir × 2 / 100`, so a reservoir of 99 forwards 98, where a pool keeping 2 forwards 97 (its share is rounded down). Zero kept forwards the whole reservoir, as EIP-8037 does; a hundred or more forwards none.
-  The two roundings are the fork's, not the schedule's: the reservoir's share takes the caller's part away as regular gas's forward does, and a pool's share is rounded down. A chain that needs the floor for the reservoir, or the subtraction for a pool, has no entry for it.
-  The caller keeps the rest while the child runs; the share is all the child has, so a child whose state and history charges pass it spills onto its own regular gas, as a frame with an empty reservoir does, and one that cannot pay that fails out of gas.
-  On the child's return, `GasTracker::absorb_returned_reservoir` adds the reservoir the child left to the part the caller kept, where upstream's replaced the caller's reservoir with the child's; as before, the returned reservoir first unwinds the caller's outstanding spill, last in first out, and the part the caller kept stays in its reservoir.
-  A child that fails rolls its charges back and returns its whole share; one that succeeds returns what it left, its own refills (EIP-8037 restorations) included, which land in its reservoir as before.
-  A caller that keeps part of its reservoir can therefore hold it beside an outstanding spill: a child that succeeded after spending past its share spilled onto its regular gas, and the spill merges into the caller's. A whole forward cannot produce this, since the caller then keeps none.
-  A refill in such a caller (an EIP-8037 restoration, `refill_history`, the refund of an upfront or a start charge) keeps EIP-8037's order: regular gas up to the outstanding spill first, the reservoir after, whichever of the two paid the charge the refill undoes. So a charge the caller paid from its kept reservoir comes back as regular gas while a child's spill is outstanding.
-  For example, a caller with a reservoir of 1,000 that keeps 2 per cent keeps 20 and forwards 980; a child that charges 1,000 spills 20; the caller then charges 10 from its reservoir (reservoir 10, spill 20) and refills 10, which leaves its reservoir at 10, its spill at 10 and its regular gas 10 higher.
-  The sum of the two is conserved, a rollback still restores the reservoir the frame started with, and the reimbursement and `gas_used` read the sum, so no final figure moves; `GAS` in the caller reads the credited regular gas.
-  The transaction's frame takes the whole reservoir of the transaction's tracker (`forward_all_to_child`, from `create_init_frame`), and settles back into it the same way, so a system call's frame does too; so does the stand-in result `Handler::runtime_oog_result` builds for a transaction whose EIP-2780 runtime phase ran out of gas, which carries the whole reservoir and every pool and settles them back once.
-  A precompile's answer carries the share the input gave it, as the provider builds the answer's gas from the input's reservoir (the standard providers do, and a provider must); the fork does not check an answer's reservoir, state-gas net or spill against what the input forwarded, and takes the provider's answer as the provider reports it, as upstream does, so only the pools are adopted fail-closed; a start the handler refuses (call depth, balance) and a creation it fails early carry it too.
-  An outcome an inspector builds to answer a start carries whatever reservoir its gas was built with, none with `Gas::new`, and the settlement adds it to what the caller kept: with the whole reservoir forwarded the caller is left with none, as with upstream's settlement.
-  **The settlement adds.** `handle_reservoir_remaining_gas` (with the `GasTracker::absorb_returned_reservoir` and `absorb_returned_pools` it calls) and `execution::settle_first_frame` add what a frame returns to what its caller holds, so the caller must no longer hold what it handed the frame.
-  Code that hands a frame the caller's reservoir or a pool without taking it from the caller compiles, and the caller ends with it twice. The shapes:
-  - a child's input built by hand from the caller's `reservoir()` or `pools_remaining()`, while the caller keeps them;
-  - the transaction's frame, or a stand-in result for it, built from the transaction's gas without taking from it, in an override of `Handler::first_frame_input` or `Handler::runtime_oog_result` or in a runner of its own;
-  - a runner that settles the transaction's frame into gas it seeds from the frame's own figures (`GasTracker::new(limit, frame.remaining(), frame.reservoir())`) and then calls `last_frame_result` or `settle_first_frame`.
-
-  A consumer takes what it hands over: `forward_to_child` takes the schedule's shares, as the instructions do; `forward_all_to_child` takes everything, as the transaction's frame does; `forward_reservoir` and `forward_pool` take a share the consumer computed.
-  A consumer that lowers a child's share after the forward and gives the excess back to the caller keeps the sum, and is right; so is code that settles with arithmetic of its own that replaces the caller's reservoir and calls none of these functions.
-  A debug build asserts on entry to `settle_first_frame` that the transaction's gas holds no reservoir and no limited pool; an unlimited pool is exempt, since what comes back saturates at it. A frame below the transaction's has no such check: its caller may hold a kept part, or an excess given back, beside the share, and only the code that built the input knows which.
-- **Consumer.** mega-evm keeps the caller's part of the reservoir from a callee that could exhaust it: a child receives 98/100 of what its caller has left, as with every other resource a callee could exhaust. The instruction takes the forwarded share from the reservoir as the frame-start hook left it, so the kept part stays in the caller's tracker while the child runs, and the child's returned reservoir is added to it at settlement, after it has unwound the caller's outstanding spill.
-- **Removal.** When upstream forwards a share of the reservoir through an equivalent setting, or when mega-evm forwards the whole reservoir.
-- **Default.** Every schedule keeps none of the reservoir and so forwards it whole, the child's return gives the caller what the child left, and every result is upstream's: EEST, the default-path figures pinned to upstream and the handler suites pass unchanged.
-  A table without the entry, built raw or decoded from an encoding that predates it, keeps none too (see Hooks).
-  What a frame's tracker reads while its child runs differs: its reservoir is the part it kept, zero by default, where upstream's left the forwarded reservoir in it until the child returned; an inspector that reads the caller's gas at the `CALL` or `CREATE` instruction's `step_end` sees it.
-  Where measured with the pools' figures (above), the share and the generalised forward cost 8 instructions per `CALL` with one pool.
-  `handle_reservoir_remaining_gas` (upstream's, public) and `GasTracker::absorb_returned_reservoir` (upstream's, picked) change meaning: they add the child's reservoir to the caller's. A consumer that calls them, or builds a child's input, without taking the share from the caller does not fail to compile; it counts the reservoir twice. The pull request that makes the change lists it with the `api:exception` items.
-  A consumer that builds a child's input by hand with the caller's reservoir, without taking the child's shares with `forward_to_child`, counts that reservoir twice, and must take them. A first-frame settlement written outside the handler does the same. A consumer that runs before the reservoir exists, or settles its first frame without `handle_reservoir_remaining_gas` or `GasTracker::absorb_returned_reservoir`, calls neither function and is unaffected.
-  Upstream's own builders of a first-frame result take the reservoir and the pools out of the transaction's tracker: `create_init_frame` and `Handler::runtime_oog_result`, whose default body changes so, which an override that builds its own stand-in must do too (see The settlement adds).
-  The entries are kept parts, not forwarded ones, so that zero, which a table without them holds, forwards everything. Ids 254 and 250 to 252 are left unused. A consumer names the entries by function, and a chain that forwards 98 per cent keeps 2.
-
-### The start charge
-
-- **API.** The type `StartCharge` (`new(history, pools)`, `history`, `pools`, `is_zero`; `#[non_exhaustive]`), re-exported from `revm_interpreter`, and `GasTracker::refill_start_charge`.
-  `FrameStart::charge` (see Frame-start hook).
-  `charged_start` on `CallInputs`, `CallOutcome` and `CreateOutcome` (fields) and on `CreateInputs` (`charged_start`, `set_charged_start`); `FrameResult::refundable_start_charge`.
-  `revm_handler::execution::settle_first_frame`, the settlement of the first frame.
-- **Contract.** The start charge is what a frame start charged its caller and the frame's failure gives back: history gas and an amount of each pool (`PoolAmounts`).
-  The `frame_starting` hook charges the caller's tracker and declares the refundable part on the start it is handed (`start.charge`); the instruction copies it onto the frame's input when the hook admits the start; a start the hook refuses discards the charge with the start, and what the hook charged stands.
-  The transaction's frame has no start hook: a consumer that charges the transaction's tracker for it in pre-execution puts the refundable part on the first frame's input (`charged_start`), from `Handler::first_frame_input`.
-  The charge rides from the input to the outcome, and `return_result` refunds it to the caller whole, with `refill_start_charge` (`refill_history`, and `refill_pool` for each pool), on the condition `refundable_state_gas_charge` uses: a call that did not succeed, a creation that did not succeed or deployed no address; `last_frame_result` refunds the first frame's the same way, and after a halt consumes the regular gas the refill credited, as it does for the state refund.
-  `last_frame_result` settles the first frame through `execution::settle_first_frame`, which is all of mainnet's settlement but the copy of the transaction's gas into the frame's result: the spend and the settlement of the frame, the EIP-2780 state-gas refund and the start-charge refund, each with its halt rule.
-  A chain whose handler overrides `last_frame_result` calls it rather than copying the mainnet body, so the start-charge refund and any later step reach it too, and applies its own rules between it and the copy, such as the op-revm fork's pre-Regolith deposit rule.
-  Upstream's own steps of the settlement (the spend, `handle_reservoir_remaining_gas` and the EIP-2780 refund) live in `crates/handler/src/execution/first_frame.rs`, not in `handler.rs`: a pick or a base-line merge that changes upstream's `last_frame_result` body lands there, and records the move as its conflict resolution.
-  A frame that succeeds keeps the charge.
-  A precompile's answer and a start the handler refuses before any frame (call depth, balance) carry the input's charge, so they refund as a frame does.
-  An outcome an inspector builds to answer a start carries no charge unless the inspector copies the input's (`CallOutcome::new` and `CreateOutcome::new` carry none), so the caller keeps the charge, as revm keeps its own upfront state charge on an outcome a tool builds; an outcome the inspector rewrites at `call_end` or `create_end` keeps the frame's charge, so a success rewritten into a failure is refunded.
-  An answer a consumer builds itself, such as an interceptor's, is refunded by the same rule: it carries the charge the consumer puts on it, and none when built with `new`.
-  A consumer that settles a result into a caller's tracker itself refunds the charge with `refill_start_charge` on the same condition, so a pool added to the charge reaches it.
-- **Consumer.** mega-evm charges a start's write records to the caller at the hook, after the forward and before the frame's input takes its share of the reservoir, and must give them back when the frame fails. Its hook charges history only and declares `StartCharge::new(charge, PoolAmounts::ZERO)`: the records a start draws on the child's pools are counted in the child, and a creation's creator record is counted on the creator's pools after the creation returns, once the engine sees the creator's nonce was bumped, whether the creation succeeded or not, so no pool amount rides on the charge. The refund belongs where the fork refunds the upfront state charge.
-- **Removal.** When upstream carries an equivalent refundable start charge, or when mega-evm stops charging frame starts.
-- **Default.** The hook declares nothing, so the fields and the refund are zero.
-  The charge is four words, history and one per pool, on every input and outcome; its size is part of the outcomes' measured above (see Resource pools).
-  `settle_first_frame` is inlined: where measured (callgrind, the fork's release profile), a transfer and a transaction of 64 calls run the same instruction count as with its steps written out in `last_frame_result`.
-  A handler that overrides `last_frame_result` with a copy of mainnet's settlement instead of calling `settle_first_frame` compiles, but does not refund the first frame's start charge; that matters only to a consumer that declares one.
-  This entry is an exception to rule 1 (`api:exception`): `CallInputs`, `CallOutcome` and `CreateOutcome` are constructible by literal and carry fields upstream's do not (`charged_start`, and on `CallInputs` also `pool_shares` and `history_allowance`), so a literal written for upstream's fields does not compile until it names them.
-  A consumer that uses none of the figures names them at their defaults, no charge (`StartCharge::default()`), unlimited shares (`PoolAmounts::UNLIMITED`) and no allowance (`0`), and keeps upstream's behaviour.
-  A consumer that answers a start with an outcome it builds itself sets the answer's charge as the Contract says and its pools as Resource pools says.
-  The outcomes also carry the state-gas refund's `charged_state_gas_address` (see State-gas price), which upstream's do not, so an outcome literal written for upstream's fields does not compile against the fork whatever this entry adds; `CallInputs` has upstream's fields apart from this entry's, so this entry is what breaks its literals.
-  `CreateInputs` has private fields and is built with `CreateInputs::new`, so its new fields break no literal.
-
-### The history allowance
-
-- **API.** On `GasTracker`, forwarded on `Gas`: `history_allowance`, `set_history_allowance`, `draw_history_allowance`.
-  `GasId::call_history_allowance` and `GasParams::call_history_allowance()`; `history_allowance` on `CallInputs`.
-- **Contract.** The allowance is history gas a frame may spend before it charges its budget.
-  A call that transfers value gives its child the schedule's `call_history_allowance`, decided where the call instruction adds the call stipend, carried on the input and set on the child's tracker when it starts, on the frame and on an answer alike; no other start gives one, and the transaction's frame has none.
-  Only a consumer draws it: `draw_history_allowance(cost)` takes `min(cost, allowance)` and returns the part of `cost` the allowance did not cover, which the consumer charges as history.
-  A precompile's answer is given the input's allowance after its provider ran, so the allowance it carries back is the input's, whatever the provider drew.
-  The allowance is the frame's alone: it is not returned, merged or rolled back.
-- **Consumer.** mega-evm lets a value call's child log a bounded number of bytes without charging history, as the call stipend lets it run. The call instruction decides which starts get the stipend; a start's `kind` and `value` are public on `FrameStart`.
-- **Removal.** When upstream carries an equivalent allowance, or when mega-evm drops the rule.
-- **Default.** Zero on every schedule, so every child starts with none and a draw returns the whole cost; nothing in the workspace draws it.
 
 ### The pending action
 
@@ -483,7 +344,7 @@ An id the fork once used for an entry with another default is left unused rather
   `revm_handler::lifecycle`: `open_frame_start`, `open_transaction_start`, `Returning` and `close_frame_start`, `close_transaction_start`, `finish_transaction`, `discard_transaction`, `mark_for_end_callbacks` and `check_end_callbacks`.
   On `FrameStack`, the record: `open_start`, `close_start`, `pending_start`, `running_start`, `lifecycle_active`, `lifecycle_settled`, and its two boundaries `settle_lifecycle` and `discard_lifecycle`.
   `StartLifecycleError` (`Exhausted`, `Stale`, `NotOpen`, `NoParent`, `Unsettled`; `#[non_exhaustive]`), `PendingStart` (its fields are private: the identity can be read and not written, and only the three flags can be set), `StartMark` and `OutcomeMark`.
-  `GasTracker::start_mark` and `set_start_mark`, `GasTracker::forward_to_child_with_reservoir`, and `start_mark` on `CallOutcome` and `CreateOutcome` (a field).
+  `GasTracker::start_mark` and `set_start_mark`, and `start_mark` on `CallOutcome` and `CreateOutcome` (a field).
   `LocalContextTr::lifecycle_mirror`, `LifecycleMirror` and `LifecycleEvent` (`Split`, `Settle`, `End`), the debug mirror (below). The types and the method exist in every profile.
 - **Contract.** A *start* is one frame's beginning with the identity revm gave it; revm pairs every start it opens with exactly one settlement, last in first out, and the consumer does not pair them.
   *Where revm opens one.*
@@ -503,8 +364,13 @@ An id the fork once used for an entry with another default is left unused rather
 
   `frame_split` is handed the start's `id`, a per-transaction number revm allocates from 1 with a checked add and never reuses within the transaction; the `parent` identity, the start of the frame that makes this one, `None` for the transaction's frame; the `depth`, read from revm's frame record and never from `interpreter.input`, which an inspector can write; and nothing else: a start's kind, caller, target, value and forward are the frame's own input.
   Whether the consumer's `frame_init` is handed that input after the split is conditional: when initialisation reaches it, it receives the input as an inspector's `frame_start`, `call` or `create` left it; an inspector that answers the start does so before `frame_init` is called, and the stand-in for a runtime out-of-gas transaction has no init at all, so a start can split and settle with no `frame_init` between.
-  What an instruction's start owes (its shares, its charge, its allowance) is parked at `frame_starting`; the transaction's start does not pass through `frame_starting`.
+  What a consumer charges or keeps for an instruction's start it does at `frame_starting`, before the split; the transaction's start does not pass through `frame_starting`.
   `frame_settle` is handed the same `id` and `depth` back, and the `status` (`Ok`, `Revert` or `Halt`), `created` (for a creation, whether it took an address), the three flags (below) and `held_reservoir`, the reservoir the caller held before revm settled the child into it.
+
+  *The reservoir.* revm forwards and settles the reservoir as upstream does: the child's input copies the caller's reservoir, or carries the reservoir the frame-start hook named (`FrameStart::reservoir`), and the settlement replaces the caller's reservoir with the one the child returns, once that has unwound the caller's outstanding spill.
+  A consumer that keeps part of the caller's reservoir for it takes that part in `frame_starting` and names the rest as the child's, and adds `held_reservoir` back to the caller's reservoir in `frame_settle`.
+  The caller then holds what the child returned on top of the part it kept, whatever refills the settlement made, since the unwinding and every refill read the spill and their own amount, never the reservoir.
+  The transaction's frame, and the stand-in for a runtime out-of-gas transaction, are handed a copy of the transaction's reservoir, which the transaction's gas keeps until the settlement replaces it, so there `held_reservoir` is that copy: a consumer adds back only what it kept.
   `frame_lifecycle_end` is called once at the end of a transaction's lifecycle: `Settled` at the successful boundary, with every start settled, and `Discarded` when a fatal error ends the transaction and the open starts are dropped unsettled.
   A transaction that ends before any start opened emits neither.
 
@@ -569,14 +435,14 @@ An id the fork once used for an entry with another default is left unused rather
 - **Removal.** When upstream exposes an equivalent pairing of a frame's start with its settlement, or when mega-evm keeps no accounting per start.
 - **Default.** The hooks do nothing and are inlined away, the flags are set on the inspected path and read by no one, and every result and every callback is upstream's.
   What a consumer that sets nothing pays is revm's own record and the marks, in bytes: the record adds 40 bytes to `FrameStack`, which grows from 40 to 80 bytes per EVM, and a slot of 8 bytes (`PendingStart`) on the heap and reused: the slots are sized with the frame stack's capacity (for zero-sized frames, one per frame that made a child), grown when a child first opens past them and never shrunk: a boundary neither resizes nor frees the slots, a successful end does not scan them, and discarding open children clears the retained slots, at a cost proportional to their retained length.
-  The marks sit in the padding of the values they ride on, so `GasTracker` stays 144 bytes, `Gas` 160, `InterpreterResult` 200, `CallOutcome` and `FrameResult` 296 and `CreateOutcome` 280 (aarch64, the fork's release profile), and a release build's `LocalContext` stays 32 bytes; a debug build's is larger for the mirror.
+  The marks sit in the padding of the values they ride on, so `GasTracker` stays 88 bytes, `Gas` 104, `InterpreterResult` 144, `CallOutcome` and `FrameResult` 208 and `CreateOutcome` 192 (64-bit targets), and a release build's `LocalContext` stays 32 bytes; a debug build's is larger for the mirror.
   In instructions, a start costs a checked increment, a slot write and a parent read, a settlement a slot take, a transaction one reset at each boundary (and, after a discard with open children, one clear of the retained slots), and an inspected frame's end two stores and two compares; the cost per frame, in instructions, is measured separately and not given here.
   Where measured, the three hooks leave no symbol in an unstripped optimised build; what the loop gains is a call to `FrameStack::open_start`.
   `Host`, `LocalContextTr` and `FrameStack` gain only default methods and private fields, and `revm_handler` a module, so they break no code written for upstream's.
   Three exceptions to that compatibility are carried, each an `api:exception` item.
   A pull request that introduces such an exception lists it and checks the consumers against it.
   What a consumer does for each:
-  - The outcomes' public `start_mark` field (`CallOutcome` and `CreateOutcome`): a consumer that builds an outcome by literal names it as `start_mark: Default::default()`, or builds it with the constructors. It extends the exception the outcome literals already carry (see The start charge).
+  - The outcomes' public `start_mark` field (`CallOutcome` and `CreateOutcome`): a consumer that builds an outcome by literal names it as `start_mark: Default::default()`, or builds it with the constructors. It extends the exception the outcome literals already carry for the state-gas refund's address (see State-gas price).
   - `LocalContext` gains a private field in a debug build, so a debug build cannot build it with a struct literal; a consumer builds it with `LocalContext::default()` or `new`. A release build's is unchanged.
   - A behaviour change no compiler finds: a runner that drives the transaction's frame, or settles it, without `Handler::execution` and `Handler::last_frame_result` must open and close the transaction's start (see A hand-driven first frame); otherwise the record refuses it with `NoParent` or `NotOpen`.
 
