@@ -849,9 +849,9 @@ fn input_gas(input: &FrameInput) -> (u64, u64) {
 }
 
 /// Each frame-starting instruction hands its start to the hook once the forward is taken, and
-/// charges nothing after it: the instruction leaves the gas the hook was handed, apart from the
-/// reservoir, whose share goes to the frame after the hook, and the frame's input carries the
-/// forward, with a value call's stipend on top.
+/// charges nothing after it: the instruction leaves the gas the hook was handed, its reservoir
+/// included, which the frame's input copies, and the frame's input carries the forward, with a
+/// value call's stipend on top.
 #[test]
 fn test_a_start_reaches_the_hook_with_the_forward_taken() {
     let spec = SpecId::OSAKA;
@@ -893,12 +893,10 @@ fn test_a_start_reaches_the_hook_with_the_forward_taken() {
             before_forward - forward,
             "{name}: the hook sees the forward taken"
         );
-        let mut after_the_forward = at_hook;
-        after_the_forward.set_reservoir(0);
         assert_eq!(
             *gas.tracker(),
-            after_the_forward,
-            "{name}: nothing is charged after the hook; the whole reservoir is forwarded"
+            at_hook,
+            "{name}: nothing is charged or taken after the hook"
         );
         let stipend = if matches!(op, CALL | CALLCODE) {
             params.call_stipend()
@@ -1050,10 +1048,11 @@ fn test_the_value_stipend_is_not_part_of_the_forward() {
     }
 }
 
-/// The frame's input takes the reservoir as the hook left it, for every kind of start, out of the
-/// caller's, which forwards the whole of it by default. A charge the reservoir covers leaves the
-/// forward and the caller's regular gas alone; one that spills draws the caller's regular gas and
-/// empties the reservoir, and the forward is still what was taken before.
+/// The frame's input copies the caller's reservoir as the hook left it, for every kind of start,
+/// and the caller keeps it while the child runs, as upstream's instructions do. A charge the
+/// reservoir covers leaves the forward and the caller's regular gas alone; one that spills draws
+/// the caller's regular gas and empties the reservoir, and the forward is still what was taken
+/// before.
 #[test]
 fn test_the_input_copies_the_reservoir_the_hook_left() {
     let spec = SpecId::AMSTERDAM;
@@ -1071,8 +1070,8 @@ fn test_the_input_copies_the_reservoir_the_hook_left() {
             assert_eq!(input_reservoir, reservoir, "{name}, charge {charge}");
             assert_eq!(
                 gas.reservoir(),
-                0,
-                "{name}, charge {charge}: the caller forwarded the whole reservoir"
+                reservoir,
+                "{name}, charge {charge}: the caller keeps the reservoir it copied"
             );
             assert_eq!(
                 gas_limit, quiet_limit,
@@ -1088,8 +1087,8 @@ fn test_the_input_copies_the_reservoir_the_hook_left() {
 }
 
 /// A hook that takes the child's reservoir out of the caller's itself names it on the start
-/// ([`FrameStart::reservoir`]): the frame's input carries it, and the instruction takes no
-/// reservoir share of its own, so the caller keeps what the hook left.
+/// ([`FrameStart::reservoir`]): the frame's input carries it in place of the caller's reservoir,
+/// and the caller keeps what the hook left.
 #[test]
 fn test_the_input_carries_the_child_reservoir_the_hook_names() {
     let spec = SpecId::AMSTERDAM;

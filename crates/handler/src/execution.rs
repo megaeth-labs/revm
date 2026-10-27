@@ -17,9 +17,7 @@ pub use first_frame::settle_first_frame;
 
 /// Creates the first [`FrameInput`] from the transaction and the
 /// transaction-level `gas`, forwarding all remaining regular gas and the
-/// reservoir to the frame. The reservoir is taken out of `gas`
-/// ([`GasTracker::forward_all_to_child`]), as a frame start takes a child's share
-/// out of its caller's, and comes back when the frame settles into `gas`.
+/// reservoir to the frame.
 ///
 /// Under EIP-2780 this completes the runtime gas phase started at
 /// pre-execution (the authorization charges): the target is loaded once and
@@ -124,9 +122,6 @@ pub fn create_init_frame<CTX: ContextTr>(
                 }
             }
 
-            // The transaction's frame gets the whole reservoir, taken out of the transaction's
-            // gas: the schedule's share is for the frames below it.
-            let shares = gas.forward_all_to_child();
             Ok(Some(FrameInput::Call(Box::new(CallInputs {
                 input: CallInput::Bytes(input),
                 gas_limit: gas.remaining(),
@@ -138,7 +133,7 @@ pub fn create_init_frame<CTX: ContextTr>(
                 scheme: CallScheme::Call,
                 is_static: false,
                 return_memory_offset: 0..0,
-                reservoir: shares.reservoir,
+                reservoir: gas.reservoir(),
                 charged_new_account_state_gas,
             }))))
         }
@@ -174,14 +169,13 @@ pub fn create_init_frame<CTX: ContextTr>(
                 }
             }
             let tx = ctx.tx();
-            let shares = gas.forward_all_to_child();
             let mut inputs = CreateInputs::new(
                 tx.caller(),
                 CreateScheme::Create,
                 tx.value(),
                 input,
                 gas.remaining(),
-                shares.reservoir,
+                gas.reservoir(),
             );
             inputs.set_charged_create_state_gas(charged_create_state_gas);
             inputs.set_charged_state_gas_address(charged_state_gas_address);

@@ -6,11 +6,9 @@ use primitives::hardfork::SpecId;
 #[cfg(feature = "serde")]
 mod encoding;
 mod failed_charge;
-mod forward;
 mod mark;
 mod withheld;
 
-pub use forward::ChildShares;
 pub use mark::{OutcomeMark, StartMark};
 pub use withheld::WithheldCrossing;
 
@@ -52,12 +50,6 @@ pub use withheld::WithheldCrossing;
 /// code-deposit and code-hash charges of `return_create` are regular charges and draw the
 /// spendable part, so a consumer that caps a creating frame must not release before
 /// `return_create`, or those charges escape the cap.
-///
-/// A child frame starts with a share of its caller's reservoir, which the caller's tracker gives
-/// up while the child runs ([`forward_to_child`](Self::forward_to_child)); the child's return
-/// adds what it left to what the caller kept
-/// ([`absorb_returned_reservoir`](Self::absorb_returned_reservoir)). Every schedule defined here
-/// forwards the whole reservoir.
 ///
 /// The net counters (`state_gas_spent`, `history_gas_spent`) are `i64`, while charges and refills
 /// take `u64` amounts and convert them with saturation. The tracker assumes that the transaction
@@ -292,22 +284,15 @@ impl GasTracker {
         self.reservoir = val;
     }
 
-    /// Adds a reservoir returned by a child frame to the part of the reservoir this (parent)
-    /// frame kept, and reconciles it with any outstanding state gas spilled into regular gas.
-    ///
-    /// The child started with a share of this frame's reservoir, which this frame gave up for it
-    /// ([`forward_to_child`](Self::forward_to_child)); what it returns is that share, less what it
-    /// spent, plus what it refilled. Every schedule defined here forwards the whole reservoir, so
-    /// this frame kept nothing and its reservoir becomes the child's, as upstream's settlement,
-    /// which replaced the parent's reservoir with the child's, made it.
+    /// Adopts a reservoir returned by a child frame and reconciles it with any
+    /// outstanding state gas spilled into regular gas.
     ///
     /// A successful child can refill state gas charged by an ancestor (for
     /// example, by clearing a slot created by a sibling). Since the child does
     /// not inherit the ancestor's [`Self::state_gas_spilled`] counter, that
     /// refill initially lands in the child's reservoir. On return it must first
     /// restore the parent's regular gas in last-in-first-out order; only the
-    /// excess joins the reservoir. The spill is unwound from the returned reservoir only; the
-    /// part this frame kept stays in its reservoir.
+    /// excess remains in the reservoir.
     ///
     /// This only reconciles the funding pools. The child's signed
     /// `state_gas_spent` has already accounted for the refill and is merged
@@ -321,7 +306,7 @@ impl GasTracker {
         };
         self.remaining = self.remaining.saturating_add(to_remaining);
         self.state_gas_spilled -= to_remaining;
-        self.reservoir = self.reservoir.saturating_add(reservoir - to_remaining);
+        self.reservoir = reservoir - to_remaining;
     }
 
     /// Returns the state gas spent.
@@ -739,15 +724,13 @@ mod tests {
     /// A child that refills history its parent charged goes below zero, and merging it into the
     /// parent on success nets the two out. The merge follows the handler's order: the signed figure
     /// is read, added and written back, as the state counter's is, and then the parent absorbs the
-    /// child's reservoir, which the parent forwarded whole.
+    /// child's reservoir.
     #[test]
     fn test_a_child_refill_of_a_parent_charge_nets_out_on_merge() {
         let mut parent = GasTracker::new(1_000, 1_000, 500);
         assert!(parent.record_history_cost(100));
 
-        let share = parent.reservoir();
-        parent.forward_reservoir(share);
-        let mut child = GasTracker::new(300, 300, share);
+        let mut child = GasTracker::new(300, 300, parent.reservoir());
         child.refill_history(100);
         assert_eq!(child.history_gas_spent(), -100);
 
@@ -761,6 +744,25 @@ mod tests {
         parent.absorb_returned_reservoir(child.reservoir());
         assert_eq!(parent.history_gas_spent(), 0);
         assert_eq!(parent.reservoir(), 500);
+    }
+
+    /// A returned reservoir replaces the caller's, once it has unwound the caller's outstanding
+    /// spill, last in first out: what the caller held beside it does not stay.
+    #[test]
+    fn test_a_returned_reservoir_replaces_the_callers() {
+        // The caller holds the 1,000 it gave the child, which returns 700 of it.
+        let mut caller = GasTracker::new(1_000, 1_000, 1_000);
+        caller.absorb_returned_reservoir(700);
+        assert_eq!((caller.reservoir(), caller.remaining()), (700, 1_000));
+
+        // A spill of 150 outstanding (a successful child's, merged before the absorb): the
+        // returned 100 unwinds 100 of it, and the 20 the caller held goes with the replace.
+        let mut spilled = GasTracker::new(1_000, 850, 20);
+        spilled.add_state_gas_spilled(150);
+        spilled.absorb_returned_reservoir(100);
+        assert_eq!(spilled.reservoir(), 0);
+        assert_eq!(spilled.remaining(), 950);
+        assert_eq!(spilled.state_gas_spilled(), 50);
     }
 
     /// Copying the counter through its getter and setter, as `PrecompileOutput` does for state gas,

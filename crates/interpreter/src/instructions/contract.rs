@@ -9,7 +9,7 @@ use call_helpers::load_acc_and_calc_forward;
 
 use crate::{
     instructions::{
-        instruction_hooks::{cache_created_address, forward_to_child, frame_starting},
+        instruction_hooks::{cache_created_address, frame_starting},
         utility::IntoAddress,
     },
     interpreter_action::FrameInput,
@@ -195,10 +195,9 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
         gas_limit,
     );
     let reservoir = frame_starting(&mut context.interpreter.gas, context.host, start)?;
-    let shares = forward_to_child(&mut context.interpreter.gas, context.host, reservoir);
 
     create_inputs.set_gas_limit(gas_limit);
-    create_inputs.set_reservoir(shares.reservoir);
+    create_inputs.set_reservoir(reservoir.unwrap_or(context.interpreter.gas.reservoir()));
     context
         .interpreter
         .bytecode
@@ -278,7 +277,6 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
     let transferred = value.transfer().unwrap_or_default();
     let start = FrameStart::new(kind, caller, Some(target_address), transferred, forward);
     let reservoir = frame_starting(&mut context.interpreter.gas, context.host, start)?;
-    let shares = forward_to_child(&mut context.interpreter.gas, context.host, reservoir);
 
     // Call host to interact with target contract
     context
@@ -296,7 +294,7 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
                 scheme,
                 is_static,
                 return_memory_offset,
-                reservoir: shares.reservoir,
+                reservoir: reservoir.unwrap_or(context.interpreter.gas.reservoir()),
                 charged_new_account_state_gas,
             },
         ))));

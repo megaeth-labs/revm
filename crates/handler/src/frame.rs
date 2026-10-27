@@ -549,7 +549,7 @@ impl EthFrame<EthInterpreter> {
                 }
 
                 // Settle the child's gas and merge it into the parent (returns
-                // unused regular gas, adds back the reservoir, and propagates state
+                // unused regular gas, adopts the reservoir, and propagates state
                 // gas / refunds on success).
                 handle_reservoir_remaining_gas(
                     ins_result,
@@ -580,7 +580,7 @@ impl EthFrame<EthInterpreter> {
                 let mut create_gas = *outcome.gas();
 
                 // Settle the child's gas and merge it into the parent (returns
-                // unused regular gas, adds back the reservoir, and propagates state
+                // unused regular gas, adopts the reservoir, and propagates state
                 // gas / refunds on success).
                 handle_reservoir_remaining_gas(
                     instruction_result,
@@ -600,7 +600,7 @@ impl EthFrame<EthInterpreter> {
         }
 
         // Refund the upfront state charge after the child's gas is settled
-        // (the settle adds the child's reservoir to what the parent kept).
+        // (the settle overwrites the reservoir with the child's).
         if let Some(charge) = refund_state_gas {
             self.interpreter.gas.refill_reservoir(charge);
         }
@@ -622,12 +622,10 @@ impl EthFrame<EthInterpreter> {
 /// Then the parent *merges* the settled child:
 /// - unused regular gas (`remaining`, including any spill returned on revert)
 ///   flows back to the parent on success or revert; a halt consumes it.
-/// - the reservoir, the share of the parent's state-gas pool the child was given
-///   at call time, is always added back from the child to what the parent kept
-///   (restored to the inherited value on revert/halt). Every schedule defined
-///   here forwards the whole reservoir, so the parent kept nothing and its
-///   reservoir becomes the child's. Any returned reservoir first unwinds the
-///   parent's outstanding spilled state gas in LIFO order.
+/// - the reservoir, a shared state-gas pool the child inherited at call time, is
+///   always adopted from the child (restored to the inherited value on
+///   revert/halt). Any returned reservoir first unwinds the parent's outstanding
+///   spilled state gas in LIFO order.
 /// - net state gas, net history gas, the spilled portion, and the refund counter
 ///   persist only on success; on revert/halt the child's state changes roll back
 ///   and contribute nothing.
@@ -878,11 +876,23 @@ mod tests {
         assert_eq!(parent.state_gas_spilled(), 0);
     }
 
-    /// A caller that forwarded a share of its reservoir and kept the rest gets back, on top of
-    /// what it kept: what the child left when it succeeded, the whole share when it reverted or
-    /// halted, the child's state charges undone. Regular gas settles as it did.
+    /// Settles `child` into `parent` as revm does, then adds back the reservoir `parent` held
+    /// while the child ran, as a consumer that kept part of `parent`'s reservoir for it does.
+    fn settle_and_add_back(
+        result: InstructionResult,
+        parent: &mut GasTracker,
+        child: &mut GasTracker,
+    ) {
+        let held = parent.reservoir();
+        handle_reservoir_remaining_gas(result, parent, child);
+        parent.set_reservoir(parent.reservoir() + held);
+    }
+
+    /// The reservoir a child returns replaces its caller's: what the child left when it succeeded,
+    /// the whole reservoir it was given when it reverted or halted, the child's state charges
+    /// undone. Regular gas settles as it did.
     #[test]
-    fn test_the_reservoir_a_child_returns_joins_what_its_caller_kept() {
+    fn test_the_reservoir_a_child_returns_replaces_its_callers() {
         for result in [
             InstructionResult::Stop,
             InstructionResult::Revert,
@@ -890,9 +900,7 @@ mod tests {
         ] {
             let mut parent = GasTracker::new(10_000, 10_000, 1_000);
             assert!(parent.record_regular_cost(5_000));
-            // 98% of 1,000 forwarded, 20 kept.
-            parent.forward_reservoir(980);
-            let mut child = GasTracker::new(5_000, 5_000, 980);
+            let mut child = GasTracker::new(5_000, 5_000, parent.reservoir());
             assert!(child.record_state_cost(300));
 
             handle_reservoir_remaining_gas(result, &mut parent, &mut child);
@@ -913,18 +921,21 @@ mod tests {
         }
     }
 
-    /// A child that spends more than its share spills onto its regular gas, as a frame with no
-    /// reservoir left does, though its caller kept part of the reservoir: the share is the
-    /// child's whole reservoir. A caller's later rollback restores the reservoir it started with
-    /// and gives the spill back to regular gas.
+    /// A consumer that keeps part of a caller's reservoir gives the child the rest, and adds what
+    /// the caller held back once revm replaced the caller's reservoir with the child's: the caller
+    /// ends with what the child returned on top of the part it kept. A child that spends more than
+    /// its share spills onto its regular gas, as a frame with no reservoir left does, though its
+    /// caller kept part of the reservoir: the share is the child's whole reservoir. A caller's
+    /// later rollback restores the reservoir it started with and gives the spill back to regular
+    /// gas.
     #[test]
     fn test_a_child_spills_past_its_share_and_a_rollback_restores_the_callers_reservoir() {
         let mut a = GasTracker::new(10_000, 10_000, 1_000);
         assert!(a.record_regular_cost(10_000));
-        a.forward_reservoir(1_000);
-        let mut b = GasTracker::new(10_000, 10_000, 1_000);
+        let mut b = GasTracker::new(10_000, 10_000, a.reservoir());
         assert!(b.record_regular_cost(5_000));
-        b.forward_reservoir(980);
+        // 98% of 1,000 forwarded, 20 kept.
+        b.set_reservoir(20);
         let mut c = GasTracker::new(5_000, 5_000, 980);
         assert!(c.record_state_cost(1_000));
         assert_eq!(
@@ -932,8 +943,8 @@ mod tests {
             (0, 4_980, 20)
         );
 
-        handle_reservoir_remaining_gas(InstructionResult::Stop, &mut b, &mut c);
-        assert_eq!(b.reservoir(), 20, "the part B kept is still there");
+        settle_and_add_back(InstructionResult::Stop, &mut b, &mut c);
+        assert_eq!(b.reservoir(), 20, "the part B kept is back");
         assert_eq!(b.state_gas_spilled(), 20);
         assert_eq!(b.remaining(), 9_980);
 
@@ -982,10 +993,14 @@ mod tests {
             // B holds 1,000 of reservoir and forwards 5,000 of regular gas; C charges 1,000.
             let mut b = GasTracker::new(10_000, 10_000, 1_000);
             assert!(b.record_regular_cost(5_000));
-            b.forward_reservoir(forwarded);
             let mut c = GasTracker::new(5_000, 5_000, forwarded);
             assert!(c.record_state_cost(1_000));
-            handle_reservoir_remaining_gas(InstructionResult::Stop, &mut b, &mut c);
+            if forwarded < 1_000 {
+                b.set_reservoir(1_000 - forwarded);
+                settle_and_add_back(InstructionResult::Stop, &mut b, &mut c);
+            } else {
+                handle_reservoir_remaining_gas(InstructionResult::Stop, &mut b, &mut c);
+            }
             assert_eq!(figures(&b), after_child, "{forwarded}: after C");
 
             // B writes a slot, 10 of state gas, and puts it back, a refill of 10.

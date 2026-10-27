@@ -334,12 +334,10 @@ pub trait Handler {
         // start.
         lifecycle::open_transaction_start(evm)?;
         let tx_gas_limit = evm.ctx().tx().gas_limit();
-        // The stand-in takes the whole reservoir out of the transaction's gas, as the first frame
-        // would (`create_init_frame`), so the settle adds it back once.
-        let shares = gas.forward_all_to_child();
+        let reservoir = gas.reservoir();
         let mut frame_result = match evm.ctx().tx().kind() {
-            TxKind::Call(_) => FrameResult::new_call_oog(tx_gas_limit, 0..0, shares.reservoir),
-            TxKind::Create => FrameResult::new_create_oog(tx_gas_limit, shares.reservoir),
+            TxKind::Call(_) => FrameResult::new_call_oog(tx_gas_limit, 0..0, reservoir),
+            TxKind::Create => FrameResult::new_create_oog(tx_gas_limit, reservoir),
         };
         self.last_frame_result(evm, &mut frame_result, gas)?;
         Ok(frame_result)
@@ -510,8 +508,8 @@ pub trait Handler {
     /// ([`handle_reservoir_remaining_gas`]): a failing frame rolls its
     /// state-gas charges back in LIFO order and drops its refund counter, an
     /// exceptional halt additionally consumes its regular gas; unused regular
-    /// gas then returns to the transaction-level gas and the reservoir the
-    /// frame left is added back to it. The EIP-2780 refundable first-frame charge is
+    /// gas then returns to the transaction-level gas and the reservoir is
+    /// adopted from the frame. The EIP-2780 refundable first-frame charge is
     /// refunded from the outcome's `charged_*` flags, mirroring
     /// `EthFrame::return_result`.
     ///

@@ -123,13 +123,14 @@ pub struct FrameStart {
     /// The child's reservoir, when the hook took it out of the caller's reservoir itself. `None`
     /// when the hook is called.
     ///
-    /// `None` leaves the forward to the instruction, which takes the schedule's share of the
-    /// caller's reservoir as the hook left it ([`GasTracker::forward_to_child`]). `Some` is the
-    /// reservoir the frame's input carries: the instruction takes no share of its own, and the
-    /// caller keeps the reservoir the hook left it. The instruction does not check the amount
-    /// against what the hook took.
+    /// `None` leaves the forward to the instruction, whose frame's input copies the caller's
+    /// reservoir as the hook left it, and the caller keeps it, as upstream's instructions do. `Some`
+    /// is the reservoir the frame's input carries in its place, and the caller keeps the reservoir
+    /// the hook left it. The instruction does not check the amount against what the hook took.
     ///
-    /// [`GasTracker::forward_to_child`]: crate::cfg::gas::GasTracker::forward_to_child
+    /// Either way the child's settlement replaces the caller's reservoir with the one the child
+    /// returns. A hook that kept part of the caller's reservoir for it adds that back when the
+    /// child settles ([`FrameSettle::held_reservoir`](super::FrameSettle::held_reservoir)).
     pub reservoir: Option<u64>,
 }
 

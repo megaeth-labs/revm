@@ -1,11 +1,16 @@
-//! The share of its caller's EIP-8037 reservoir a child frame receives, as the mainnet handler
-//! forwards and settles it.
+//! A child frame's EIP-8037 reservoir, as the mainnet handler forwards and settles it, and as a
+//! consumer that keeps part of it for the caller settles it through the start lifecycle.
 //!
-//! A frame start takes all but the schedule's `reservoir_kept_percent` of its caller's reservoir
-//! out of the caller's tracker for the child, and the child's return adds what the child left to
-//! what the caller kept. Every schedule keeps none and forwards the whole reservoir, which is
-//! upstream's forward; these tests forward 98, a chain that keeps 2% of the reservoir for the
-//! caller, and compare with it.
+//! A frame start copies its caller's reservoir into the child's input, and the caller keeps it
+//! while the child runs; the child's return replaces the caller's reservoir with what the child
+//! left, once that has unwound the caller's outstanding spill. That is upstream's forward and
+//! settlement, and the default.
+//!
+//! A consumer that keeps part of the reservoir for the caller takes it in the frame-start hook,
+//! names the child's reservoir on the start (`FrameStart::reservoir`), and adds back the reservoir
+//! the caller held (`FrameSettle::held_reservoir`) when revm settles the child. The tests here keep
+//! 2% that way, through [`KeepingContext`], and get the figures a forward of 98% that adds the
+//! child's return to the part the caller kept gives.
 //!
 //! The transactions run on Amsterdam with a gas limit [`RESERVOIR`] above the regular cap, so they
 //! start with a reservoir. The frames charge state gas through an instruction of the test's own,
@@ -19,11 +24,15 @@ use bytecode::opcode::{
 };
 use context::{
     result::{EVMError, ExecutionResult},
-    Context, ContextSetters, ContextTr, Evm, TxEnv,
+    BlockEnv, CfgEnv, Context, ContextError, ContextSetters, ContextTr, Evm, Journal, LocalContext,
+    TxEnv,
 };
 use context_interface::{
-    cfg::{gas::InitialAndFloorGas, GasId},
-    Cfg, Database,
+    cfg::{gas::InitialAndFloorGas, GasId, GasParams, StateGasSite},
+    context::{SStoreResult, SelfDestructResult, StateLoad},
+    host::{FrameSettle, FrameSplit, FrameStart, LifecycleEnd, LoadError},
+    journaled_state::AccountInfoLoad,
+    Cfg, Database, Host,
 };
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use interpreter::{
@@ -31,7 +40,8 @@ use interpreter::{
     Instruction, InstructionContext, InstructionExecResult, InstructionResult,
 };
 use primitives::{
-    address, constants::CALL_STACK_LIMIT, hardfork::SpecId, Address, Bytes, TxKind, U256,
+    address, constants::CALL_STACK_LIMIT, hardfork::SpecId, Address, Bytes, Log, StorageKey,
+    StorageValue, TxKind, B256, U256,
 };
 use revm_handler::{
     instructions::EthInstructions, system_call::SystemCallTx, EthFrame, EthPrecompiles, EvmTr,
@@ -41,7 +51,7 @@ use state::{AccountInfo, Bytecode};
 
 type Db = CacheDB<EmptyDB>;
 type DbError = <Db as Database>::Error;
-type TestContext = MainnetContext<Db>;
+type TestContext = KeepingContext;
 type TestEvm =
     Evm<TestContext, (), EthInstructions<EthInterpreter, TestContext>, EthPrecompiles, EthFrame>;
 type TestError = EVMError<DbError>;
@@ -54,7 +64,7 @@ const GAS_LIMIT: u64 = 3_000_000;
 const RESERVOIR: u64 = 1_000_000;
 /// What `CHARGE` charges as state gas.
 const CHARGED: u64 = 1_000;
-/// The share of a caller's reservoir a chain that keeps part of it forwards.
+/// The share of a caller's reservoir a consumer that keeps part of it forwards.
 const PERCENT: u64 = 98;
 /// State gas of a new storage slot on Amsterdam's schedule.
 const SLOT: u64 = 97_920;
@@ -97,6 +107,225 @@ const fn charge(
 /// its net state gas.
 type Returned = (InstructionResult, u64, i64);
 
+/// The mainnet context, with the start lifecycle's hooks of a consumer that keeps part of each
+/// caller's reservoir for the caller, when told to ([`KeepingContext::percent`]).
+///
+/// The frame-start hook takes `100 - percent` per cent of the caller's reservoir, rounded down,
+/// for the caller, and names the rest as the child's reservoir; the settlement hook adds the
+/// reservoir the caller held back to it once revm has settled a child into it. The transaction's
+/// frame is given the whole reservoir, so nothing is added back to the transaction's gas. Each
+/// settlement's depth and held reservoir is recorded, told to keep or not.
+struct KeepingContext {
+    inner: MainnetContext<Db>,
+    /// The per cent of a caller's reservoir a child receives, if the consumer keeps the rest.
+    percent: Option<u64>,
+    /// Every settlement's depth and `held_reservoir`, in the order revm settled them.
+    held: Vec<(usize, u64)>,
+}
+
+impl ContextTr for KeepingContext {
+    type Block = BlockEnv;
+    type Tx = TxEnv;
+    type Cfg = CfgEnv;
+    type Db = Db;
+    type Journal = Journal<Db>;
+    type Chain = ();
+    type Local = LocalContext;
+
+    fn all(
+        &self,
+    ) -> (
+        &Self::Block,
+        &Self::Tx,
+        &Self::Cfg,
+        &Self::Db,
+        &Self::Journal,
+        &Self::Chain,
+        &Self::Local,
+    ) {
+        self.inner.all()
+    }
+
+    fn all_mut(
+        &mut self,
+    ) -> (
+        &Self::Block,
+        &Self::Tx,
+        &Self::Cfg,
+        &mut Self::Journal,
+        &mut Self::Chain,
+        &mut Self::Local,
+    ) {
+        self.inner.all_mut()
+    }
+
+    fn error(&mut self) -> &mut Result<(), ContextError<DbError>> {
+        self.inner.error()
+    }
+}
+
+impl ContextSetters for KeepingContext {
+    fn set_tx(&mut self, tx: Self::Tx) {
+        self.inner.set_tx(tx);
+    }
+
+    fn set_block(&mut self, block: Self::Block) {
+        self.inner.set_block(block);
+    }
+}
+
+impl Host for KeepingContext {
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
+        if let Some(percent) = self.percent {
+            let reservoir = gas.reservoir();
+            let kept = reservoir * (100 - percent) / 100;
+            start.reservoir = Some(reservoir - kept);
+            gas.set_reservoir(kept);
+        }
+        true
+    }
+
+    fn frame_split(&mut self, split: &FrameSplit) {
+        self.inner.frame_split(split);
+    }
+
+    fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
+        self.held.push((settle.depth, settle.held_reservoir));
+        if self.percent.is_some() && settle.depth > 0 {
+            gas.set_reservoir(gas.reservoir() + settle.held_reservoir);
+        }
+        self.inner.frame_settle(settle, gas);
+    }
+
+    fn frame_lifecycle_end(&mut self, end: LifecycleEnd) {
+        self.inner.frame_lifecycle_end(end);
+    }
+
+    fn state_gas_price(&mut self, id: GasId, site: StateGasSite) -> Option<u64> {
+        self.inner.state_gas_price(id, site)
+    }
+
+    fn basefee(&self) -> U256 {
+        self.inner.basefee()
+    }
+
+    fn blob_gasprice(&self) -> U256 {
+        self.inner.blob_gasprice()
+    }
+
+    fn gas_limit(&self) -> U256 {
+        self.inner.gas_limit()
+    }
+
+    fn difficulty(&self) -> U256 {
+        self.inner.difficulty()
+    }
+
+    fn prevrandao(&self) -> Option<U256> {
+        self.inner.prevrandao()
+    }
+
+    fn block_number(&self) -> U256 {
+        self.inner.block_number()
+    }
+
+    fn timestamp(&self) -> U256 {
+        self.inner.timestamp()
+    }
+
+    fn beneficiary(&self) -> Address {
+        self.inner.beneficiary()
+    }
+
+    fn slot_num(&self) -> U256 {
+        self.inner.slot_num()
+    }
+
+    fn chain_id(&self) -> U256 {
+        self.inner.chain_id()
+    }
+
+    fn effective_gas_price(&self) -> U256 {
+        self.inner.effective_gas_price()
+    }
+
+    fn caller(&self) -> Address {
+        self.inner.caller()
+    }
+
+    fn blob_hash(&self, number: usize) -> Option<U256> {
+        self.inner.blob_hash(number)
+    }
+
+    fn max_initcode_size(&self) -> usize {
+        self.inner.max_initcode_size()
+    }
+
+    fn gas_params(&self) -> &GasParams {
+        self.inner.gas_params()
+    }
+
+    fn is_amsterdam_eip8037_enabled(&self) -> bool {
+        self.inner.is_amsterdam_eip8037_enabled()
+    }
+
+    fn block_hash(&mut self, number: u64) -> Option<B256> {
+        self.inner.block_hash(number)
+    }
+
+    fn selfdestruct(
+        &mut self,
+        address: Address,
+        target: Address,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SelfDestructResult>, LoadError> {
+        self.inner.selfdestruct(address, target, skip_cold_load)
+    }
+
+    fn log(&mut self, log: Log) {
+        self.inner.log(log)
+    }
+
+    fn sstore_skip_cold_load(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+        value: StorageValue,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<SStoreResult>, LoadError> {
+        self.inner
+            .sstore_skip_cold_load(address, key, value, skip_cold_load)
+    }
+
+    fn sload_skip_cold_load(
+        &mut self,
+        address: Address,
+        key: StorageKey,
+        skip_cold_load: bool,
+    ) -> Result<StateLoad<StorageValue>, LoadError> {
+        self.inner
+            .sload_skip_cold_load(address, key, skip_cold_load)
+    }
+
+    fn tstore(&mut self, address: Address, key: StorageKey, value: StorageValue) {
+        self.inner.tstore(address, key, value)
+    }
+
+    fn tload(&mut self, address: Address, key: StorageKey) -> StorageValue {
+        self.inner.tload(address, key)
+    }
+
+    fn load_account_info_skip_cold_load(
+        &mut self,
+        address: Address,
+        load_code: bool,
+        skip_cold_load: bool,
+    ) -> Result<AccountInfoLoad<'_>, LoadError> {
+        self.inner
+            .load_account_info_skip_cold_load(address, load_code, skip_cold_load)
+    }
+}
+
 const fn returned(result: &FrameResult) -> Returned {
     let gas = result.gas();
     (
@@ -132,6 +361,8 @@ struct ShareHandler {
     tx_reservoir: core::cell::Cell<Option<u64>>,
     /// The transaction's reservoir once the first frame's input was built.
     after_first_input: Option<u64>,
+    /// Every settlement's depth and held reservoir, once the transaction's start settled.
+    held: Vec<(usize, u64)>,
 }
 
 impl ShareHandler {
@@ -145,6 +376,7 @@ impl ShareHandler {
             settled: None,
             tx_reservoir: core::cell::Cell::new(None),
             after_first_input: None,
+            held: Vec::new(),
         }
     }
 }
@@ -221,6 +453,7 @@ impl Handler for ShareHandler {
     ) -> Result<(), TestError> {
         self.mainnet.last_frame_result(evm, frame_result, gas)?;
         self.settled = Some((gas.reservoir(), gas.state_gas_spent()));
+        self.held = evm.ctx().held.clone();
         Ok(())
     }
 }
@@ -254,8 +487,8 @@ fn ends(mut code: Vec<u8>) -> Vec<u8> {
 struct Run {
     parent: Vec<u8>,
     parent_balance: u64,
-    /// The per cent of the reservoir a child receives, if not the default: the schedule's
-    /// `reservoir_kept_percent` is the rest.
+    /// The per cent of the reservoir a child receives, if the consumer keeps the rest for the
+    /// caller ([`KeepingContext`]); by default it receives the whole reservoir.
     percent: Option<u64>,
     /// The transaction, if not a call to [`PARENT`] with [`GAS_LIMIT`].
     tx: Option<TxEnv>,
@@ -358,11 +591,12 @@ impl Run {
             .modify_cfg_chained(|cfg| {
                 cfg.set_spec_and_mainnet_gas_params(SPEC);
                 cfg.tx_gas_limit_cap = Some(cap);
-                if let Some(percent) = percent {
-                    cfg.gas_params
-                        .override_gas([(GasId::reservoir_kept_percent(), 100 - percent)]);
-                }
             });
+        let ctx = KeepingContext {
+            inner: ctx,
+            percent,
+            held: Vec::new(),
+        };
         let mut instructions = EthInstructions::new_mainnet_with_spec(SPEC);
         instructions.insert_instruction(CHARGE, Instruction::new(charge), 0);
         let mut evm: TestEvm = Evm::new(ctx, instructions, EthPrecompiles::new(SPEC));
@@ -403,13 +637,15 @@ const fn share(reservoir: u64) -> u64 {
     reservoir - reservoir * (100 - PERCENT) / 100
 }
 
-/// Every start forwards 98% of its caller's reservoir, rounded down, and the caller keeps the
-/// rest; what a child hands back adds to what its caller kept: what it left when it succeeded,
-/// the whole share when it reverted or halted, a successful grandchild's charge included. The
-/// transaction's frame takes the whole reservoir. No frame here spends past its share, so the
+/// A consumer that keeps 2% of each caller's reservoir, rounded down, gives each start the rest;
+/// revm's settlement replaces the caller's reservoir with what the child hands back, and the
+/// consumer adds what the caller held, the part it kept: what the child left when it succeeded,
+/// the whole share when it reverted or halted, a successful grandchild's charge included, joins
+/// the kept part. The transaction's frame is given the whole reservoir, which the transaction's gas
+/// holds as its copy, so nothing is added back to it. No frame here spends past its share, so the
 /// transaction ends with the figures the whole forward gives, and the same result.
 #[test]
-fn test_the_reservoir_is_forwarded_by_its_share_and_settled_at_depth() {
+fn test_a_consumer_that_keeps_part_of_the_reservoir_adds_back_what_the_caller_held() {
     let (result, handler) = at_depth().percent(PERCENT).run();
 
     assert!(result.is_success(), "{result:?}");
@@ -472,19 +708,38 @@ fn test_the_reservoir_is_forwarded_by_its_share_and_settled_at_depth() {
         handler.settled,
         Some((RESERVOIR - 2 * CHARGED, 2 * charged))
     );
+    // What each caller held when revm settled its child: the 2% it kept, of 999,000, 998,000 and
+    // 977,040; the transaction's gas held the copy of the whole reservoir it gave its frame.
+    assert_eq!(
+        handler.held,
+        [
+            (1, 19_980),
+            (1, 19_960),
+            (1, 19_960),
+            (2, 19_540),
+            (1, 19_960),
+            (0, RESERVOIR),
+        ]
+    );
 
     let (whole, whole_handler) = at_depth().run();
     assert_eq!(result, whole, "the shares change no result here");
     assert_eq!(whole_handler.settled, handler.settled);
 }
 
-/// The whole forward is upstream's: every start passes on all its caller has, and the caller
-/// holds none while the child runs.
+/// The default forward is upstream's: every start copies all its caller has into the child's
+/// input, the caller keeps its reservoir while the child runs, and the child's return replaces it.
+/// The transaction's gas keeps the reservoir it gives its frame, which its frame's return replaces.
 #[test]
-fn test_every_start_forwards_the_whole_reservoir_by_default() {
+fn test_every_start_copies_the_whole_reservoir_by_default() {
     let (result, handler) = at_depth().run();
 
     assert!(result.is_success(), "{result:?}");
+    assert_eq!(
+        handler.after_first_input,
+        Some(RESERVOIR),
+        "the transaction's gas keeps its reservoir"
+    );
     let before_each = RESERVOIR - 2 * CHARGED;
     assert_eq!(
         handler.starts,
@@ -508,10 +763,24 @@ fn test_every_start_forwards_the_whole_reservoir_by_default() {
         )
     );
     assert_eq!(handler.settled, Some((before_each, 2 * charged)));
+    // Each caller held the reservoir it copied to its child: PARENT 999,000 at its first call and
+    // 998,000, OK's return, at the others; NESTER 997,000; the transaction's gas the whole.
+    assert_eq!(
+        handler.held,
+        [
+            (1, RESERVOIR - CHARGED),
+            (1, before_each),
+            (1, before_each),
+            (2, before_each - CHARGED),
+            (1, before_each),
+            (0, RESERVOIR),
+        ]
+    );
 }
 
 /// A child whose charges pass its share spills onto its regular gas, as a frame whose reservoir
-/// is empty does, though its caller holds the 2% it kept: the share is all the child has. On
+/// is empty does, though its caller holds the 2% the consumer kept: the share is all the child
+/// has. On
 /// return the caller holds what it kept beside the child's spill; when the caller's own frame
 /// returns, its reservoir unwinds that spill first, as any returned reservoir does (last in, first
 /// out), so the transaction ends as the whole forward ends it.
@@ -585,8 +854,8 @@ fn test_a_child_that_cannot_pay_past_its_share_runs_out_of_gas() {
 }
 
 /// A child that clears a slot its caller created gets the slot's state gas back as an EIP-8037
-/// restoration, into its own reservoir; when it succeeds, the caller adds it with the rest of the
-/// share to what it kept, and is back where it was before it created the slot. When it reverts,
+/// restoration, into its own reservoir; when it succeeds, the caller gets it back with the rest of
+/// the share and the part the consumer kept, and is back where it was before it created the slot. When it reverts,
 /// the restoration is undone with the rest of its frame and the caller gets the share back.
 #[test]
 fn test_a_restoration_in_the_child_comes_back_to_its_caller() {
@@ -718,19 +987,6 @@ fn test_a_system_call_forwards_and_settles_its_reservoir() {
     }
 }
 
-/// The schedule's entry is upstream's forward on every spec: the caller keeps none.
-#[test]
-fn test_the_schedule_forwards_the_whole_reservoir() {
-    let evm = Run::new(ends(Vec::new())).evm();
-    assert_eq!(
-        evm.ctx
-            .cfg()
-            .gas_params()
-            .get(GasId::reservoir_kept_percent()),
-        0
-    );
-}
-
 /// `CREATE` of the two bytes `CHARGE STOP`, endowed with nothing, dropping the address.
 fn create_charging() -> Vec<u8> {
     vec![
@@ -785,23 +1041,24 @@ fn test_a_creation_forwards_its_share_and_a_collision_hands_it_back() {
     assert_eq!(handler.settled, Some((after_parent, CHARGED as i64)));
 }
 
-/// A creation transaction's frame takes the whole reservoir the transaction has left, whatever
-/// the schedule, and settles back into it.
+/// A creation transaction's frame is given the whole reservoir the transaction has left, which the
+/// transaction's gas keeps as its copy, whether the consumer keeps part of a caller's reservoir or
+/// not; the frame's return replaces it.
 #[test]
-fn test_a_creation_transaction_takes_the_whole_reservoir() {
+fn test_a_creation_transaction_is_given_the_whole_reservoir() {
     for percent in [None, Some(PERCENT)] {
         let mut run = Run::creation(vec![CHARGE, STOP]);
         run.percent = percent;
         let (result, handler) = run.run();
 
         assert!(result.is_success(), "{percent:?}: {result:?}");
-        assert_eq!(
-            handler.after_first_input,
-            Some(0),
-            "{percent:?}: all of it taken"
-        );
         let first = handler.starts[0];
         assert!(first > 0, "{percent:?}");
+        assert_eq!(
+            handler.after_first_input,
+            Some(first),
+            "{percent:?}: the transaction's gas keeps its copy"
+        );
         assert_eq!(
             handler.settled.map(|(reservoir, _)| reservoir),
             Some(first - CHARGED)
@@ -810,7 +1067,8 @@ fn test_a_creation_transaction_takes_the_whole_reservoir() {
 }
 
 /// A transaction whose EIP-2780 runtime phase runs out of gas skips execution and is settled
-/// from a stand-in for its first frame: all regular gas consumed and the reservoir returned once.
+/// from a stand-in for its first frame: all regular gas consumed and the reservoir returned once,
+/// the stand-in's replacing the copy the transaction's gas kept.
 #[test]
 fn test_a_runtime_out_of_gas_returns_the_reservoir_once() {
     const LIMIT: u64 = 130_000;
@@ -849,7 +1107,7 @@ fn test_a_runtime_out_of_gas_returns_the_reservoir_once() {
 }
 
 /// The same for a creation transaction, whose runtime phase charges the account it would create:
-/// the stand-in takes the whole reservoir, which settles back once.
+/// the stand-in carries the whole reservoir, which settles back once.
 #[test]
 fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_once() {
     const LIMIT: u64 = 160_000;
@@ -884,19 +1142,22 @@ fn test_a_creation_transactions_runtime_out_of_gas_returns_the_reservoir_once() 
     }
 }
 
-/// The transaction's frame took the whole reservoir, and its settlement adds
-/// back what it left. A runner that settles the frame into gas that still holds what the frame was
-/// given, because it built the frame without taking it or seeded the gas from the frame's own
-/// figures, would count it twice; a debug build refuses the settlement.
-#[cfg(debug_assertions)]
+/// A runner that settles a first frame into gas that still holds the reservoir the frame was given,
+/// as the transaction's gas does, gets the frame's reservoir in its place, counted once.
 #[test]
-#[should_panic(expected = "the transaction's gas still holds the reservoir its frame was given")]
-fn test_a_first_frame_settled_into_gas_that_kept_the_reservoir_panics_in_a_debug_build() {
+fn test_a_first_frame_settled_into_gas_that_kept_its_reservoir_counts_it_once() {
     let mut evm = Run::new(ends(Vec::new())).evm();
     let mut result = FrameResult::new_call_oog(GAS_LIMIT, 0..0, RESERVOIR);
     let mut gas = GasTracker::new(GAS_LIMIT, 0, RESERVOIR);
+    // A runner that settles a first frame it built itself opens the transaction's start first.
+    revm_handler::lifecycle::open_transaction_start(&mut evm).expect("the start opens");
 
-    let _ = Mainnet::default().last_frame_result(&mut evm, &mut result, &mut gas);
+    Mainnet::default()
+        .last_frame_result(&mut evm, &mut result, &mut gas)
+        .expect("the frame settles");
+
+    assert_eq!(gas.reservoir(), RESERVOIR);
+    assert_eq!(evm.ctx.held, [(0, RESERVOIR)]);
 }
 
 /// A runner that builds the gas with `GasTracker::new`, with no reservoir, settles as before.

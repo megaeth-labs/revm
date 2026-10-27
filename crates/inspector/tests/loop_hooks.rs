@@ -19,7 +19,7 @@
 
 use context::{
     result::{EVMError, ExecutionResult, Output},
-    Cfg, Context, ContextSetters, ContextTr, Evm, FrameStack, JournalTr, TxEnv,
+    Context, ContextSetters, ContextTr, Evm, FrameStack, JournalTr, TxEnv,
 };
 use database::{CacheDB, EmptyDB, BENCH_CALLER};
 use handler::{
@@ -98,8 +98,8 @@ struct Plan {
 enum AtStart {
     /// A return carrying [`AT_START`].
     Return,
-    /// A creation with no init code on [`CREATION_GAS`] and the share of the frame's reservoir;
-    /// once it returned into [`CHILD`], a return carrying [`AFTER_ITS_CHILD`].
+    /// A creation with no init code on [`CREATION_GAS`] and the frame's reservoir; once it
+    /// returned into [`CHILD`], a return carrying [`AFTER_ITS_CHILD`].
     Create,
     /// The creation of [`AtStart::Create`]; once it returned into [`CHILD`], nothing, so
     /// [`CHILD`] runs its code.
@@ -262,7 +262,6 @@ impl EvmTr for Consumer {
             .plan
             .at_start
             .filter(|_| is_call_to(&frame_input.frame_input, CHILD));
-        let params = self.evm.ctx.cfg().gas_params().clone();
         let mut started = self.evm.frame_init(frame_input)?;
         if let (Some(at_start), ItemOrResult::Item(frame)) = (at_start, &mut started) {
             let action = match at_start {
@@ -273,14 +272,13 @@ impl EvmTr for Consumer {
                         gas.record_regular_cost(CREATION_GAS),
                         "the frame pays the creation"
                     );
-                    let shares = gas.tracker_mut().forward_to_child(&params);
                     let inputs = CreateInputs::new(
                         CHILD,
                         CreateScheme::Create,
                         U256::ZERO,
                         Bytes::new(),
                         CREATION_GAS,
-                        shares.reservoir,
+                        gas.reservoir(),
                     );
                     InterpreterAction::NewFrame(FrameInput::Create(Box::new(inputs)))
                 }

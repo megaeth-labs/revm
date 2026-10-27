@@ -79,5 +79,13 @@ pub struct FrameSettle {
     /// this start, such as one a constructor built around the same result.
     pub outcome_rebuilt: bool,
     /// The reservoir the caller's gas held just before revm settled the result into it.
+    ///
+    /// revm's settlement replaces the caller's reservoir with the one the frame returns, once that
+    /// has unwound the caller's outstanding spill. A consumer that kept part of the caller's
+    /// reservoir when the start was made ([`FrameStart::reservoir`](super::FrameStart::reservoir))
+    /// adds this back to it here, which gives the caller what the frame returned on top of the
+    /// part it kept, since the unwinding and every refill read the spill, not the reservoir. The
+    /// transaction's frame is handed a copy of the transaction's reservoir, which this then is: a
+    /// consumer adds back only what it kept.
     pub held_reservoir: u64,
 }

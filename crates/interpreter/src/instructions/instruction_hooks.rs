@@ -3,8 +3,8 @@
 
 use crate::{
     interpreter_types::{InterpreterTypes as ITy, LoopControl},
-    ChildShares, CreateInputs, Gas, Host, InstructionExecResult as Result, InstructionResult,
-    Interpreter, InterpreterAction,
+    CreateInputs, Gas, Host, InstructionExecResult as Result, InstructionResult, Interpreter,
+    InterpreterAction,
 };
 use context_interface::host::{CompletedWrite, FrameStart, WriteVerdict};
 use primitives::{constants::CALL_STACK_LIMIT, hints_util::cold_path, Address, Bytes, U256};
@@ -45,8 +45,8 @@ fn revert<IT: ITy>(interpreter: &mut Interpreter<IT>, output: Bytes) -> Result {
 
 /// Hands `start`, whose forward the running instruction has taken from `gas`, to
 /// [`Host::frame_starting`]. `true` returns the child's reservoir if the hook took it itself and
-/// named it on `start`, for the forward ([`forward_to_child`]); `false` fails the instruction out
-/// of gas.
+/// named it on `start`, which the frame's input carries in place of the caller's reservoir;
+/// `false` fails the instruction out of gas.
 #[inline]
 pub(crate) fn frame_starting<H: Host + ?Sized>(
     gas: &mut Gas,
@@ -91,20 +91,4 @@ pub(crate) fn running_account<H: Host + ?Sized>(
         .load_account_info_skip_cold_load(address, false, false)?
         .account;
     Ok((account.balance, account.nonce))
-}
-
-/// Takes the child's share of the caller's reservoir out of `gas`, all but the schedule's
-/// `reservoir_kept_percent`, and returns it: what the child's tracker starts with
-/// ([`GasTracker::forward_to_child`](crate::GasTracker::forward_to_child)). Called once the
-/// frame-start hook has answered, so the share is of the reservoir as the hook left it. A child `reservoir` the hook named replaces the reservoir's share: the
-/// child starts with it, and the caller keeps the reservoir the hook left
-/// ([`GasTracker::forward_to_child_with_reservoir`](crate::GasTracker::forward_to_child_with_reservoir)).
-#[inline]
-pub(crate) fn forward_to_child<H: Host + ?Sized>(
-    gas: &mut Gas,
-    host: &H,
-    reservoir: Option<u64>,
-) -> ChildShares {
-    gas.tracker_mut()
-        .forward_to_child_with_reservoir(host.gas_params(), reservoir)
 }

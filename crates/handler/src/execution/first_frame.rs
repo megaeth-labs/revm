@@ -16,15 +16,10 @@ use std::string::ToString;
 /// - `gas` spends all its regular gas, which was forwarded to the frame, and the frame settles
 ///   into it as a child settles into its caller ([`handle_reservoir_remaining_gas`]): a failing
 ///   frame rolls back its state gas and history gas, a halt consumes its regular gas, and what
-///   the frame left returns to `gas`, its reservoir added to what `gas` kept, which is nothing,
-///   since the frame took it whole;
+///   the frame left returns to `gas`, its reservoir in place of the one `gas` gave it;
 /// - the EIP-2780 refundable first-frame charge is refunded when no account leaf was created,
 ///   priced through [`Host::state_gas_charge`](context_interface::Host::state_gas_charge) as it
 ///   was charged; after a halt the regular gas the refund credited is consumed.
-///
-/// `gas` holds no reservoir on entry: the first frame took it whole
-/// ([`GasTracker::forward_all_to_child`]), and the settlement adds back what the frame left, so
-/// gas that still held what the frame was given would count it twice. A debug build asserts it.
 ///
 /// A chain whose handler overrides `last_frame_result` calls this rather than copying the mainnet
 /// body, so a step the fork adds here reaches its handler too. It applies its own rules to `gas`
@@ -49,12 +44,6 @@ where
     ERROR: From<<CTX::Db as Database>::Error> + FromStringError,
 {
     let instruction_result = frame_result.instruction_result();
-
-    debug_assert!(
-        gas.reservoir() == 0,
-        "the transaction's gas still holds the reservoir its frame was given; the settlement \
-         would count it twice (take it with `GasTracker::forward_all_to_child`)"
-    );
 
     // All regular gas was forwarded to the first frame: consume it on the
     // transaction-level gas; the settle below returns the frame's unused

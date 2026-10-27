@@ -128,9 +128,9 @@ pub trait Host {
     /// frame's input is built.
     ///
     /// The hook may debit and credit `gas`, and the instruction uses it as the hook left it,
-    /// charging nothing after the hook: the frame's input takes the schedule's share of the
-    /// reservoir in `gas`, or the child's reservoir the hook names on `start` if it took that out
-    /// of `gas` itself ([`FrameStart::reservoir`]). A charge the hook makes that fails records as
+    /// charging nothing after the hook: the frame's input copies the reservoir in `gas`, or
+    /// carries the child's reservoir the hook names on `start` if it took that out of `gas` itself
+    /// ([`FrameStart::reservoir`]). A charge the hook makes that fails records as
     /// any failed charge does ([`GasTracker::failed_charge_remaining`]), whatever the answer.
     /// `true` goes on to start the frame, which the handler may still refuse or answer without
     /// running it. `false` fails the instruction out of gas and starts no frame: the forward stays
