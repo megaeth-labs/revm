@@ -1,7 +1,13 @@
 //! Host interface for external blockchain state access.
 
+mod instruction_hooks;
+mod lifecycle;
+
+pub use instruction_hooks::{CompletedWrite, FrameStart, FrameStartKind, WriteVerdict};
+pub use lifecycle::{FrameSettle, FrameSplit, LifecycleEnd, SettleStatus};
+
 use crate::{
-    cfg::{GasId, GasParams, StateGasCharge, StateGasSite},
+    cfg::{gas::GasTracker, GasId, GasParams, StateGasCharge, StateGasSite},
     context::{SStoreResult, SelfDestructResult, StateLoad},
     journaled_state::{AccountInfoLoad, AccountLoad},
 };
@@ -92,6 +98,92 @@ pub trait Host {
     fn state_gas_charge(&mut self, charge: StateGasCharge) -> Option<u64> {
         self.state_gas_price(charge.id, charge.site)
             .map(|unit_price| charge.total(unit_price))
+    }
+
+    /* Instruction hooks */
+
+    /// Called by `SSTORE`, `LOG0`–`LOG4` and `SELFDESTRUCT` once `write` is in the journal and
+    /// every charge the instruction makes has been made, so only when the instruction completes.
+    /// `gas` is the running frame's.
+    ///
+    /// The hook may debit and credit `gas`, and the instruction uses it as the hook left it,
+    /// charging nothing after the hook; a charge the hook makes that fails records as any failed
+    /// charge does ([`GasTracker::failed_charge_remaining`]), whatever the verdict.
+    /// [`WriteVerdict::Continue`] ends the instruction as it would have ended.
+    /// [`WriteVerdict::OutOfGas`] fails it as a failed charge does: the frame halts out of gas,
+    /// and the halt records the regular gas the hook left unless a failed charge already did.
+    /// [`WriteVerdict::Revert`] ends the frame as a `Revert` with the verdict's output, on its gas
+    /// as the hook left it; a `SELFDESTRUCT` so reverted does not self-destruct.
+    ///
+    /// The default continues and touches nothing.
+    #[inline]
+    fn write_completed(&mut self, write: CompletedWrite<'_>, gas: &mut GasTracker) -> WriteVerdict {
+        let _ = (write, gas);
+        WriteVerdict::Continue
+    }
+
+    /// Called by `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`, `CREATE` and `CREATE2` once
+    /// every charge the instruction makes has been made and the forward
+    /// ([`FrameStart::forward`]) has been taken from `gas`, the running frame's, and before the
+    /// frame's input is built.
+    ///
+    /// The hook may debit and credit `gas`, and the instruction uses it as the hook left it,
+    /// charging nothing after the hook: the frame's input copies the reservoir in `gas`, or
+    /// carries the child's reservoir the hook names on `start` if it took that out of `gas` itself
+    /// ([`FrameStart::reservoir`]). A charge the hook makes that fails records as any failed
+    /// charge does ([`GasTracker::failed_charge_remaining`]), whatever the answer.
+    /// `true` goes on to start the frame, which the handler may still refuse or answer without
+    /// running it. `false` fails the instruction out of gas and starts no frame: the forward stays
+    /// taken unless the hook gave it back, and the halt records the regular gas the hook left
+    /// unless a failed charge already did.
+    ///
+    /// The default returns `true` and touches nothing.
+    #[inline]
+    fn frame_starting(&mut self, start: &mut FrameStart, gas: &mut GasTracker) -> bool {
+        let _ = (start, gas);
+        true
+    }
+
+    /* Start lifecycle */
+
+    /// Called when revm opens a start ([`FrameSplit`]): it consumed a frame's init and
+    /// initialises the frame next. A frame's `NewFrame` action opens a child start under the
+    /// frame's own; the transaction's frame, or the stand-in for one that never runs, opens the
+    /// transaction's start, the first of its lifecycle.
+    ///
+    /// Every start opened is closed once by [`frame_settle`](Self::frame_settle), innermost first,
+    /// unless the lifecycle is discarded ([`frame_lifecycle_end`](Self::frame_lifecycle_end)). A
+    /// start revm never opened, such as a `NewFrame` an inspector dropped, is never settled.
+    ///
+    /// The default touches nothing.
+    #[inline]
+    fn frame_split(&mut self, split: &FrameSplit) {
+        let _ = split;
+    }
+
+    /// Called when revm settles the start `settle.id` into its caller's `gas`, after revm's own
+    /// settlement of the frame's result.
+    ///
+    /// The hook may debit and credit `gas`, which goes on as the hook left it, but for a halted
+    /// transaction's frame: there revm then consumes the hook's net credit of regular gas, the
+    /// regular gas `gas` holds above what revm's own settlement left in it, and keeps the gas that
+    /// settlement left. A hook that debits keeps its debit.
+    ///
+    /// The default touches nothing.
+    #[inline]
+    fn frame_settle(&mut self, settle: &FrameSettle, gas: &mut GasTracker) {
+        let _ = (settle, gas);
+    }
+
+    /// Called once when a transaction's lifecycle ends: [`LifecycleEnd::Settled`] at the
+    /// successful boundary, every start settled, or [`LifecycleEnd::Discarded`] at the fatal one,
+    /// the starts still open discarded. Not called for a transaction that failed before its start
+    /// opened.
+    ///
+    /// The default touches nothing.
+    #[inline]
+    fn frame_lifecycle_end(&mut self, end: LifecycleEnd) {
+        let _ = end;
     }
 
     /* Database */

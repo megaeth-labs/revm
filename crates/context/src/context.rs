@@ -438,6 +438,33 @@ impl<
         LOCAL: LocalContextTr,
     > Host for Context<BLOCK, TX, CFG, DB, JOURNAL, CHAIN, LOCAL>
 {
+    /* Start lifecycle: in debug builds, the local context's mirror checks every event. */
+
+    #[cfg(debug_assertions)]
+    fn frame_split(&mut self, split: &context_interface::host::FrameSplit) {
+        if let Some(mirror) = self.local.lifecycle_mirror() {
+            mirror.split(split);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn frame_settle(
+        &mut self,
+        settle: &context_interface::host::FrameSettle,
+        _gas: &mut context_interface::cfg::gas::GasTracker,
+    ) {
+        if let Some(mirror) = self.local.lifecycle_mirror() {
+            mirror.settle(settle);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn frame_lifecycle_end(&mut self, end: context_interface::host::LifecycleEnd) {
+        if let Some(mirror) = self.local.lifecycle_mirror() {
+            mirror.end(end);
+        }
+    }
+
     /* Block */
 
     fn basefee(&self) -> U256 {

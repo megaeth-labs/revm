@@ -18,7 +18,7 @@ use interpreter::{
     interpreter_types::ReturnData,
     CallInput, CallInputs, CallOutcome, CallValue, CreateInputs, CreateOutcome, CreateScheme,
     FrameInput, Gas, GasTracker, InputsImpl, InstructionResult, Interpreter, InterpreterAction,
-    InterpreterResult, InterpreterTypes, SharedMemory,
+    InterpreterResult, InterpreterTypes, OutcomeMark, SharedMemory,
 };
 use primitives::{
     constants::CALL_STACK_LIMIT,
@@ -174,6 +174,7 @@ impl EthFrame<EthInterpreter> {
                 precompile_call_logs: Vec::new(),
                 charged_new_account_state_gas,
                 charged_state_gas_address,
+                start_mark: OutcomeMark::NONE,
             })))
         };
 
@@ -228,6 +229,7 @@ impl EthFrame<EthInterpreter> {
                 precompile_call_logs: logs,
                 charged_new_account_state_gas,
                 charged_state_gas_address,
+                start_mark: OutcomeMark::NONE,
             })));
         }
 
@@ -295,6 +297,7 @@ impl EthFrame<EthInterpreter> {
                 address: None,
                 charged_create_state_gas,
                 charged_state_gas_address,
+                start_mark: OutcomeMark::NONE,
             })))
         };
 
@@ -871,5 +874,152 @@ mod tests {
         assert_eq!(parent.reservoir(), 0);
         assert_eq!(parent.state_gas_spent(), 0);
         assert_eq!(parent.state_gas_spilled(), 0);
+    }
+
+    /// Settles `child` into `parent` as revm does, then adds back the reservoir `parent` held
+    /// while the child ran, as a consumer that kept part of `parent`'s reservoir for it does.
+    fn settle_and_add_back(
+        result: InstructionResult,
+        parent: &mut GasTracker,
+        child: &mut GasTracker,
+    ) {
+        let held = parent.reservoir();
+        handle_reservoir_remaining_gas(result, parent, child);
+        parent.set_reservoir(parent.reservoir() + held);
+    }
+
+    /// The reservoir a child returns replaces its caller's: what the child left when it succeeded,
+    /// the whole reservoir it was given when it reverted or halted, the child's state charges
+    /// undone. Regular gas settles as it did.
+    #[test]
+    fn test_the_reservoir_a_child_returns_replaces_its_callers() {
+        for result in [
+            InstructionResult::Stop,
+            InstructionResult::Revert,
+            InstructionResult::OutOfGas,
+        ] {
+            let mut parent = GasTracker::new(10_000, 10_000, 1_000);
+            assert!(parent.record_regular_cost(5_000));
+            let mut child = GasTracker::new(5_000, 5_000, parent.reservoir());
+            assert!(child.record_state_cost(300));
+
+            handle_reservoir_remaining_gas(result, &mut parent, &mut child);
+
+            let (reservoir, state) = if result.is_ok() {
+                (700, 300)
+            } else {
+                (1_000, 0)
+            };
+            assert_eq!(parent.reservoir(), reservoir, "{result:?}");
+            assert_eq!(parent.state_gas_spent(), state, "{result:?}");
+            let regular = if result.is_ok_or_revert() {
+                10_000
+            } else {
+                5_000
+            };
+            assert_eq!(parent.remaining(), regular, "{result:?}");
+        }
+    }
+
+    /// A consumer that keeps part of a caller's reservoir gives the child the rest, and adds what
+    /// the caller held back once revm replaced the caller's reservoir with the child's: the caller
+    /// ends with what the child returned on top of the part it kept. A child that spends more than
+    /// its share spills onto its regular gas, as a frame with no reservoir left does, though its
+    /// caller kept part of the reservoir: the share is the child's whole reservoir. A caller's
+    /// later rollback restores the reservoir it started with and gives the spill back to regular
+    /// gas.
+    #[test]
+    fn test_a_child_spills_past_its_share_and_a_rollback_restores_the_callers_reservoir() {
+        let mut a = GasTracker::new(10_000, 10_000, 1_000);
+        assert!(a.record_regular_cost(10_000));
+        let mut b = GasTracker::new(10_000, 10_000, a.reservoir());
+        assert!(b.record_regular_cost(5_000));
+        // 98% of 1,000 forwarded, 20 kept.
+        b.set_reservoir(20);
+        let mut c = GasTracker::new(5_000, 5_000, 980);
+        assert!(c.record_state_cost(1_000));
+        assert_eq!(
+            (c.reservoir(), c.remaining(), c.state_gas_spilled()),
+            (0, 4_980, 20)
+        );
+
+        settle_and_add_back(InstructionResult::Stop, &mut b, &mut c);
+        assert_eq!(b.reservoir(), 20, "the part B kept is back");
+        assert_eq!(b.state_gas_spilled(), 20);
+        assert_eq!(b.remaining(), 9_980);
+
+        handle_reservoir_remaining_gas(InstructionResult::Revert, &mut a, &mut b);
+        assert_eq!(a.reservoir(), 1_000);
+        assert_eq!(a.remaining(), 10_000);
+        assert_eq!(a.state_gas_spent(), 0);
+    }
+
+    /// A caller that kept part of its reservoir holds it beside the spill of a child that spent
+    /// past its share, which a whole forward cannot produce. A refill in the caller then keeps
+    /// EIP-8037's order, regular gas up to the outstanding spill first and the reservoir after,
+    /// whichever paid the charge it undoes: a charge the caller paid from its kept reservoir comes
+    /// back as regular gas. The sum of the two is conserved, and a rollback restores the reservoir
+    /// the caller started with. With the whole reservoir forwarded, the caller's charge spills
+    /// too, and its refill returns where the charge was taken.
+    #[test]
+    fn test_a_refill_beside_a_kept_reservoir_and_a_childs_spill_credits_regular_gas_first() {
+        // (reservoir, remaining, spilled, state gas spent) of a tracker.
+        let figures = |gas: &GasTracker| {
+            (
+                gas.reservoir(),
+                gas.remaining(),
+                gas.state_gas_spilled(),
+                gas.state_gas_spent(),
+            )
+        };
+        for (forwarded, after_child, after_charge, after_refill) in [
+            // 98%: B keeps 20 and C spills 20; B's charge comes from its reservoir, the refill
+            // goes to its regular gas.
+            (
+                980,
+                (20, 9_980, 20, 1_000),
+                (10, 9_980, 20, 1_010),
+                (10, 9_990, 10, 1_000),
+            ),
+            // The whole reservoir: B keeps none and C spills 0; B's charge spills, and the refill
+            // undoes that spill.
+            (
+                1_000,
+                (0, 10_000, 0, 1_000),
+                (0, 9_990, 10, 1_010),
+                (0, 10_000, 0, 1_000),
+            ),
+        ] {
+            // B holds 1,000 of reservoir and forwards 5,000 of regular gas; C charges 1,000.
+            let mut b = GasTracker::new(10_000, 10_000, 1_000);
+            assert!(b.record_regular_cost(5_000));
+            let mut c = GasTracker::new(5_000, 5_000, forwarded);
+            assert!(c.record_state_cost(1_000));
+            if forwarded < 1_000 {
+                b.set_reservoir(1_000 - forwarded);
+                settle_and_add_back(InstructionResult::Stop, &mut b, &mut c);
+            } else {
+                handle_reservoir_remaining_gas(InstructionResult::Stop, &mut b, &mut c);
+            }
+            assert_eq!(figures(&b), after_child, "{forwarded}: after C");
+
+            // B writes a slot, 10 of state gas, and puts it back, a refill of 10.
+            assert!(b.record_state_cost(10));
+            assert_eq!(figures(&b), after_charge, "{forwarded}: after B's charge");
+            b.refill_reservoir(10);
+            assert_eq!(figures(&b), after_refill, "{forwarded}: after B's refill");
+            assert_eq!(
+                b.reservoir() + b.remaining(),
+                10_000,
+                "{forwarded}: the sum is conserved"
+            );
+
+            b.rollback_state_gas();
+            assert_eq!(
+                (b.reservoir(), b.remaining()),
+                (1_000, 10_000),
+                "{forwarded}: B's rollback restores what it started with"
+            );
+        }
     }
 }

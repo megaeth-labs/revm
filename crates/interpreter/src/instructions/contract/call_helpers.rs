@@ -62,7 +62,7 @@ pub fn resize_memory(
 /// (transfers value into a previously-empty account). Callers should propagate
 /// it onto `CallInputs` so the parent can refund the charge if the resulting
 /// frame reverts/halts.
-#[inline(never)]
+#[inline]
 pub fn load_acc_and_calc_gas<H: Host + ?Sized>(
     context: &mut Ictx<'_, H, impl ITy>,
     to: Address,
@@ -70,6 +70,30 @@ pub fn load_acc_and_calc_gas<H: Host + ?Sized>(
     create_empty_account: bool,
     stack_gas_limit: u64,
 ) -> Result<(u64, Bytecode, B256, bool), InstructionResult> {
+    load_acc_and_calc_forward(
+        context,
+        to,
+        transfers_value,
+        create_empty_account,
+        stack_gas_limit,
+    )
+    .map(|(gas_limit, bytecode, code_hash, charged, _)| (gas_limit, bytecode, code_hash, charged))
+}
+
+/// [`load_acc_and_calc_gas`], also returning the forward, the gas taken from the caller for the
+/// frame, which is the frame's gas limit without a value call's stipend.
+///
+/// Returns `(gas_limit, bytecode, code_hash, charged_new_account_state_gas, forward)`. The forward
+/// comes last, after the fields [`load_acc_and_calc_gas`] returns: placed second, it changed how
+/// the others are stored and cost two more instructions per call.
+#[inline(never)]
+pub(super) fn load_acc_and_calc_forward<H: Host + ?Sized>(
+    context: &mut Ictx<'_, H, impl ITy>,
+    to: Address,
+    transfers_value: bool,
+    create_empty_account: bool,
+    stack_gas_limit: u64,
+) -> Result<(u64, Bytecode, B256, bool, u64), InstructionResult> {
     // Transfer value cost
     if transfers_value {
         gas!(
@@ -109,6 +133,8 @@ pub fn load_acc_and_calc_gas<H: Host + ?Sized>(
         return Err(InstructionResult::OutOfGas);
     }
 
+    let forward = gas_limit;
+
     // Add call stipend if there is value to be transferred.
     if transfers_value {
         gas_limit = gas_limit.saturating_add(host.gas_params().call_stipend());
@@ -119,6 +145,7 @@ pub fn load_acc_and_calc_gas<H: Host + ?Sized>(
         bytecode,
         code_hash,
         charged_new_account_state_gas,
+        forward,
     ))
 }
 

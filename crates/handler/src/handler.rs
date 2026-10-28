@@ -1,7 +1,6 @@
 use crate::{
     evm::FrameTr,
-    execution,
-    frame::handle_reservoir_remaining_gas,
+    execution, lifecycle,
     post_execution::{self, build_result_gas},
     pre_execution::{self, apply_eip7702_auth_list, PreExecutionOutput},
     validation, EvmTr, FrameResult, ItemOrResult,
@@ -15,11 +14,10 @@ use context_interface::{
     context::{take_error, ContextError},
     journaled_state::JournalCheckpoint,
     result::{HaltReasonTr, InvalidHeader, InvalidTransaction, ResultGas},
-    Cfg, ContextTr, Database, Host, JournalTr, Transaction,
+    Cfg, ContextTr, Database, JournalTr, Transaction,
 };
 use interpreter::{interpreter_action::FrameInit, GasTracker, InitialAndFloorGas, SharedMemory};
 use primitives::{TxKind, U256};
-use std::string::ToString;
 
 /// Trait for errors that can occur during EVM execution.
 ///
@@ -161,6 +159,9 @@ pub trait Handler {
     /// [Handler::pre_execution], [Handler::execution], [Handler::post_execution].
     ///
     /// Returns any errors without catching them or calling [`Handler::catch_error`].
+    /// A caller that drops an error makes `catch_error`'s cleanup before it reuses
+    /// the EVM, the frame stack's included: see the start lifecycle's "Reuse after
+    /// an error" ([`lifecycle`]).
     #[inline]
     fn run_without_catch_error(
         &mut self,
@@ -271,6 +272,9 @@ pub trait Handler {
     /// ([`Handler::runtime_oog_result`]).
     ///
     /// Always calls [Handler::last_frame_result] to handle returned gas from the call.
+    ///
+    /// The first frame's init opens the transaction's start
+    /// ([`lifecycle::open_frame_start`]), which `last_frame_result` closes.
     #[inline]
     fn execution(
         &mut self,
@@ -289,6 +293,8 @@ pub trait Handler {
         };
         // The runtime gas phase is complete: commit its state changes.
         evm.ctx().journal_mut().checkpoint_commit();
+        // The transaction's start opens with the frame init revm made for it.
+        lifecycle::open_frame_start(evm, &first_frame_input)?;
 
         // Run execution loop
         let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
@@ -307,6 +313,10 @@ pub trait Handler {
     /// skipped, all regular gas is consumed (the reservoir is returned), and
     /// the runtime state changes were already reverted when the phase bailed
     /// out.
+    ///
+    /// The stand-in opens the transaction's start
+    /// ([`lifecycle::open_transaction_start`]) and settles on it as the
+    /// transaction's frame would.
     #[inline]
     fn runtime_oog_result(
         &mut self,
@@ -320,6 +330,9 @@ pub trait Handler {
         // result; the settle below consumes all regular gas and returns the
         // reservoir.
         *gas = self.tx_gas(evm, init_and_floor_gas);
+        // The stand-in settles as the transaction's frame would, so it opens the transaction's
+        // start.
+        lifecycle::open_transaction_start(evm)?;
         let tx_gas_limit = evm.ctx().tx().gas_limit();
         let reservoir = gas.reservoir();
         let mut frame_result = match evm.ctx().tx().kind() {
@@ -502,6 +515,14 @@ pub trait Handler {
     ///
     /// The settled transaction-level gas is written back to the frame result,
     /// which carries it into the post-execution phase.
+    ///
+    /// The settlement is [`execution::settle_first_frame`]. It is followed by the close of the
+    /// transaction's start ([`lifecycle::close_transaction_start`], given the
+    /// reservoir the gas held before the settlement). An override calls both
+    /// rather than copying this body, and copies the gas into the frame result
+    /// itself.
+    ///
+    /// [`handle_reservoir_remaining_gas`]: crate::handle_reservoir_remaining_gas
     #[inline]
     fn last_frame_result(
         &mut self,
@@ -509,44 +530,11 @@ pub trait Handler {
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
         parent_gas: &mut GasTracker,
     ) -> Result<(), Self::Error> {
-        let instruction_result = frame_result.instruction_result();
-
-        // All regular gas was forwarded to the first frame: consume it on the
-        // transaction-level gas; the settle below returns the frame's unused
-        // part.
-        parent_gas.spend_all();
-
-        // Settle the frame into the transaction-level gas like a parent frame.
-        handle_reservoir_remaining_gas(
-            instruction_result,
-            parent_gas,
-            frame_result.gas_mut().tracker_mut(),
-        );
-
-        // Refund the EIP-2780 refundable first-frame charge when no account
-        // leaf was created, exactly like `EthFrame::return_result` refunds
-        // the upfront CALL/CREATE state charges of inner frames.
-        if let Some(charge) = frame_result.refundable_state_gas_charge() {
-            // A failure the frame already recorded (a failed code deposit lookup, say) is
-            // returned first, as `EthFrame::return_result` does for inner frames, so a failing
-            // refund lookup cannot overwrite it.
-            take_error::<Self::Error, _>(evm.ctx().error())?;
-            // Priced through the same hook the charge went through. A failed lookup surfaces as
-            // an external error: the hook recorded the cause.
-            let Some(charge) = evm.ctx().state_gas_charge(charge) else {
-                take_error::<Self::Error, _>(evm.ctx().error())?;
-                return Err(Self::Error::from_string(
-                    "state gas price lookup failed".to_string(),
-                ));
-            };
-            parent_gas.refill_reservoir(charge);
-            // Unlike an inner frame's caller, the transaction ends here: an
-            // exceptional halt consumes all regular gas, including the
-            // spilled portion the refill just credited back to `remaining`.
-            if instruction_result.is_halt() {
-                parent_gas.spend_all();
-            }
-        }
+        // Settle the frame into the transaction-level gas like a parent frame, and refund what
+        // its failure gives back; then close the transaction's start.
+        let held_reservoir = parent_gas.reservoir();
+        execution::settle_first_frame::<_, Self::Error>(evm.ctx(), frame_result, parent_gas)?;
+        lifecycle::close_transaction_start(evm, frame_result, parent_gas, held_reservoir)?;
 
         // The frame result carries the transaction-level gas onward to the
         // post-execution phase.
@@ -589,7 +577,10 @@ pub trait Handler {
                         ItemOrResult::Result(result) => result,
                     }
                 }
-                ItemOrResult::Result(result) => result,
+                ItemOrResult::Result(mut result) => {
+                    evm.frame_run_result(&mut result)?;
+                    result
+                }
             };
 
             if let Some(result) = evm.frame_return_result(result)? {
@@ -655,6 +646,11 @@ pub trait Handler {
     ///
     /// This method, retrieves the final state from the journal, converts internal results to the external output format.
     /// Internal state is cleared and EVM is prepared for the next transaction.
+    ///
+    /// It is the start lifecycle's successful boundary: after the recorded error is
+    /// taken, every start the transaction opened must have settled
+    /// ([`lifecycle::finish_transaction`]), or the transaction fails with a fatal
+    /// error. An override makes the same call in the same place.
     #[inline]
     fn execution_result(
         &mut self,
@@ -663,6 +659,8 @@ pub trait Handler {
         result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         take_error::<Self::Error, _>(evm.ctx().error())?;
+        // The successful boundary: every start the transaction opened has settled.
+        lifecycle::finish_transaction(evm)?;
 
         let exec_result = post_execution::output(evm.ctx(), result, result_gas);
 
@@ -678,12 +676,18 @@ pub trait Handler {
     ///
     /// Ensures the journal state is properly cleared before propagating the error.
     /// On happy path journal is cleared in [`Handler::execution_result`] method.
+    ///
+    /// It is the start lifecycle's fatal boundary: the starts still open are
+    /// discarded ([`lifecycle::discard_transaction`]) in the cleanup every error
+    /// reaches. An override makes the same call in its cleanup.
     #[inline]
     fn catch_error(
         &self,
         evm: &mut Self::Evm,
         error: Self::Error,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
+        // The fatal boundary: the starts still open are discarded.
+        lifecycle::discard_transaction(evm);
         // clean up local context. Initcode cache needs to be discarded.
         evm.ctx().local_mut().clear();
         evm.ctx().journal_mut().discard_tx();

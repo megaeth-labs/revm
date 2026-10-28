@@ -2,11 +2,11 @@ use context::{ContextTr, FrameStack, JournalTr};
 use handler::{
     evm::{ContextDbError, FrameInitResult, FrameTr},
     instructions::InstructionProvider,
-    EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult,
+    lifecycle, EthFrame, EvmTr, FrameInitOrResult, FrameResult, ItemOrResult,
 };
 use interpreter::{
-    interpreter::EthInterpreter, interpreter_action::FrameInit, CallOutcome, FrameInput,
-    InterpreterTypes,
+    interpreter::EthInterpreter, interpreter_action::FrameInit, interpreter_types::LoopControl,
+    CallOutcome, FrameInput, InterpreterTypes,
 };
 
 use crate::{
@@ -95,14 +95,27 @@ pub trait InspectorEvmTr:
     }
 
     /// Initializes the frame for the given frame input. Frame is pushed to the frame stack.
+    ///
+    /// A new frame is handed to [`Inspector::initialize_interp`] unless its next action is
+    /// already set ([`EvmTr::frame_init`] set it): its first run returns that action before any
+    /// instruction, and the inspector may not replace it.
     #[inline]
     fn inspect_frame_init(
         &mut self,
         mut frame_init: <Self::Frame as FrameTr>::FrameInit,
     ) -> Result<FrameInitResult<'_, Self::Frame>, ContextDbError<Self::Context>> {
-        let (ctx, inspector) = self.ctx_inspector();
+        let (ctx, _, _, frame_stack, inspector) = self.all_mut_inspector();
         if let Some(mut output) = frame_start(ctx, inspector, &mut frame_init.frame_input) {
+            // The inspector answered the start revm opened for this init.
+            let start = frame_stack.pending_start();
+            if let Some(start) = &start {
+                lifecycle::mark_for_end_callbacks(&mut output, start);
+            }
             frame_end(ctx, inspector, &frame_init.frame_input, &mut output);
+            if let Some(start) = start {
+                start.set_inspector_answer();
+                lifecycle::check_end_callbacks(&output, start);
+            }
             return Ok(ItemOrResult::Result(output));
         }
 
@@ -126,7 +139,14 @@ pub trait InspectorEvmTr:
                     inspector.log(ctx, log);
                 }
             }
+            if let Some(start) = self.frame_stack().pending_start() {
+                lifecycle::mark_for_end_callbacks(&mut output, start);
+            }
+            let (ctx, inspector) = self.ctx_inspector();
             frame_end(ctx, inspector, &frame_input, &mut output);
+            if let Some(start) = self.frame_stack().pending_start() {
+                lifecycle::check_end_callbacks(&output, start);
+            }
             return Ok(ItemOrResult::Result(output));
         }
 
@@ -137,14 +157,21 @@ pub trait InspectorEvmTr:
         }
         if let Some(frame) = frame.eth_frame() {
             let interp = &mut frame.interpreter;
-            inspector.initialize_interp(interp, ctx);
+            if interp.bytecode.is_not_end() {
+                inspector.initialize_interp(interp, ctx);
+            }
         };
         Ok(ItemOrResult::Item(frame))
     }
 
     /// Run the frame from the top of the stack. Returns the frame init or result.
     ///
-    /// If frame has returned result it would mark it as finished.
+    /// If frame has returned result it would hand it to [`EvmTr::frame_run_result`], then to the
+    /// inspector's `frame_end`, and mark the frame as finished. A frame without an `EthFrame` is
+    /// run by [`EvmTr::frame_run`], and its result handed to [`EvmTr::frame_run_result`] only.
+    ///
+    /// A frame init it returns opens the child's start, as [`EvmTr::frame_run`] does
+    /// ([`lifecycle::open_frame_start`]).
     #[inline]
     fn inspect_frame_run(
         &mut self,
@@ -152,7 +179,11 @@ pub trait InspectorEvmTr:
         let (ctx, inspector, frame, instructions) = self.ctx_inspector_frame_instructions();
 
         let Some(frame) = frame.eth_frame() else {
-            return self.frame_run();
+            let mut result = self.frame_run()?;
+            if let ItemOrResult::Result(frame_result) = &mut result {
+                self.frame_run_result(frame_result)?;
+            }
+            return Ok(result);
         };
 
         let next_action = inspect_instructions(
@@ -163,13 +194,25 @@ pub trait InspectorEvmTr:
             instructions.gas_table(),
         );
         let mut result = frame.process_next_action(ctx, next_action);
+        // revm consumed the frame's `NewFrame` action: the child's start opens.
+        if let Ok(ItemOrResult::Item(init)) = &result {
+            lifecycle::open_frame_start(self, init)?;
+        }
 
         if let Ok(ItemOrResult::Result(frame_result)) = &mut result {
+            self.frame_run_result(frame_result)?;
+            // The result settles the start the frame runs for.
+            if let Some(start) = self.frame_stack().running_start() {
+                lifecycle::mark_for_end_callbacks(frame_result, start);
+            }
             let (ctx, inspector, frame) = self.ctx_inspector_frame();
             // TODO When all_mut fn is added we can fetch inspector at the top of the function.s
             if let Some(frame) = frame.eth_frame() {
                 frame_end(ctx, inspector, &frame.input, frame_result);
                 frame.set_finished(true);
+            }
+            if let Some(start) = self.frame_stack().running_start() {
+                lifecycle::check_end_callbacks(frame_result, start);
             }
         };
         result

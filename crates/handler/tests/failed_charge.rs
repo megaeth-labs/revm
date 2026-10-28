@@ -92,7 +92,10 @@ impl Handler for Observer {
                     ItemOrResult::Item(_) => continue,
                     ItemOrResult::Result(result) => result,
                 },
-                ItemOrResult::Result(result) => result,
+                ItemOrResult::Result(mut result) => {
+                    evm.frame_run_result(&mut result)?;
+                    result
+                }
             };
             record(&result);
             if let Some(result) = evm.frame_return_result(result)? {

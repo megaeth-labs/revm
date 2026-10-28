@@ -1726,6 +1726,33 @@ mod tests {
         );
     }
 
+    /// A forward of 98/100 of the regular gas to a child, `remaining - remaining * 2 / 100` rounded
+    /// down, is upstream's `call_stipend_reduction` with the quotient 50 in place of EIP-150's 64:
+    /// the two agree on every amount, so a chain that forwards 98/100 of its regular gas needs no
+    /// fork change, only the schedule entry.
+    #[test]
+    fn test_a_call_stipend_reduction_of_50_forwards_98_per_cent() {
+        let mut params = GasParams::new_spec(SpecId::OSAKA);
+        params.override_gas([(GasId::call_stipend_reduction(), 50)]);
+        let ninety_eight =
+            |remaining: u64| (remaining as u128 - remaining as u128 * 2 / 100) as u64;
+        let amounts = (0..10_000)
+            .chain([1_000_000, 16_777_216, 30_000_000, 1 << 40])
+            .chain([u64::MAX - 49, u64::MAX - 1, u64::MAX]);
+        for remaining in amounts {
+            assert_eq!(
+                params.call_stipend_reduction(remaining),
+                ninety_eight(remaining),
+                "{remaining}"
+            );
+        }
+        // Worked examples: 98% of 1,000 is 980; of 1,049 is 1,028.02, and the rule keeps 1,029: it
+        // takes 2% rounded down (20) away.
+        assert_eq!(params.call_stipend_reduction(1_000), 980);
+        assert_eq!(params.call_stipend_reduction(1_049), 1_029);
+        assert_eq!(params.call_stipend_reduction(99), 98);
+    }
+
     #[test]
     fn test_max_refund_quotient_defaults_and_override() {
         let frontier = GasParams::new_spec(SpecId::FRONTIER);

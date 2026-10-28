@@ -3,9 +3,13 @@
 use crate::{cfg::gas_params, cfg::GasParams, Transaction};
 use primitives::hardfork::SpecId;
 
+#[cfg(feature = "serde")]
+mod encoding;
 mod failed_charge;
+mod mark;
 mod withheld;
 
+pub use mark::{OutcomeMark, StartMark};
 pub use withheld::WithheldCrossing;
 
 /// Tracker for gas during execution.
@@ -55,8 +59,26 @@ pub use withheld::WithheldCrossing;
 /// checks it. Above it, a rollback no longer restores the reservoir exactly and can burn or mint
 /// gas at the boundary. Reaching it takes a transaction gas limit above `i64::MAX`
 /// (about 9.2 × 10^18).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+///
+/// Encoded, the tracker has a field per figure, in the order below; the failed-charge record,
+/// a number and a flag in memory, is encoded as an optional number in its place.
+///
+/// A field the fork added decodes with its default from an encoding made before it existed only
+/// in a format that carries field names, such as JSON, as each field says. A format that encodes
+/// a struct by position, such as bincode, cannot read an encoding made before a field was added,
+/// as with upstream's own field additions: it reads the old fields in their places and then
+/// looks for the new ones, so a tracker persisted in such a format must not cross an upgrade of
+/// this crate that adds a field.
+///
+/// The tracker also carries the [`StartMark`] revm writes on a frame result's tracker before an
+/// inspector's end callbacks. The mark is no part of the tracker's value: equality, hashing, the
+/// debug output and the encoding leave it out, and a decoded tracker carries none.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(from = "encoding::Encoded", into = "encoding::Encoded")
+)]
 pub struct GasTracker {
     /// Gas Limit,
     gas_limit: u64,
@@ -105,8 +127,8 @@ pub struct GasTracker {
     /// `code_deposit_history_gas` a price, so a chain that does not price history bytes behaves
     /// exactly as it did before this field existed.
     ///
-    /// Encodings made before this field existed decode it as zero.
-    #[cfg_attr(feature = "serde", serde(default))]
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
     history_gas_spent: i64,
     /// Refunded gas. Used to refund the gas to the caller at the end of execution.
     refunded: i64,
@@ -117,8 +139,8 @@ pub struct GasTracker {
     /// but never by a regular charge. Zero unless a consumer withholds gas; while it is zero, every
     /// method behaves as it did before this field existed.
     ///
-    /// Encodings made before this field existed decode it as zero.
-    #[cfg_attr(feature = "serde", serde(default))]
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
     withheld: u64,
     /// The record of the last failed regular charge the withheld part would have paid
     /// ([`withheld_crossing`](Self::withheld_crossing)): the regular gas left before that
@@ -131,14 +153,41 @@ pub struct GasTracker {
     /// position, such as bincode, cannot tell the two records apart and reads the old one as the
     /// regular gas left, so a record persisted in such a format must not cross an upgrade of this
     /// crate.
-    #[cfg_attr(feature = "serde", serde(default))]
     withheld_crossing: Option<WithheldCrossing>,
     /// The regular gas left, spendable and withheld parts together, before the last charge that
-    /// failed ([`failed_charge_remaining`](Self::failed_charge_remaining)).
+    /// failed ([`failed_charge_remaining`](Self::failed_charge_remaining)), if
+    /// `failed_charge_recorded` is set, and zero otherwise.
     ///
-    /// Encodings made before this field existed decode it as `None`.
-    #[cfg_attr(feature = "serde", serde(default))]
-    failed_charge_remaining: Option<u64>,
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as `None`.
+    failed_charge_remaining: u64,
+    /// Whether `failed_charge_remaining` holds a record. A flag apart from the record rather than
+    /// an `Option`, whose tag would take a word of its own, so it shares a word with
+    /// `start_mark`.
+    failed_charge_recorded: bool,
+    /// The start revm marked this tracker for ([`start_mark`](Self::start_mark)). It fits padding
+    /// the tracker already had, in the word `failed_charge_recorded` takes, so the tracker's size
+    /// is unchanged. No part of the tracker's value, and not encoded.
+    start_mark: StartMark,
+}
+
+impl core::fmt::Debug for GasTracker {
+    /// The output the derive gives the tracker's figures, in their order; the mark is left out.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GasTracker")
+            .field("gas_limit", &self.gas_limit)
+            .field("remaining", &self.remaining)
+            .field("reservoir", &self.reservoir)
+            .field("state_gas_spent", &self.state_gas_spent)
+            .field("state_gas_spilled", &self.state_gas_spilled)
+            .field("history_gas_spent", &self.history_gas_spent)
+            .field("refunded", &self.refunded)
+            .field("withheld", &self.withheld)
+            .field("withheld_crossing", &self.withheld_crossing)
+            .field("failed_charge_remaining", &self.failed_charge_remaining)
+            .field("failed_charge_recorded", &self.failed_charge_recorded)
+            .finish()
+    }
 }
 
 impl GasTracker {
@@ -155,8 +204,24 @@ impl GasTracker {
             refunded: 0,
             withheld: 0,
             withheld_crossing: None,
-            failed_charge_remaining: None,
+            failed_charge_remaining: 0,
+            failed_charge_recorded: false,
+            start_mark: StartMark::NONE,
         }
+    }
+
+    /// The start revm marked this tracker for before an inspector's end callbacks, or
+    /// [`StartMark::NONE`].
+    #[inline]
+    pub const fn start_mark(&self) -> StartMark {
+        self.start_mark
+    }
+
+    /// Marks this tracker for a start. revm marks a start's result before an inspector's end
+    /// callbacks and reads the mark after them; a consumer has no reason to set it.
+    #[inline]
+    pub const fn set_start_mark(&mut self, mark: StartMark) {
+        self.start_mark = mark;
     }
 
     /// Creates a new `GasTracker` with the given used gas and reservoir.
@@ -679,6 +744,25 @@ mod tests {
         parent.absorb_returned_reservoir(child.reservoir());
         assert_eq!(parent.history_gas_spent(), 0);
         assert_eq!(parent.reservoir(), 500);
+    }
+
+    /// A returned reservoir replaces the caller's, once it has unwound the caller's outstanding
+    /// spill, last in first out: what the caller held beside it does not stay.
+    #[test]
+    fn test_a_returned_reservoir_replaces_the_callers() {
+        // The caller holds the 1,000 it gave the child, which returns 700 of it.
+        let mut caller = GasTracker::new(1_000, 1_000, 1_000);
+        caller.absorb_returned_reservoir(700);
+        assert_eq!((caller.reservoir(), caller.remaining()), (700, 1_000));
+
+        // A spill of 150 outstanding (a successful child's, merged before the absorb): the
+        // returned 100 unwinds 100 of it, and the 20 the caller held goes with the replace.
+        let mut spilled = GasTracker::new(1_000, 850, 20);
+        spilled.add_state_gas_spilled(150);
+        spilled.absorb_returned_reservoir(100);
+        assert_eq!(spilled.reservoir(), 0);
+        assert_eq!(spilled.remaining(), 950);
+        assert_eq!(spilled.state_gas_spilled(), 50);
     }
 
     /// Copying the counter through its getter and setter, as `PrecompileOutput` does for state gas,

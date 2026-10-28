@@ -1,4 +1,4 @@
-use crate::{Gas, InstructionResult, InterpreterResult};
+use crate::{Gas, InstructionResult, InterpreterResult, OutcomeMark};
 use primitives::{Address, Bytes};
 
 /// Represents the outcome of a create operation in an interpreter.
@@ -6,7 +6,7 @@ use primitives::{Address, Bytes};
 /// This struct holds the result of the operation along with an optional address.
 ///
 /// It provides methods to determine the next action based on the result of the operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CreateOutcome {
     /// The result of the interpreter operation
@@ -23,9 +23,29 @@ pub struct CreateOutcome {
     /// was taken even when the price varies per account. Meaningless while
     /// `charged_create_state_gas` is `false`.
     ///
-    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_state_gas_address: Address,
+    /// The start revm marked this outcome for before an inspector's end callbacks
+    /// ([`OutcomeMark`]): none on an outcome a constructor builds. No part of the outcome's value:
+    /// equality, the debug output and the encoding leave it out, and a decoded outcome carries
+    /// none.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub start_mark: OutcomeMark,
+}
+
+impl core::fmt::Debug for CreateOutcome {
+    /// The output the derive gives the outcome's other fields, in their order; the mark is left
+    /// out.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CreateOutcome")
+            .field("result", &self.result)
+            .field("address", &self.address)
+            .field("charged_create_state_gas", &self.charged_create_state_gas)
+            .field("charged_state_gas_address", &self.charged_state_gas_address)
+            .finish()
+    }
 }
 
 impl CreateOutcome {
@@ -45,6 +65,7 @@ impl CreateOutcome {
             address,
             charged_create_state_gas: false,
             charged_state_gas_address: Address::ZERO,
+            start_mark: OutcomeMark::NONE,
         }
     }
 

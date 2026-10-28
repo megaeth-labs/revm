@@ -5,8 +5,13 @@ pub use call_helpers::{
     load_account_delegated_handle_error, resize_memory,
 };
 
+use call_helpers::load_acc_and_calc_forward;
+
 use crate::{
-    instructions::utility::IntoAddress,
+    instructions::{
+        instruction_hooks::{cache_created_address, frame_starting},
+        utility::IntoAddress,
+    },
     interpreter_action::FrameInput,
     interpreter_types::{
         InputsTr, InterpreterTypes as ITy, LoopControl, MemoryTr, ReturnData, RuntimeFlag, StackTr,
@@ -16,6 +21,7 @@ use crate::{
 };
 use context_interface::{
     cfg::{GasId, StateGasCharge, StateGasSite},
+    host::{FrameStart, FrameStartKind},
     CreateScheme,
 };
 use primitives::{
@@ -146,6 +152,12 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
             create_inputs.set_charged_create_state_gas(true);
             create_inputs.set_charged_state_gas_address(created_address);
         }
+    } else {
+        cache_created_address(
+            context.host,
+            &create_inputs,
+            context.interpreter.input.depth(),
+        )?;
     }
 
     let mut gas_limit = context.interpreter.gas.remaining();
@@ -170,8 +182,22 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
         return Err(InstructionResult::OutOfGas);
     }
 
+    let kind = if IS_CREATE2 {
+        FrameStartKind::Create2
+    } else {
+        FrameStartKind::Create
+    };
+    let start = FrameStart::new(
+        kind,
+        create_inputs.caller(),
+        create_inputs.cached_created_address(),
+        value,
+        gas_limit,
+    );
+    let reservoir = frame_starting(&mut context.interpreter.gas, context.host, start)?;
+
     create_inputs.set_gas_limit(gas_limit);
-    create_inputs.set_reservoir(context.interpreter.gas.reservoir());
+    create_inputs.set_reservoir(reservoir);
     context
         .interpreter
         .bytecode
@@ -215,8 +241,8 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
         get_memory_input_and_out_ranges(context.interpreter, context.host.gas_params())?;
 
     let is_call = KIND == CALL;
-    let (gas_limit, bytecode, bytecode_hash, charged_new_account_state_gas) =
-        load_acc_and_calc_gas(&mut context, to, has_transfer, is_call, local_gas_limit)?;
+    let (gas_limit, bytecode, bytecode_hash, charged_new_account_state_gas, forward) =
+        load_acc_and_calc_forward(&mut context, to, has_transfer, is_call, local_gas_limit)?;
 
     let target_address = if matches!(KIND, CALLCODE | DELEGATECALL) {
         context.interpreter.input.target_address()
@@ -242,6 +268,16 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
     };
     let is_static = context.interpreter.runtime_flag.is_static() || KIND == STATICCALL;
 
+    let kind = match KIND {
+        CALL => FrameStartKind::Call,
+        CALLCODE => FrameStartKind::CallCode,
+        DELEGATECALL => FrameStartKind::DelegateCall,
+        _ => FrameStartKind::StaticCall,
+    };
+    let transferred = value.transfer().unwrap_or_default();
+    let start = FrameStart::new(kind, caller, Some(target_address), transferred, forward);
+    let reservoir = frame_starting(&mut context.interpreter.gas, context.host, start)?;
+
     // Call host to interact with target contract
     context
         .interpreter
@@ -258,7 +294,7 @@ pub fn call<const KIND: u8, IT: ITy, H: Host + ?Sized>(mut context: Ictx<'_, H, 
                 scheme,
                 is_static,
                 return_memory_offset,
-                reservoir: context.interpreter.gas.reservoir(),
+                reservoir,
                 charged_new_account_state_gas,
             },
         ))));
