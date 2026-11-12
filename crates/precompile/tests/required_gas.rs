@@ -250,7 +250,7 @@ fn made_inputs(id: &PrecompileId, rng: &mut StdRng) -> Vec<Vec<u8>> {
             let mut high_exp = modexp_input(rng, small(1), small(40), small(1), 42);
             high_exp[96 + 1] = 0xff;
             inputs.push(high_exp);
-            // Sizes EIP-7823 refuses under Osaka, between the two gas checks.
+            // Sizes EIP-7823 refuses under Osaka, after the formula price is charged.
             for (base, exp, modulus) in [(1_025, 1, 1), (1, 1_025, 1), (1, 1, 1_025)] {
                 inputs.push(modexp_input(
                     rng,
@@ -452,12 +452,12 @@ fn malformed_inputs_price_as_documented() {
         Some(7)
     );
 
-    // `MODEXP` sizes refused between its two gas checks: the first gas check's minimum.
+    // `MODEXP` under Osaka prices oversized lengths before checking its size bound.
     let mut rng = StdRng::seed_from_u64(2);
     let too_big = modexp_input(&mut rng, U256::from(1_025), U256::from(1), U256::from(1), 8);
-    assert_eq!(modexp::OSAKA.required_gas(&too_big), Some(500));
+    assert_eq!(modexp::OSAKA.required_gas(&too_big), Some(33_282));
     let unaddressable = modexp_input(&mut rng, U256::MAX, U256::from(1), U256::from(1), 8);
-    assert_eq!(modexp::OSAKA.required_gas(&unaddressable), Some(500));
+    assert_eq!(modexp::OSAKA.required_gas(&unaddressable), Some(u64::MAX));
     assert_eq!(modexp::BERLIN.required_gas(&unaddressable), Some(200));
     assert_eq!(modexp::BYZANTIUM.required_gas(&unaddressable), Some(0));
 }
@@ -490,7 +490,7 @@ fn every_set_prices_with_its_own_schedule() {
     assert_eq!(modexp_price(PrecompileSpecId::BYZANTIUM), Some(0));
     assert_eq!(modexp_price(PrecompileSpecId::BERLIN), Some(200));
     assert_eq!(modexp_price(PrecompileSpecId::PRAGUE), Some(200));
-    assert_eq!(modexp_price(PrecompileSpecId::OSAKA), Some(500));
+    assert_eq!(modexp_price(PrecompileSpecId::OSAKA), Some(u64::MAX));
 
     let p256 = |spec| {
         Precompiles::new(spec)
