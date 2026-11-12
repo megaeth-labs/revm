@@ -239,9 +239,8 @@ where
         U256::from_be_bytes(out.into_owned())
     };
 
-    // Osaka's formula is even above its minimum, so u64::MAX can only mean a saturated price.
     let gas_cost = calc_gas(base_len64, exp_len64, mod_len64, &exp_highp);
-    if gas_cost > gas_limit || (OSAKA && gas_cost == u64::MAX) {
+    if gas_cost > gas_limit {
         return Err(PrecompileHalt::OutOfGas);
     }
 
@@ -661,13 +660,19 @@ mod tests {
                     .into_iter()
                     .flat_map(|len| len.to_be_bytes::<32>())
                     .collect();
-                for gas in [0, 499, 500, 100_000, u64::MAX - 1, u64::MAX] {
+                for gas in [0, 499, 500, 100_000, u64::MAX - 1] {
                     assert_eq!(
                         osaka_run(&input, gas),
                         Err(PrecompileHalt::OutOfGas),
                         "position={position}, length={length}, gas={gas}"
                     );
                 }
+                // Like go-ethereum, a u64::MAX gas limit pays the saturated price before the bound.
+                assert_eq!(
+                    osaka_run(&input, u64::MAX),
+                    Err(PrecompileHalt::ModexpEip7823LimitSize),
+                    "position={position}, length={length}"
+                );
                 assert_eq!(OSAKA.required_gas(&input), Some(u64::MAX));
             }
         }

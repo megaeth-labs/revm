@@ -7,16 +7,13 @@
 //!
 //! # Contract
 //!
-//! `required_gas(input) == Some(price)` with `price < u64::MAX` guarantees, for every gas limit `g`:
+//! `required_gas(input) == Some(price)` guarantees, for every gas limit `g`:
 //!
 //! - [`Precompile::execute`] with `g` halts with
 //!   [`PrecompileHalt::OutOfGas`](crate::PrecompileHalt::OutOfGas) if and only if
 //!   `g < price`;
 //! - with `g >= price` the run's result is the same for every `g`, and a run that succeeds or
 //!   reverts uses exactly `price`.
-//!
-//! A price saturated to `u64::MAX` can represent a charge beyond any gas limit. Osaka `MODEXP`
-//! halts out of gas for such a price even when given `u64::MAX` gas.
 //!
 //! So `price` is both what the call charges and the least gas limit it runs on. An input that
 //! fails a check, a malformed one, keeps the contract too:
@@ -30,7 +27,9 @@
 //!   BN254 pairing on a length that is not a multiple of 192 bytes, KZG point evaluation on any
 //!   malformed input, a `BLAKE2F` final-block flag other than 0 or 1;
 //! - Osaka `MODEXP` prices every header by its formula before checking EIP-7823's bound, with
-//!   each length saturated to 64 bits. Earlier schedules refuse a base or modulus length that
+//!   each length saturated to 64 bits. A formula price saturated to `u64::MAX` passes the gas
+//!   check at that exact gas limit and then fails the size bound.
+//!   Earlier schedules refuse a base or modulus length that
 //!   does not fit `usize` between the two gas checks, so those inputs keep the first check's
 //!   minimum price, 0 under Byzantium or 200 under Berlin.
 //!
@@ -172,12 +171,10 @@ impl Precompile {
     /// Returns the gas a call with `input` needs, without running the precompile, or `None` when
     /// the precompile has no price function.
     ///
-    /// `Some(price)` with `price < u64::MAX` guarantees, for every gas limit `g`:
-    /// [`execute`](Self::execute) with `g` halts with
-    /// [`PrecompileHalt::OutOfGas`](crate::PrecompileHalt::OutOfGas) if and only if `g < price`,
-    /// and with `g >= price` its result is the same for every `g`, a success or a revert using
-    /// exactly `price`. A saturated `u64::MAX` price can exceed every gas limit.
-    /// An input a check refuses before any gas check prices at `0`.
+    /// `Some(price)` guarantees, for every gas limit `g`: [`execute`](Self::execute) with `g`
+    /// halts with [`PrecompileHalt::OutOfGas`](crate::PrecompileHalt::OutOfGas) if and only if
+    /// `g < price`, and with `g >= price` its result is the same for every `g`, a success or a
+    /// revert using exactly `price`. An input a check refuses before any gas check prices at `0`.
     /// See the [module documentation](self) for the malformed inputs of each precompile.
     #[inline]
     pub fn required_gas(&self, input: &[u8]) -> Option<u64> {
