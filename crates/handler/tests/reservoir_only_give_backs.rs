@@ -515,7 +515,8 @@ fn test_a_reverting_child_returns_its_regular_paid_charge_as_reservoir() {
 
 /// A child that pays a fresh slot from regular gas and halts returns the reservoir it received,
 /// with the switch on as with it off: what regular gas paid is consumed with its regular gas, and
-/// its caller ends as it does without the switch.
+/// its caller ends with the pools it has without the switch. With the switch on the caller counts
+/// what the halted child's regular gas paid, and that the halt consumed it.
 #[test]
 fn test_a_halting_child_returns_the_reservoir_it_received() {
     let contract = || Code::default().call(Some(500_000), CHILD, 0).op(STOP);
@@ -526,7 +527,27 @@ fn test_a_halting_child_returns_the_reservoir_it_received() {
     assert_eq!(upstream.child().result, InstructionResult::InvalidFEOpcode);
     assert_eq!(upstream.top().gas.reservoir(), 0);
     assert_eq!(pools(&reservoir_only.top().gas), pools(&upstream.top().gas));
-    assert_eq!(reservoir_only.top().gas.state_gas_spilled(), 0);
+    assert_eq!(reservoir_only.top().gas.state_gas_spilled(), SSTORE_SET);
+    assert_eq!(reservoir_only.top().gas.halted_regular_paid(), SSTORE_SET);
+    assert_eq!(upstream.top().gas.state_gas_spilled(), 0);
+}
+
+/// A creation whose init code pays a fresh slot from regular gas before it halts: the frame's own
+/// count joins the transaction's at the settlement, and the created account's state gas still
+/// comes back for exactly the part the reservoir paid of it, read off what regular gas paid before
+/// the frame, not off the count the frame added to.
+#[test]
+fn test_a_halting_first_frame_that_paid_a_slot_gives_back_only_what_the_reservoir_paid() {
+    let reservoir = NEW_ACCOUNT / 3;
+    let init_code = Code::default().sstore(1).op(INVALID).0;
+    for setting in [UPSTREAM, RESERVOIR_ONLY] {
+        let run = run(
+            context(db(Code::default(), 0, Code::default()), setting),
+            tx(TxKind::Create, init_code.clone(), REGULAR_CAP + reservoir),
+        );
+        assert_eq!(run.top().result, InstructionResult::InvalidFEOpcode);
+        assert_eq!(pools(&run.settled), (0, reservoir), "{setting:?}");
+    }
 }
 
 /// A creation transaction whose frame halts gives back, with the switch on, the part of its

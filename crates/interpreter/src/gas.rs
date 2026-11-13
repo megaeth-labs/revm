@@ -236,6 +236,13 @@ impl Gas {
         self.tracker.refill_reservoir(amount);
     }
 
+    /// The part of [`state_gas_spilled`](Self::state_gas_spilled) halts below this frame already
+    /// consumed. See [`GasTracker::halted_regular_paid`].
+    #[inline]
+    pub const fn halted_regular_paid(&self) -> u64 {
+        self.tracker.halted_regular_paid()
+    }
+
     /// Consumes, after the rollback of a frame that halts, the part of its charges regular gas
     /// paid. See [`GasTracker::consume_regular_paid_charges`].
     #[inline]

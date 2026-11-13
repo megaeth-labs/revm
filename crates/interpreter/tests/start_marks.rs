@@ -11,12 +11,12 @@ use revm_interpreter::{
 const TRACKER: &str = "GasTracker { gas_limit: 100, remaining: 90, reservoir: 5, \
     state_gas_spent: 0, state_gas_spilled: 0, history_gas_spent: 0, refunded: 3, withheld: 0, \
     withheld_crossing: None, failed_charge_remaining: 0, failed_charge_recorded: false, \
-    reservoir_only_give_backs: false }";
+    reservoir_only_give_backs: false, halted_regular_paid: 0 }";
 const RESULT: &str = "InterpreterResult { result: Stop, output: 0x, gas: Gas { tracker: \
     GasTracker { gas_limit: 10, remaining: 10, reservoir: 0, state_gas_spent: 0, \
     state_gas_spilled: 0, history_gas_spent: 0, refunded: 0, withheld: 0, withheld_crossing: \
     None, failed_charge_remaining: 0, failed_charge_recorded: false, \
-    reservoir_only_give_backs: false }, memory: MemoryGas { \
+    reservoir_only_give_backs: false, halted_regular_paid: 0 }, memory: MemoryGas { \
     words_num: 0, expansion_cost: 0 } } }";
 
 const fn tracker() -> GasTracker {

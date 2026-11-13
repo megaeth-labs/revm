@@ -679,10 +679,14 @@ pub const fn handle_reservoir_remaining_gas(
     // Merge the settled child into the parent.
     if instruction_result.is_ok_or_revert() {
         parent_gas.erase_cost(child_gas.remaining());
-        // What the child's regular gas paid for state and history: on a success, so a later
-        // rollback of the parent can return it; on a revert, only with give-backs to the
-        // reservoir alone, where the rollback kept the count and returned the charges in the
-        // reservoir. A revert's rollback zeroes it otherwise, and a halt's consumption always.
+    }
+    // What the child's regular gas paid for state and history. With give-backs to the reservoir
+    // alone, however the child ended: no give-back lowers the count, and a halt's part comes with
+    // the record that the halt consumed it. Otherwise on a success, so a later rollback of the
+    // parent can return it; a failure's rollback zeroed it.
+    if child_gas.reservoir_only_give_backs() {
+        parent_gas.add_regular_paid_of(child_gas);
+    } else if instruction_result.is_ok_or_revert() {
         parent_gas.add_state_gas_spilled(child_gas.state_gas_spilled());
     }
     if instruction_result.is_ok() {
@@ -1100,15 +1104,15 @@ mod tests {
 
     /// With give-backs to the reservoir alone a child that succeeds hands back what it left of
     /// both pools; one that reverts puts every charge it made, net of the give-backs it received,
-    /// into the reservoir it returns, and its caller counts what the child's regular gas paid as
-    /// its own; one that halts returns the reservoir it received and consumes its regular gas with
-    /// what it paid of the charges.
+    /// into the reservoir it returns; one that halts returns the reservoir it received and consumes
+    /// its regular gas with what it paid of the charges. However the child ends, its caller counts
+    /// what the child's regular gas paid as its own, and, after a halt, that the halt consumed it.
     #[test]
     fn test_with_give_backs_to_the_reservoir_a_failed_child_returns_its_charges_as_reservoir() {
         for (result, expected) in [
             (InstructionResult::Stop, (9_700, 50, 1_250, 300)),
             (InstructionResult::Revert, (9_700, 1_300, 0, 300)),
-            (InstructionResult::OutOfGas, (5_000, 1_000, 0, 0)),
+            (InstructionResult::OutOfGas, (5_000, 1_000, 0, 300)),
         ] {
             let mut parent = reservoir_only(10_000, 1_000);
             assert!(parent.record_regular_cost(5_000));
@@ -1120,6 +1124,8 @@ mod tests {
             handle_reservoir_remaining_gas(result, &mut parent, &mut child);
 
             assert_eq!(figures(&parent), expected, "{result:?}");
+            let consumed = if result.is_halt() { 300 } else { 0 };
+            assert_eq!(parent.halted_regular_paid(), consumed, "{result:?}");
         }
     }
 

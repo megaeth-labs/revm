@@ -2,7 +2,7 @@
 //!
 //! The switch that makes every give-back of state or history gas credit a [`GasTracker`]'s
 //! reservoir and never its regular gas, the count of what regular gas paid for state and history
-//! that a halt consumes, and the charge that takes a legacy share from regular gas before the
+//! and the part of it halts consumed, and the charge that takes a legacy share from regular gas before the
 //! reservoir. The tracker's own documentation describes how each give-back is credited with the
 //! switch on and off.
 
@@ -19,8 +19,9 @@ impl GasTracker {
     /// ([`absorb_returned_reservoir`](Self::absorb_returned_reservoir)) land in the reservoir, so a
     /// frame's `remaining` rises within the frame only by the regular gas a child returns.
     /// [`state_gas_spilled`](Self::state_gas_spilled) counts what regular gas paid of state and
-    /// history charges and no give-back lowers it. A halt consumes the frame's regular gas and
-    /// the part of its charges regular gas paid, and gives it back the reservoir it received
+    /// history charges in the frame and in the frames below it that returned to it, however they
+    /// ended, and no give-back lowers it. A halt consumes the frame's regular gas and the part of
+    /// its charges regular gas paid, and gives it back the reservoir it received
     /// ([`consume_regular_paid_charges`](Self::consume_regular_paid_charges)).
     #[inline]
     pub const fn reservoir_only_give_backs(&self) -> bool {
@@ -79,10 +80,21 @@ impl GasTracker {
         true
     }
 
+    /// The part of [`state_gas_spilled`](Self::state_gas_spilled) that halts below this frame
+    /// already consumed, with [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set:
+    /// what frames that halted paid of state and history gas from regular gas, which their halts
+    /// took out of the reservoirs they returned. Zero with it off.
+    #[inline]
+    pub const fn halted_regular_paid(&self) -> u64 {
+        self.halted_regular_paid
+    }
+
     /// Consumes, after [`rollback_state_gas`](Self::rollback_state_gas) of a frame that halts, the
-    /// part of its state and history charges regular gas paid: the reservoir gives up
-    /// `state_gas_spilled`, which is then zero, so it holds the reservoir the frame received, and
-    /// what regular gas paid is consumed with the regular gas the halt spends.
+    /// part of its state and history charges regular gas paid that no halt below it consumed yet:
+    /// the reservoir gives up `state_gas_spilled` less
+    /// [`halted_regular_paid`](Self::halted_regular_paid), so it holds the reservoir the frame
+    /// received, and what regular gas paid is consumed with the regular gas the halt spends. The
+    /// count stays, all of it now consumed, for the caller to add to its own.
     ///
     /// The rollback put every charge into the reservoir only with
     /// [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set. With it off the rollback
@@ -90,8 +102,28 @@ impl GasTracker {
     /// changes nothing.
     #[inline]
     pub const fn consume_regular_paid_charges(&mut self) {
-        self.reservoir = self.reservoir.saturating_sub(self.state_gas_spilled);
-        self.state_gas_spilled = 0;
+        if !self.reservoir_only_give_backs {
+            return;
+        }
+        let unconsumed = self
+            .state_gas_spilled
+            .saturating_sub(self.halted_regular_paid);
+        self.reservoir = self.reservoir.saturating_sub(unconsumed);
+        self.halted_regular_paid = self.state_gas_spilled;
+    }
+
+    /// Adds what a returning `child`'s regular gas paid of state and history gas to this frame's
+    /// count, with the part of it halts consumed, however the child ended
+    /// ([`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set): no give-back lowers
+    /// the count, and a halted child's part is spent like the rest.
+    #[inline]
+    pub const fn add_regular_paid_of(&mut self, child: &GasTracker) {
+        self.state_gas_spilled = self
+            .state_gas_spilled
+            .saturating_add(child.state_gas_spilled);
+        self.halted_regular_paid = self
+            .halted_regular_paid
+            .saturating_add(child.halted_regular_paid);
     }
 }
 
@@ -206,8 +238,9 @@ mod tests {
     }
 
     /// After a halting frame's rollback, consuming what regular gas paid leaves the reservoir the
-    /// frame received with the switch on, and changes nothing with it off, where the rollback
-    /// already credited it to regular gas.
+    /// frame received with the switch on, and keeps the count, all of it now consumed, for the
+    /// caller; with it off it changes nothing, where the rollback already credited the spill to
+    /// regular gas and zeroed it.
     #[test]
     fn test_a_halt_gives_back_the_reservoir_the_frame_received() {
         for on in [false, true] {
@@ -220,9 +253,48 @@ mod tests {
             gas.consume_regular_paid_charges();
             gas.spend_all();
             assert_eq!(gas.reservoir(), 100, "switch on: {on}");
-            assert_eq!(gas.state_gas_spilled(), 0, "switch on: {on}");
+            // Regular gas paid 200 and 50 past the reservoir, then the share of 80.
+            let paid = if on { 330 } else { 0 };
+            assert_eq!(gas.state_gas_spilled(), paid, "switch on: {on}");
+            assert_eq!(gas.halted_regular_paid(), paid, "switch on: {on}");
             assert_eq!(gas.remaining(), 0, "switch on: {on}");
         }
+    }
+
+    /// A halt consumes only what no halt below it consumed: a frame whose child halted adds the
+    /// child's count with the record that the child's halt consumed it, so its own halt leaves the
+    /// reservoir it received rather than taking the child's part out a second time.
+    #[test]
+    fn test_a_halt_after_a_halted_child_consumes_the_childs_part_once() {
+        let mut parent = tracker(10_000, 500, true);
+        // 500 from the reservoir, 200 from regular gas.
+        assert!(parent.record_state_cost(700));
+        let mut child = tracker(1_000, 0, true);
+        assert!(child.record_state_cost(40));
+        child.rollback_state_gas();
+        child.consume_regular_paid_charges();
+        child.spend_all();
+        assert_eq!(
+            (
+                child.reservoir(),
+                child.state_gas_spilled(),
+                child.halted_regular_paid()
+            ),
+            (0, 40, 40)
+        );
+
+        parent.add_regular_paid_of(&child);
+        assert_eq!(
+            (parent.state_gas_spilled(), parent.halted_regular_paid()),
+            (240, 40)
+        );
+        parent.rollback_state_gas();
+        parent.consume_regular_paid_charges();
+        assert_eq!(parent.reservoir(), 500, "the reservoir the parent received");
+        assert_eq!(
+            (parent.state_gas_spilled(), parent.halted_regular_paid()),
+            (240, 240)
+        );
     }
 
     /// A legacy share is paid from regular gas before the reservoir, which pays the rest; the

@@ -123,10 +123,11 @@ pub struct GasTracker {
     /// propagated to the parent frame so a later parent rollback can return it.
     ///
     /// With [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set it is the state and
-    /// history gas regular gas paid, a legacy share included: no give-back lowers it, and a child
-    /// that succeeds or reverts adds its own to its caller's, its reverted charges having gone into
-    /// the reservoir it returns. A halt takes it out of the reservoir and then zeroes it
-    /// ([`consume_regular_paid_charges`](Self::consume_regular_paid_charges)).
+    /// history gas regular gas paid in this frame and in every frame below it that returned to
+    /// it, a legacy share included: no give-back lowers it, and a child adds its own to its
+    /// caller's however it ends. A halt takes the part of it no halt below consumed yet out of the
+    /// reservoir ([`consume_regular_paid_charges`](Self::consume_regular_paid_charges),
+    /// [`halted_regular_paid`](Self::halted_regular_paid)).
     state_gas_spilled: u64,
     /// Net history gas spent so far.
     ///
@@ -191,6 +192,14 @@ pub struct GasTracker {
     /// In a format that carries field names, such as JSON, encodings made before this field existed
     /// decode it as `false`.
     reservoir_only_give_backs: bool,
+    /// With [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set, the part of
+    /// `state_gas_spilled` that halts already consumed: what frames below this one that halted, or
+    /// that returned to it from frames that halted below them, paid of state and history gas from
+    /// regular gas ([`halted_regular_paid`](Self::halted_regular_paid)). Zero with it off.
+    ///
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as zero.
+    halted_regular_paid: u64,
     /// The start revm marked this tracker for ([`start_mark`](Self::start_mark)). It fits padding
     /// the tracker already had, in the word `failed_charge_recorded` takes, so the tracker's size
     /// is unchanged. No part of the tracker's value, and not encoded.
@@ -213,6 +222,7 @@ impl core::fmt::Debug for GasTracker {
             .field("failed_charge_remaining", &self.failed_charge_remaining)
             .field("failed_charge_recorded", &self.failed_charge_recorded)
             .field("reservoir_only_give_backs", &self.reservoir_only_give_backs)
+            .field("halted_regular_paid", &self.halted_regular_paid)
             .finish()
     }
 }
@@ -234,6 +244,7 @@ impl GasTracker {
             failed_charge_remaining: 0,
             failed_charge_recorded: false,
             reservoir_only_give_backs: false,
+            halted_regular_paid: 0,
             start_mark: StartMark::NONE,
         }
     }

@@ -32,6 +32,8 @@ pub(super) struct Encoded {
     failed_charge_remaining: Option<u64>,
     #[serde(default)]
     reservoir_only_give_backs: bool,
+    #[serde(default)]
+    halted_regular_paid: u64,
 }
 
 impl From<GasTracker> for Encoded {
@@ -48,6 +50,7 @@ impl From<GasTracker> for Encoded {
             withheld_crossing: tracker.withheld_crossing,
             failed_charge_remaining: tracker.failed_charge_remaining(),
             reservoir_only_give_backs: tracker.reservoir_only_give_backs,
+            halted_regular_paid: tracker.halted_regular_paid,
         }
     }
 }
@@ -67,6 +70,7 @@ impl From<Encoded> for GasTracker {
             failed_charge_remaining: 0,
             failed_charge_recorded: false,
             reservoir_only_give_backs: encoded.reservoir_only_give_backs,
+            halted_regular_paid: encoded.halted_regular_paid,
             start_mark: super::StartMark::NONE,
         };
         tracker.set_failed_charge_remaining(encoded.failed_charge_remaining);
@@ -80,10 +84,16 @@ mod tests {
 
     /// A tracker with every field away from its default: part of its regular gas withheld, a
     /// crossing and a failed charge recorded, a state charge spilled past the reservoir, a
-    /// refund, and give-backs that credit the reservoir alone.
+    /// refund, give-backs that credit the reservoir alone, and a halted child's count.
     fn every_field_set() -> GasTracker {
         let mut tracker = GasTracker::new(1_000, 400, 300);
         tracker.set_reservoir_only_give_backs(true);
+        let mut halted = GasTracker::new(10, 10, 0);
+        halted.set_reservoir_only_give_backs(true);
+        assert!(halted.record_state_cost(4));
+        halted.rollback_state_gas();
+        halted.consume_regular_paid_charges();
+        tracker.add_regular_paid_of(&halted);
         tracker.withhold(100);
         assert!(!tracker.record_regular_cost(350));
         assert!(tracker.record_state_cost(500));
@@ -100,9 +110,9 @@ mod tests {
             serde_json::to_string(&every_field_set()).unwrap(),
             concat!(
                 r#"{"gas_limit":1000,"remaining":200,"reservoir":0,"state_gas_spent":500,"#,
-                r#""state_gas_spilled":200,"history_gas_spent":0,"refunded":-3,"withheld":0,"#,
+                r#""state_gas_spilled":204,"history_gas_spent":0,"refunded":-3,"withheld":0,"#,
                 r#""withheld_crossing":{"remaining":400},"failed_charge_remaining":400,"#,
-                r#""reservoir_only_give_backs":true}"#,
+                r#""reservoir_only_give_backs":true,"halted_regular_paid":4}"#,
             )
         );
         assert_eq!(
@@ -111,7 +121,7 @@ mod tests {
                 r#"{"gas_limit":1000,"remaining":1000,"reservoir":0,"state_gas_spent":0,"#,
                 r#""state_gas_spilled":0,"history_gas_spent":0,"refunded":0,"withheld":0,"#,
                 r#""withheld_crossing":null,"failed_charge_remaining":null,"#,
-                r#""reservoir_only_give_backs":false}"#,
+                r#""reservoir_only_give_backs":false,"halted_regular_paid":0}"#,
             )
         );
     }

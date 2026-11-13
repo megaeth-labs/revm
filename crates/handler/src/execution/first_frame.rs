@@ -48,6 +48,10 @@ where
 {
     let instruction_result = frame_result.instruction_result();
 
+    // What the transaction's regular gas paid of the charges made before the frame, read before
+    // the frame's own count joins it below.
+    let paid_before_the_frame = gas.state_gas_spilled();
+
     // All regular gas was forwarded to the first frame: consume it on the
     // transaction-level gas; the settle below returns the frame's unused
     // part.
@@ -79,11 +83,10 @@ where
         // With give-backs to the reservoir alone, the part of the charge regular gas paid stays
         // spent after a halt. The charge is the last one made before the frame, and every charge
         // made there draws the reservoir first, so that part is the last of what the
-        // transaction's regular gas paid for state and history, which the halted frame added
-        // nothing to. Without the switch the refill below credits that part to `remaining`, which
-        // the halt consumes.
+        // transaction's regular gas paid for state and history before the frame. Without the
+        // switch the refill below credits that part to `remaining`, which the halt consumes.
         let consumed = if instruction_result.is_halt() && gas.reservoir_only_give_backs() {
-            core::cmp::min(charge, gas.state_gas_spilled())
+            core::cmp::min(charge, paid_before_the_frame)
         } else {
             0
         };
