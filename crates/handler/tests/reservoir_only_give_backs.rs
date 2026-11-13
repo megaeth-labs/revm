@@ -6,8 +6,8 @@
 //! shares change, each against the same transaction without them.
 
 use bytecode::opcode::{
-    CALL, CODECOPY, CREATE, GAS, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH32, PUSH4, RETURN,
-    REVERT, SELFDESTRUCT, SSTORE, STOP,
+    CALL, CODECOPY, CREATE, GAS, INVALID, MSTORE, POP, PUSH0, PUSH1, PUSH20, PUSH4, RETURN, REVERT,
+    SELFDESTRUCT, SSTORE, STOP,
 };
 use context::{
     result::{EVMError, ExecutionResult, HaltReason},
