@@ -259,7 +259,11 @@ pub fn sstore<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Result {
                 .state_gas_charge(charge)
                 .ok_or(InstructionResult::FatalExternalError)?;
             if charges_state_gas {
-                state_gas!(context.interpreter, price);
+                let share = context
+                    .host
+                    .gas_params()
+                    .sstore_set_state_gas_legacy_share();
+                state_gas_with_legacy_share!(context.interpreter, price, share);
             }
             // EIP-8037 issue #2: 0→x→0 storage restoration refills the reservoir
             // directly rather than routing the state gas through the capped refund
@@ -397,7 +401,11 @@ pub fn selfdestruct<IT: ITy, H: Host + ?Sized>(context: Ictx<'_, H, IT>) -> Resu
             .host
             .state_gas_charge(charge)
             .ok_or(InstructionResult::FatalExternalError)?;
-        state_gas!(context.interpreter, price);
+        let share = context
+            .host
+            .gas_params()
+            .selfdestruct_new_account_state_gas_legacy_share();
+        state_gas_with_legacy_share!(context.interpreter, price, share);
     }
 
     if !res.previously_destroyed {

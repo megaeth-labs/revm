@@ -6,6 +6,7 @@ use primitives::hardfork::SpecId;
 #[cfg(feature = "serde")]
 mod encoding;
 mod failed_charge;
+mod give_backs;
 mod mark;
 mod withheld;
 
@@ -42,7 +43,8 @@ pub use withheld::WithheldCrossing;
 /// of them lands inside a frame rather than at a frame boundary: `SSTORE`'s refill when it
 /// restores a slot to its original zero (0→x→0). A consumer that holds the spendable part at an
 /// allowance limits it at a frame's start and again after each credit: when a child returns, and
-/// after `SSTORE`.
+/// after `SSTORE`. With [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set only the
+/// first of them credits regular gas.
 ///
 /// Releasing the withheld part ([`release_withheld`](Self::release_withheld)) is not needed to
 /// conserve gas: the gas a child returns is its [`remaining`](Self::remaining), withheld part
@@ -59,6 +61,17 @@ pub use withheld::WithheldCrossing;
 /// checks it. Above it, a rollback no longer restores the reservoir exactly and can burn or mint
 /// gas at the boundary. Reaching it takes a transaction gas limit above `i64::MAX`
 /// (about 9.2 × 10^18).
+///
+/// With [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set, which is off by
+/// default, no give-back of state or history gas credits regular gas: a refill, the rollback of a
+/// failed frame and a reservoir a child returns all land in the reservoir, so `remaining` rises
+/// only by the regular gas a child returns. `state_gas_spilled` then counts every part of a state
+/// or history charge that regular gas paid, and no give-back lowers it; a halt reads it to give the
+/// frame back the reservoir it received.
+///
+/// A state charge can take a legacy share from regular gas before it draws the reservoir
+/// ([`record_state_cost_with_legacy_share`](Self::record_state_cost_with_legacy_share)); a share of
+/// zero, the default schedule's for every charge, is [`record_state_cost`](Self::record_state_cost).
 ///
 /// Encoded, the tracker has a field per figure, in the order below; the failed-charge record,
 /// a number and a flag in memory, is encoded as an optional number in its place.
@@ -108,6 +121,12 @@ pub struct GasTracker {
     /// halt) the spilled portion is credited back to `remaining` in last-in-
     /// first-out order by [`Self::rollback_state_gas`]; on success it is
     /// propagated to the parent frame so a later parent rollback can return it.
+    ///
+    /// With [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set it is the state and
+    /// history gas regular gas paid, a legacy share included: no give-back lowers it, and a child
+    /// that succeeds or reverts adds its own to its caller's, its reverted charges having gone into
+    /// the reservoir it returns. A halt takes it out of the reservoir and then zeroes it
+    /// ([`consume_regular_paid_charges`](Self::consume_regular_paid_charges)).
     state_gas_spilled: u64,
     /// Net history gas spent so far.
     ///
@@ -165,6 +184,13 @@ pub struct GasTracker {
     /// an `Option`, whose tag would take a word of its own, so it shares a word with
     /// `start_mark`.
     failed_charge_recorded: bool,
+    /// Whether every give-back of state or history gas credits the reservoir alone
+    /// ([`reservoir_only_give_backs`](Self::reservoir_only_give_backs)). A flag that shares the word
+    /// of `failed_charge_recorded` and `start_mark`, so the tracker's size is unchanged.
+    ///
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as `false`.
+    reservoir_only_give_backs: bool,
     /// The start revm marked this tracker for ([`start_mark`](Self::start_mark)). It fits padding
     /// the tracker already had, in the word `failed_charge_recorded` takes, so the tracker's size
     /// is unchanged. No part of the tracker's value, and not encoded.
@@ -186,6 +212,7 @@ impl core::fmt::Debug for GasTracker {
             .field("withheld_crossing", &self.withheld_crossing)
             .field("failed_charge_remaining", &self.failed_charge_remaining)
             .field("failed_charge_recorded", &self.failed_charge_recorded)
+            .field("reservoir_only_give_backs", &self.reservoir_only_give_backs)
             .finish()
     }
 }
@@ -206,6 +233,7 @@ impl GasTracker {
             withheld_crossing: None,
             failed_charge_remaining: 0,
             failed_charge_recorded: false,
+            reservoir_only_give_backs: false,
             start_mark: StartMark::NONE,
         }
     }
@@ -297,8 +325,16 @@ impl GasTracker {
     /// This only reconciles the funding pools. The child's signed
     /// `state_gas_spent` has already accounted for the refill and is merged
     /// separately by the frame handler.
+    ///
+    /// With [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set nothing is
+    /// unwound: the returned reservoir becomes this frame's reservoir as it is, and regular gas is
+    /// left as it was.
     #[inline]
     pub const fn absorb_returned_reservoir(&mut self, reservoir: u64) {
+        if self.reservoir_only_give_backs {
+            self.reservoir = reservoir;
+            return;
+        }
         let to_remaining = if reservoir < self.state_gas_spilled {
             reservoir
         } else {
@@ -480,8 +516,18 @@ impl GasTracker {
     /// last-in-first-out order: `remaining` is credited up to `state_gas_spilled`, the rest tops up
     /// the reservoir, and the net history gas falls by the full `amount` — below zero when the
     /// matching charge was made by a parent frame, which the merge on return reconciles.
+    ///
+    /// With [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set the whole `amount`
+    /// tops up the reservoir, and `remaining` and `state_gas_spilled` are left as they were.
     #[inline]
     pub const fn refill_history(&mut self, amount: u64) {
+        if self.reservoir_only_give_backs {
+            self.reservoir = self.reservoir.saturating_add(amount);
+            self.history_gas_spent = self
+                .history_gas_spent
+                .saturating_sub(saturating_signed(amount));
+            return;
+        }
         let to_remaining = if amount < self.state_gas_spilled {
             amount
         } else {
@@ -512,12 +558,26 @@ impl GasTracker {
     /// On revert the resulting `remaining` (including the refilled spill) is
     /// returned to the parent; on halt the caller additionally zeroes `remaining`
     /// so the spilled gas is consumed while the reservoir is left untouched.
+    ///
+    /// With [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set every charge the
+    /// frame made, net of the give-backs it received, goes into the reservoir, whichever pool
+    /// paid it: the reservoir becomes `reservoir + state_gas_spent + history_gas_spent`, and
+    /// `remaining` and `state_gas_spilled` are left as they were. That is a reverted frame's
+    /// reservoir; a halting frame's caller then consumes the part regular gas paid
+    /// ([`consume_regular_paid_charges`](Self::consume_regular_paid_charges)), which leaves the
+    /// reservoir the frame received.
     #[inline]
     pub const fn rollback_state_gas(&mut self) {
         // The two nets are summed before they meet the reservoir: a frame that took back a parent's
         // state charge after its own history charge spilled holds less reservoir than its state
         // net is negative, and adding the terms one at a time would clamp at zero part-way.
         let charged = self.state_gas_spent.saturating_add(self.history_gas_spent);
+        if self.reservoir_only_give_backs {
+            self.reservoir = self.reservoir.saturating_add_signed(charged);
+            self.state_gas_spent = 0;
+            self.history_gas_spent = 0;
+            return;
+        }
         self.reservoir = self
             .reservoir
             .saturating_add_signed(charged)
@@ -545,8 +605,18 @@ impl GasTracker {
     /// (`remaining`) last, the refill credits the pool charged last first:
     /// `remaining` is credited up to `state_gas_spilled` and any remainder tops
     /// up the reservoir.
+    ///
+    /// With [`reservoir_only_give_backs`](Self::reservoir_only_give_backs) set the whole `amount`
+    /// tops up the reservoir, and `remaining` and `state_gas_spilled` are left as they were.
     #[inline]
     pub const fn refill_reservoir(&mut self, amount: u64) {
+        if self.reservoir_only_give_backs {
+            self.reservoir = self.reservoir.saturating_add(amount);
+            self.state_gas_spent = self
+                .state_gas_spent
+                .saturating_sub(saturating_signed(amount));
+            return;
+        }
         let to_remaining = if amount < self.state_gas_spilled {
             amount
         } else {

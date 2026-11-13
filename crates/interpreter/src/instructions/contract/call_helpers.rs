@@ -106,13 +106,19 @@ pub(super) fn load_acc_and_calc_forward<H: Host + ?Sized>(
     let (gas, state_gas_cost, bytecode, code_hash) =
         load_account_delegated_handle_error(context, to, transfers_value, create_empty_account)?;
     let charged_new_account_state_gas = state_gas_cost > 0;
-    let interpreter = &mut context.interpreter;
 
     // deduct dynamic gas.
-    gas!(interpreter, gas);
+    gas!(context.interpreter, gas);
 
-    // deduct state gas (EIP-8037) if any.
-    state_gas!(interpreter, state_gas_cost);
+    // deduct state gas (EIP-8037) if any, its legacy share first from regular gas, before the
+    // forward is computed.
+    if charged_new_account_state_gas {
+        let legacy_share = context
+            .host
+            .gas_params()
+            .new_account_state_gas_legacy_share();
+        state_gas_with_legacy_share!(context.interpreter, state_gas_cost, legacy_share);
+    }
 
     let interpreter = &mut context.interpreter;
     let host = &mut context.host;

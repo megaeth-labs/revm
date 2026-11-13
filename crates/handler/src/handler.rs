@@ -212,14 +212,18 @@ pub trait Handler {
     /// The gas limit is the transaction gas limit, `remaining` is the regular
     /// gas budget left after the intrinsic gas (constrained by the EIP-8037
     /// `TX_MAX_GAS_LIMIT` cap) and `reservoir` is the state gas pool, so the
-    /// intrinsic gas is accounted as already spent.
+    /// intrinsic gas is accounted as already spent. Whether its give-backs credit the reservoir
+    /// alone is the configuration's (`Cfg::reservoir_only_give_backs`), as it is for every frame's
+    /// gas.
     #[inline]
     fn tx_gas(&self, evm: &mut Self::Evm, init_and_floor_gas: &InitialAndFloorGas) -> GasTracker {
         let ctx = evm.ctx_ref();
         let tx_gas_limit = ctx.tx().gas_limit();
         let (remaining, reservoir) = init_and_floor_gas
             .initial_gas_and_reservoir(tx_gas_limit, ctx.cfg().tx_gas_limit_cap());
-        GasTracker::new(tx_gas_limit, remaining, reservoir)
+        let mut gas = GasTracker::new(tx_gas_limit, remaining, reservoir);
+        gas.set_reservoir_only_give_backs(ctx.cfg().reservoir_only_give_backs());
+        gas
     }
 
     /// Prepares the EVM state for execution.

@@ -30,6 +30,8 @@ pub(super) struct Encoded {
     withheld_crossing: Option<WithheldCrossing>,
     #[serde(default)]
     failed_charge_remaining: Option<u64>,
+    #[serde(default)]
+    reservoir_only_give_backs: bool,
 }
 
 impl From<GasTracker> for Encoded {
@@ -45,6 +47,7 @@ impl From<GasTracker> for Encoded {
             withheld: tracker.withheld,
             withheld_crossing: tracker.withheld_crossing,
             failed_charge_remaining: tracker.failed_charge_remaining(),
+            reservoir_only_give_backs: tracker.reservoir_only_give_backs,
         }
     }
 }
@@ -63,6 +66,7 @@ impl From<Encoded> for GasTracker {
             withheld_crossing: encoded.withheld_crossing,
             failed_charge_remaining: 0,
             failed_charge_recorded: false,
+            reservoir_only_give_backs: encoded.reservoir_only_give_backs,
             start_mark: super::StartMark::NONE,
         };
         tracker.set_failed_charge_remaining(encoded.failed_charge_remaining);
@@ -75,10 +79,11 @@ mod tests {
     use super::super::GasTracker;
 
     /// A tracker with every field away from its default: part of its regular gas withheld, a
-    /// crossing and a failed charge recorded, a state charge spilled past the reservoir and a
-    /// refund.
+    /// crossing and a failed charge recorded, a state charge spilled past the reservoir, a
+    /// refund, and give-backs that credit the reservoir alone.
     fn every_field_set() -> GasTracker {
         let mut tracker = GasTracker::new(1_000, 400, 300);
+        tracker.set_reservoir_only_give_backs(true);
         tracker.withhold(100);
         assert!(!tracker.record_regular_cost(350));
         assert!(tracker.record_state_cost(500));
@@ -96,7 +101,8 @@ mod tests {
             concat!(
                 r#"{"gas_limit":1000,"remaining":200,"reservoir":0,"state_gas_spent":500,"#,
                 r#""state_gas_spilled":200,"history_gas_spent":0,"refunded":-3,"withheld":0,"#,
-                r#""withheld_crossing":{"remaining":400},"failed_charge_remaining":400}"#,
+                r#""withheld_crossing":{"remaining":400},"failed_charge_remaining":400,"#,
+                r#""reservoir_only_give_backs":true}"#,
             )
         );
         assert_eq!(
@@ -104,7 +110,8 @@ mod tests {
             concat!(
                 r#"{"gas_limit":1000,"remaining":1000,"reservoir":0,"state_gas_spent":0,"#,
                 r#""state_gas_spilled":0,"history_gas_spent":0,"refunded":0,"withheld":0,"#,
-                r#""withheld_crossing":null,"failed_charge_remaining":null}"#,
+                r#""withheld_crossing":null,"failed_charge_remaining":null,"#,
+                r#""reservoir_only_give_backs":false}"#,
             )
         );
     }

@@ -148,7 +148,8 @@ pub fn create<const IS_CREATE2: bool, IT: ITy, H: Host + ?Sized>(
                 .host
                 .state_gas_charge(charge)
                 .ok_or(InstructionResult::FatalExternalError)?;
-            state_gas!(context.interpreter, price);
+            let share = context.host.gas_params().create_state_gas_legacy_share();
+            state_gas_with_legacy_share!(context.interpreter, price, share);
             create_inputs.set_charged_create_state_gas(true);
             create_inputs.set_charged_state_gas_address(created_address);
         }

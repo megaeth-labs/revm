@@ -41,6 +41,23 @@ macro_rules! state_gas {
     }};
 }
 
+/// Records a state gas cost (EIP-8037) that takes its legacy share, `min(gas, share)`, from
+/// regular gas before it draws the reservoir, and fails the instruction if the frame's regular gas
+/// cannot pay the share and what the reservoir cannot. A share of zero is [`state_gas!`].
+#[macro_export]
+#[collapse_debuginfo(yes)]
+macro_rules! state_gas_with_legacy_share {
+    ($interpreter:expr, $gas:expr, $share:expr) => {{
+        if !$interpreter
+            .gas
+            .record_state_cost_with_legacy_share($gas, $share)
+        {
+            $crate::primitives::hints_util::cold_path();
+            return Err($crate::InstructionResult::OutOfGas);
+        }
+    }};
+}
+
 /// Records a `gas` cost and fails the instruction if it would exceed the available gas.
 #[macro_export]
 #[collapse_debuginfo(yes)]

@@ -19,7 +19,10 @@ use std::string::ToString;
 ///   the frame left returns to `gas`, its reservoir in place of the one `gas` gave it;
 /// - the EIP-2780 refundable first-frame charge is refunded when no account leaf was created,
 ///   priced through [`Host::state_gas_charge`](context_interface::Host::state_gas_charge) as it
-///   was charged; after a halt the regular gas the refund credited is consumed.
+///   was charged; after a halt the regular gas the refund credited is consumed. With give-backs
+///   to the reservoir alone ([`GasTracker::reservoir_only_give_backs`]) a refund credits no regular
+///   gas, so after a halt only the part of the charge the reservoir paid returns, into the
+///   reservoir, and the part regular gas paid is consumed with the regular gas.
 ///
 /// A chain whose handler overrides `last_frame_result` calls this rather than copying the mainnet
 /// body, so a step the fork adds here reaches its handler too. It applies its own rules to `gas`
@@ -73,12 +76,24 @@ where
                 "state gas price lookup failed".to_string(),
             ));
         };
+        // With give-backs to the reservoir alone, the part of the charge regular gas paid stays
+        // spent after a halt. The charge is the last one made before the frame, and every charge
+        // made there draws the reservoir first, so that part is the last of what the
+        // transaction's regular gas paid for state and history, which the halted frame added
+        // nothing to. Without the switch the refill below credits that part to `remaining`, which
+        // the halt consumes.
+        let consumed = if instruction_result.is_halt() && gas.reservoir_only_give_backs() {
+            core::cmp::min(charge, gas.state_gas_spilled())
+        } else {
+            0
+        };
         gas.refill_reservoir(charge);
         // Unlike an inner frame's caller, the transaction ends here: an
         // exceptional halt consumes all regular gas, including the
         // spilled portion the refill just credited back to `remaining`.
         if instruction_result.is_halt() {
             gas.spend_all();
+            gas.set_reservoir(gas.reservoir().saturating_sub(consumed));
         }
     }
 

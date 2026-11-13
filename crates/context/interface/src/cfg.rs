@@ -124,6 +124,14 @@ pub trait Cfg {
     fn legacy_journal_semantics(&self) -> bool {
         false
     }
+
+    /// Returns whether every give-back of state or history gas credits the reservoir alone
+    /// (`GasTracker::reservoir_only_give_backs`), which revm sets on the transaction's gas and on
+    /// every frame's. Default is `false`, EIP-8037's tracker.
+    #[inline]
+    fn reservoir_only_give_backs(&self) -> bool {
+        false
+    }
 }
 
 /// What bytecode analysis to perform
@@ -264,5 +272,6 @@ mod tests {
         let cfg = RequiredOnly(GasParams::default());
         assert!(!cfg.legacy_journal_semantics());
         assert!(!cfg.enable_amsterdam_eip7708());
+        assert!(!cfg.reservoir_only_give_backs());
     }
 }

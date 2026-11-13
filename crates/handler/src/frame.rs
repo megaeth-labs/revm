@@ -159,8 +159,10 @@ impl EthFrame<EthInterpreter> {
         let reservoir_remaining_gas = inputs.reservoir;
         let charged_new_account_state_gas = inputs.charged_new_account_state_gas;
         let charged_state_gas_address = inputs.target_address;
-        let gas =
+        let reservoir_only_give_backs = ctx.cfg().reservoir_only_give_backs();
+        let mut gas =
             Gas::new_with_regular_gas_and_reservoir(inputs.gas_limit, reservoir_remaining_gas);
+        gas.set_reservoir_only_give_backs(reservoir_only_give_backs);
 
         let return_result = |instruction_result: InstructionResult| {
             Ok(ItemOrResult::Result(FrameResult::Call(CallOutcome {
@@ -210,7 +212,10 @@ impl EthFrame<EthInterpreter> {
         let is_static = inputs.is_static;
         let gas_limit = inputs.gas_limit;
 
-        if let Some(result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_string)? {
+        if let Some(mut result) = precompiles.run(ctx, &inputs).map_err(ERROR::from_string)? {
+            result
+                .gas
+                .set_reservoir_only_give_backs(reservoir_only_give_backs);
             let mut logs = Vec::new();
             if result.result.is_ok() {
                 // Preserve the reservoir on the result gas so it can be reimbursed.
@@ -243,7 +248,8 @@ impl EthFrame<EthInterpreter> {
         }
 
         // Create interpreter and executes call and push new CallStackFrame.
-        this.get(EthFrame::invalid).clear(
+        let frame = this.get(EthFrame::invalid);
+        frame.clear(
             FrameData::Call(CallFrame {
                 return_memory_range: inputs.return_memory_offset.clone(),
             }),
@@ -258,6 +264,10 @@ impl EthFrame<EthInterpreter> {
             reservoir_remaining_gas,
             checkpoint,
         );
+        frame
+            .interpreter
+            .gas
+            .set_reservoir_only_give_backs(reservoir_only_give_backs);
 
         Ok(ItemOrResult::Item(this.consume()))
     }
@@ -276,6 +286,7 @@ impl EthFrame<EthInterpreter> {
     ) -> Result<ItemOrResult<FrameToken, FrameResult>, ERROR> {
         let reservoir_remaining_gas = inputs.reservoir();
         let spec = context.cfg().spec().into();
+        let reservoir_only_give_backs = context.cfg().reservoir_only_give_backs();
         // EIP-8037 refund for the CREATE opcode's upfront `create_state_gas` is
         // applied uniformly in `return_result` when the create fails (revert,
         // halt, or early-fail with `address == None`), so early-fail results
@@ -285,13 +296,15 @@ impl EthFrame<EthInterpreter> {
         // — because the created address is not derivable here on the early-fail paths.
         let charged_state_gas_address = inputs.charged_state_gas_address();
         let return_error = |e| {
+            let mut gas = Gas::new_with_regular_gas_and_reservoir(
+                inputs.gas_limit(),
+                reservoir_remaining_gas,
+            );
+            gas.set_reservoir_only_give_backs(reservoir_only_give_backs);
             Ok(ItemOrResult::Result(FrameResult::Create(CreateOutcome {
                 result: InterpreterResult {
                     result: e,
-                    gas: Gas::new_with_regular_gas_and_reservoir(
-                        inputs.gas_limit(),
-                        reservoir_remaining_gas,
-                    ),
+                    gas,
                     output: Bytes::new(),
                 },
                 address: None,
@@ -359,7 +372,8 @@ impl EthFrame<EthInterpreter> {
         };
         let gas_limit = inputs.gas_limit();
 
-        this.get(EthFrame::invalid).clear(
+        let frame = this.get(EthFrame::invalid);
+        frame.clear(
             FrameData::Create(CreateFrame { created_address }),
             FrameInput::Create(inputs),
             depth,
@@ -372,6 +386,10 @@ impl EthFrame<EthInterpreter> {
             reservoir_remaining_gas,
             checkpoint,
         );
+        frame
+            .interpreter
+            .gas
+            .set_reservoir_only_give_backs(reservoir_only_give_backs);
 
         Ok(ItemOrResult::Item(this.consume()))
     }
@@ -629,6 +647,14 @@ impl EthFrame<EthInterpreter> {
 /// - net state gas, net history gas, the spilled portion, and the refund counter
 ///   persist only on success; on revert/halt the child's state changes roll back
 ///   and contribute nothing.
+///
+/// With [`GasTracker::reservoir_only_give_backs`] set, a failing child's rollback puts every
+/// charge it made into its reservoir, and none into its regular gas: a revert returns the unspent
+/// regular gas and a reservoir that holds those charges, and a halt consumes the regular gas with
+/// what it paid of the charges ([`GasTracker::consume_regular_paid_charges`]) and returns the
+/// reservoir the child received. The parent adopts the returned reservoir without unwinding
+/// anything, and adds the regular gas the child paid for state and history to its own count on a
+/// revert as on a success, since that gas is not given back to regular gas.
 #[inline]
 pub const fn handle_reservoir_remaining_gas(
     instruction_result: InstructionResult,
@@ -643,13 +669,21 @@ pub const fn handle_reservoir_remaining_gas(
     if instruction_result.is_halt() {
         // Exceptional halt consumes the child's regular gas (including the spill
         // just credited back by `rollback_state_gas`); the reservoir is left
-        // restored to the inherited value for the parent.
+        // restored to the inherited value for the parent. With give-backs to the reservoir
+        // alone, the rollback put what regular gas paid into the reservoir, which the halt takes
+        // out again; otherwise nothing is left to take.
+        child_gas.consume_regular_paid_charges();
         child_gas.spend_all();
     }
 
     // Merge the settled child into the parent.
     if instruction_result.is_ok_or_revert() {
         parent_gas.erase_cost(child_gas.remaining());
+        // What the child's regular gas paid for state and history: on a success, so a later
+        // rollback of the parent can return it; on a revert, only with give-backs to the
+        // reservoir alone, where the rollback kept the count and returned the charges in the
+        // reservoir. A revert's rollback zeroes it otherwise, and a halt's consumption always.
+        parent_gas.add_state_gas_spilled(child_gas.state_gas_spilled());
     }
     if instruction_result.is_ok() {
         // Parent may have already charged state gas (e.g. new_account + create)
@@ -662,7 +696,6 @@ pub const fn handle_reservoir_remaining_gas(
                 .state_gas_spent()
                 .saturating_add(child_gas.state_gas_spent()),
         );
-        parent_gas.add_state_gas_spilled(child_gas.state_gas_spilled());
         // History gas rides the same success-only merge, signed for the same reason: a
         // failing child rolled it back along with its state gas, so it contributes
         // nothing. Zero on any chain that never charges history gas.
@@ -1020,6 +1053,100 @@ mod tests {
                 (1_000, 10_000),
                 "{forwarded}: B's rollback restores what it started with"
             );
+        }
+    }
+    /// A tracker with give-backs to the reservoir alone.
+    fn reservoir_only(limit: u64, reservoir: u64) -> GasTracker {
+        let mut gas = GasTracker::new(limit, limit, reservoir);
+        gas.set_reservoir_only_give_backs(true);
+        gas
+    }
+
+    /// `(remaining, reservoir, state_spent, spilled)` of a tracker.
+    const fn figures(gas: &GasTracker) -> (u64, u64, i64, u64) {
+        (
+            gas.remaining(),
+            gas.reservoir(),
+            gas.state_gas_spent(),
+            gas.state_gas_spilled(),
+        )
+    }
+
+    /// With give-backs to the reservoir alone, the sibling refill of the first test lands in the
+    /// reservoir the sibling returns, and its caller's regular gas stays what the first child left
+    /// it: the reservoir is adopted without unwinding the regular gas the first child paid.
+    #[test]
+    fn test_with_give_backs_to_the_reservoir_a_sibling_refill_leaves_regular_gas_spent() {
+        const STATE_GAS: u64 = 200;
+        const CHILD_GAS: u64 = 500;
+
+        let mut parent = reservoir_only(1_000, 0);
+        assert!(parent.record_regular_cost(CHILD_GAS));
+        let mut child_a = reservoir_only(CHILD_GAS, 0);
+        assert!(child_a.record_state_cost(STATE_GAS));
+        handle_reservoir_remaining_gas(InstructionResult::Stop, &mut parent, &mut child_a);
+        assert_eq!(figures(&parent), (800, 0, 200, 200));
+
+        assert!(parent.record_regular_cost(CHILD_GAS));
+        let mut child_b = reservoir_only(CHILD_GAS, parent.reservoir());
+        child_b.refill_reservoir(STATE_GAS);
+        handle_reservoir_remaining_gas(InstructionResult::Stop, &mut parent, &mut child_b);
+        assert_eq!(
+            figures(&parent),
+            (800, 200, 0, 200),
+            "the refill is reservoir, and what regular gas paid stays counted"
+        );
+    }
+
+    /// With give-backs to the reservoir alone a child that succeeds hands back what it left of
+    /// both pools; one that reverts puts every charge it made, net of the give-backs it received,
+    /// into the reservoir it returns, and its caller counts what the child's regular gas paid as
+    /// its own; one that halts returns the reservoir it received and consumes its regular gas with
+    /// what it paid of the charges.
+    #[test]
+    fn test_with_give_backs_to_the_reservoir_a_failed_child_returns_its_charges_as_reservoir() {
+        for (result, expected) in [
+            (InstructionResult::Stop, (9_700, 50, 1_250, 300)),
+            (InstructionResult::Revert, (9_700, 1_300, 0, 300)),
+            (InstructionResult::OutOfGas, (5_000, 1_000, 0, 0)),
+        ] {
+            let mut parent = reservoir_only(10_000, 1_000);
+            assert!(parent.record_regular_cost(5_000));
+            let mut child = reservoir_only(5_000, parent.reservoir());
+            // 1,000 of the charge from the reservoir and 300 from regular gas; 50 given back.
+            assert!(child.record_state_cost(1_300));
+            child.refill_reservoir(50);
+
+            handle_reservoir_remaining_gas(result, &mut parent, &mut child);
+
+            assert_eq!(figures(&parent), expected, "{result:?}");
+        }
+    }
+
+    /// A reverted grandchild's reservoir, which holds what its regular gas paid, stays in the
+    /// reservoir of the frame it returned into: when that frame reverts too, it returns its own
+    /// charges and the grandchild's on top of the reservoir it received; when it halts, it returns
+    /// the reservoir it received and nothing more.
+    #[test]
+    fn test_with_give_backs_to_the_reservoir_a_failed_frame_keeps_a_failed_childs_reservoir() {
+        for (result, reservoir) in [
+            (InstructionResult::Revert, 1_200),
+            (InstructionResult::OutOfGas, 1_000),
+        ] {
+            let mut a = reservoir_only(10_000, 1_000);
+            assert!(a.record_regular_cost(5_000));
+            let mut b = reservoir_only(5_000, a.reservoir());
+            assert!(b.record_state_cost(200));
+            assert!(b.record_regular_cost(2_000));
+            let mut c = reservoir_only(2_000, b.reservoir());
+            // 800 from the reservoir C received, 200 from its regular gas.
+            assert!(c.record_state_cost(1_000));
+            handle_reservoir_remaining_gas(InstructionResult::Revert, &mut b, &mut c);
+            assert_eq!(figures(&b), (4_800, 1_000, 200, 200));
+
+            handle_reservoir_remaining_gas(result, &mut a, &mut b);
+
+            assert_eq!(a.reservoir(), reservoir, "{result:?}");
         }
     }
 }

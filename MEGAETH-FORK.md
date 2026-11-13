@@ -46,7 +46,8 @@ The baseline moves only when the MegaETH node moves to a newer revm major (see T
    The fork adds hooks and data.
    It also carries a named, bounded set of MegaETH accounting inside revm's charges and settlement:
    - withheld regular gas and its crossing record, which every regular charge reads;
-   - the history-gas dimension, charged reservoir-first, unwound with state gas, and charged for deployed code inside `return_create`.
+   - the history-gas dimension, charged reservoir-first, unwound with state gas, and charged for deployed code inside `return_create`;
+   - give-backs to the reservoir alone, which change where revm's refills, rollbacks and reservoir merges credit a give-back, and the legacy share of an opcode's state charge.
 
    Each item has its entry under Hooks, whose Default keeps upstream's results for a consumer that sets nothing.
    Nothing else that implements MegaETH semantics enters the fork.
@@ -92,7 +93,7 @@ The sizes are the lines of `crates/`, without tests, that `git blame <base>..<fo
 | Other upstream picks | Fixes and performance picks | about 140 lines | Goes away once the new base contains them; a pick the base lacks is picked again or dropped, as its sweep decides. A behaviour a switch takes back stays switchable (see Consumer switches). |
 | Generic hooks | State-gas price, precompile price, code-deposit admission, the failed-charge record, the completed-write and frame-start hooks, the pending action, the frame-run-result hook and the start lifecycle | not counted | Each is proposed upstream, in a form upstream can take: without MegaETH vocabulary in its types, as an instruction-level helper rather than a `Host` method where one serves, and with no cost on the default path that upstream would not accept. It is carried until upstream has an equivalent (its Removal). |
 | Consumer switches | Amsterdam opcodes and EIP-7708 below Amsterdam, the base line's journal semantics | about 300 lines | Carried until their Removal conditions. The Amsterdam switch is proposed in the shape of upstream's per-EIP activation switches, which already cover three of its four opcodes; the base line's journal semantics are not proposed. |
-| MegaETH accounting (rule 2) | Withheld regular gas, the history-gas dimension | about 700 lines | Carried and re-applied to the new base, or replaced: an item a later design keeps in `mega-evm` instead, with the same results for the consumer that uses it, leaves the fork, and its entry's Removal says when. |
+| MegaETH accounting (rule 2) | Withheld regular gas, the history-gas dimension, give-backs to the reservoir alone and the legacy share | about 800 lines | Carried and re-applied to the new base, or replaced: an item a later design keeps in `mega-evm` instead, with the same results for the consumer that uses it, leaves the fork, and its entry's Removal says when. |
 
 ## Hooks
 
@@ -133,13 +134,33 @@ An id the fork once used for an entry is left unused rather than given a new mea
   `GasId::code_deposit_history_gas` and `GasParams::code_deposit_history_gas(len)`.
 - **Contract.** A history charge draws the same reservoir-first budget as a state-gas charge: the reservoir, then regular gas, withheld part first.
   It is booked on its own counter, so history gas can be reported and limited apart from state gas.
-  It unwinds with state gas: a frame that reverts or halts refills both in last-in-first-out order, and `refill_history` returns a spill before it tops up the reservoir.
+  It unwinds with state gas: a frame that reverts or halts refills both in last-in-first-out order, and `refill_history` returns a spill before it tops up the reservoir, unless give-backs go to the reservoir alone (see Give-backs to the reservoir alone and the legacy share).
   `return_create` charges `code_deposit_history_gas` for the deployed bytes after their state-gas charge.
   `ResultGas` has no field for it: `total_gas_spent` and `block_regular_gas_used` include it, and the `ResultGas` documentation says how a block-level consumer separates it.
 - **Consumer.** mega-evm charges history gas for the bytes a transaction appends to the chain's history. The code deposit is charged inside `return_create`, and only the tracker can unwind a frame's history charges with its state charges.
 - **Removal.** When upstream carries an equivalent gas dimension, or when mega-evm stops charging history gas.
 - **Default.** No schedule prices `code_deposit_history_gas`, and nothing else in the workspace charges history gas, so the counter stays zero and every result is upstream's.
   In a format that carries field names, the counter decodes as zero from encodings that predate it.
+
+### Give-backs to the reservoir alone and the legacy share
+
+- **API.** `CfgEnv::reservoir_only_give_backs` with `with_reservoir_only_give_backs`, and `Cfg::reservoir_only_give_backs` (default `false`).
+  On `GasTracker`, forwarded on `Gas`: `reservoir_only_give_backs`, `set_reservoir_only_give_backs`, `record_state_cost_with_legacy_share` and `consume_regular_paid_charges`.
+  `GasId::sstore_set_state_gas_legacy_share`, `new_account_state_gas_legacy_share`, `selfdestruct_new_account_state_gas_legacy_share` and `create_state_gas_legacy_share` (ids 245 to 242), with their `GasParams` accessors, and the `state_gas_with_legacy_share!` instruction macro.
+- **Contract.** revm sets the switch on the transaction's gas (`Handler::tx_gas`) and on every frame's gas, and on the results it builds for a call or creation it answers without running a frame (`EthFrame::make_call_frame`, `make_create_frame`), from the configuration.
+  With it on, no give-back of state or history gas credits regular gas: `refill_reservoir` and `refill_history` top up the reservoir alone, `rollback_state_gas` sets the reservoir to `reservoir + state_gas_spent + history_gas_spent` and leaves regular gas as it was, and `absorb_returned_reservoir` takes the returned reservoir as the caller's without unwinding anything.
+  A frame's regular gas then rises within the frame only by the regular gas a child returns.
+  `state_gas_spilled` counts every part of a state or history charge regular gas paid, and no give-back lowers it: a child that succeeds or reverts adds its count to its caller's (`handle_reservoir_remaining_gas`), and a halt takes it out of the reservoir the rollback set, which leaves the reservoir the frame received (`consume_regular_paid_charges`), before it spends the regular gas.
+  After a halt of the transaction's frame, `settle_first_frame` gives back only the part of the EIP-2780 first-frame charge the reservoir paid: that charge is the last made before the frame, and every charge there draws the reservoir first, so the part regular gas paid is the last `min(charge, state_gas_spilled)` of the transaction's count.
+  The legacy share is the part of an opcode's state charge regular gas pays before the reservoir pays any of it: `SSTORE`'s fresh slot, a value `CALL`'s new account, a `SELFDESTRUCT`'s new beneficiary and a `CREATE`'s or `CREATE2`'s created account each take `min(charge, entry)` of their schedule entry from regular gas, withheld part first, before the reservoir; a value call's and a creation's before the forward is computed.
+  A frame whose regular gas cannot pay the share and what the reservoir cannot pay runs out of gas, whatever the reservoir holds.
+  The share is state gas, counted with its charge and given back with it, and the switch and the shares are independent: with the switch off a share is part of the spill a give-back unwinds.
+- **Consumer.** mega-evm keeps a frame's regular gas from rising within the frame by gas spent on state and history, and keeps creating state at its pre-Amsterdam price in regular gas when a transaction carries a reservoir.
+  Every refill, rollback and reservoir merge that credits regular gas is inside revm: an `SSTORE` that writes a slot back refills inside its instruction, and a frame's rollback and the merge of its reservoir into its caller's are revm's settlement, so no hook that sees the gas afterwards can tell what revm credited; and a value call's and a creation's share must come off regular gas before the opcode computes its forward.
+- **Removal.** When upstream's EIP-8037 credits every give-back to the reservoir and takes a legacy share from regular gas, as ethereum/EIPs#12581 proposes, or when mega-evm stops doing either.
+- **Default.** The switch is off and every share entry is zero, so every result is upstream's: `record_state_cost_with_legacy_share` with a share of zero is `record_state_cost`, `consume_regular_paid_charges` finds nothing after an upstream rollback, which zeroed the spill, and the count a revert adds to its caller is zero for the same reason.
+  The switch is a `bool` in a word the tracker already had, so `GasTracker` stays 88 bytes and every frame result its size; in a format that carries field names it decodes as `false` from encodings that predate it.
+  In instructions, a give-back, a rollback and a merge read one `bool`, a value call that creates an account and the three other share sites read one schedule entry, and every frame's construction reads the switch from the configuration once.
 
 ### Amsterdam opcodes and transfer logs below Amsterdam
 
@@ -367,7 +388,7 @@ An id the fork once used for an entry is left unused rather than given a new mea
   What a consumer charges or keeps for an instruction's start it does at `frame_starting`, before the split; the transaction's start does not pass through `frame_starting`.
   `frame_settle` is handed the same `id` and `depth` back, and the `status` (`Ok`, `Revert` or `Halt`), `created` (for a creation, whether it took an address), the three flags (below) and `held_reservoir`, the reservoir the caller held before revm settled the child into it.
 
-  *The reservoir.* revm forwards and settles the reservoir as upstream does: the child's input copies the caller's reservoir, or carries the reservoir the frame-start hook named (`FrameStart::reservoir`), and the settlement replaces the caller's reservoir with the one the child returns, once that has unwound the caller's outstanding spill.
+  *The reservoir.* revm forwards and settles the reservoir as upstream does: the child's input copies the caller's reservoir, or carries the reservoir the frame-start hook named (`FrameStart::reservoir`), and the settlement replaces the caller's reservoir with the one the child returns, once that has unwound the caller's outstanding spill, or as it is when give-backs go to the reservoir alone.
   A consumer that keeps part of the caller's reservoir for it takes that part in `frame_starting` and names the rest as the child's, and adds `held_reservoir` back to the caller's reservoir in `frame_settle`.
   The caller then holds what the child returned on top of the part it kept, whatever refills the settlement made, since the unwinding and every refill read the spill and their own amount, never the reservoir.
   The transaction's frame, and the stand-in for a runtime out-of-gas transaction, are handed a copy of the transaction's reservoir, which the transaction's gas keeps until the settlement replaces it, so there `held_reservoir` is that copy: a consumer adds back only what it kept.
