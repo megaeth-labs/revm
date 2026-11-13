@@ -814,6 +814,38 @@ impl GasParams {
             .saturating_mul(len as u64)
     }
 
+    /// The most of the state gas of a slot an `SSTORE` fills that regular gas pays before the
+    /// reservoir ([`GasId::sstore_set_state_gas_legacy_share`]). Zero unless the schedule sets it.
+    #[inline]
+    pub fn sstore_set_state_gas_legacy_share(&self) -> u64 {
+        self.get(GasId::sstore_set_state_gas_legacy_share())
+    }
+
+    /// The most of the state gas of the account a value `CALL` creates that regular gas pays
+    /// before the reservoir ([`GasId::new_account_state_gas_legacy_share`]). Zero unless the
+    /// schedule sets it.
+    #[inline]
+    pub fn new_account_state_gas_legacy_share(&self) -> u64 {
+        self.get(GasId::new_account_state_gas_legacy_share())
+    }
+
+    /// The most of the state gas of the account a `SELFDESTRUCT` creates for its beneficiary that
+    /// regular gas pays before the reservoir
+    /// ([`GasId::selfdestruct_new_account_state_gas_legacy_share`]). Zero unless the schedule sets
+    /// it.
+    #[inline]
+    pub fn selfdestruct_new_account_state_gas_legacy_share(&self) -> u64 {
+        self.get(GasId::selfdestruct_new_account_state_gas_legacy_share())
+    }
+
+    /// The most of the state gas of the account a `CREATE` or `CREATE2` creates that regular gas
+    /// pays before the reservoir ([`GasId::create_state_gas_legacy_share`]). Zero unless the
+    /// schedule sets it.
+    #[inline]
+    pub fn create_state_gas_legacy_share(&self) -> u64 {
+        self.get(GasId::create_state_gas_legacy_share())
+    }
+
     /// Used in [GasParams::initial_tx_gas] to calculate the eip7702 per-auth cost.
     ///
     /// Pre-Amsterdam this is the pessimistic bundled `PER_EMPTY_ACCOUNT_COST`
@@ -1276,6 +1308,18 @@ impl GasId {
             x if x == Self::tx_account_write_cost().as_u8() => "tx_account_write_cost",
             x if x == Self::tx_create_access_cost().as_u8() => "tx_create_access_cost",
             x if x == Self::code_deposit_history_gas().as_u8() => "code_deposit_history_gas",
+            x if x == Self::sstore_set_state_gas_legacy_share().as_u8() => {
+                "sstore_set_state_gas_legacy_share"
+            }
+            x if x == Self::new_account_state_gas_legacy_share().as_u8() => {
+                "new_account_state_gas_legacy_share"
+            }
+            x if x == Self::selfdestruct_new_account_state_gas_legacy_share().as_u8() => {
+                "selfdestruct_new_account_state_gas_legacy_share"
+            }
+            x if x == Self::create_state_gas_legacy_share().as_u8() => {
+                "create_state_gas_legacy_share"
+            }
             _ => "unknown",
         }
     }
@@ -1351,6 +1395,14 @@ impl GasId {
             "tx_account_write_cost" => Some(Self::tx_account_write_cost()),
             "tx_create_access_cost" => Some(Self::tx_create_access_cost()),
             "code_deposit_history_gas" => Some(Self::code_deposit_history_gas()),
+            "sstore_set_state_gas_legacy_share" => Some(Self::sstore_set_state_gas_legacy_share()),
+            "new_account_state_gas_legacy_share" => {
+                Some(Self::new_account_state_gas_legacy_share())
+            }
+            "selfdestruct_new_account_state_gas_legacy_share" => {
+                Some(Self::selfdestruct_new_account_state_gas_legacy_share())
+            }
+            "create_state_gas_legacy_share" => Some(Self::create_state_gas_legacy_share()),
             _ => None,
         }
     }
@@ -1641,6 +1693,39 @@ impl GasId {
     pub const fn code_deposit_history_gas() -> GasId {
         Self::new(255)
     }
+
+    /// The legacy share of the state gas of a slot an `SSTORE` fills: the most of that charge
+    /// regular gas pays before the reservoir pays any of it
+    /// ([`GasTracker::record_state_cost_with_legacy_share`](crate::cfg::gas::GasTracker::record_state_cost_with_legacy_share)).
+    ///
+    /// Zero on every schedule defined here, which makes the charge the one EIP-8037 makes. A chain
+    /// that keeps what creating state costs in regular gas when a transaction carries a reservoir
+    /// sets it. A fork id, allocated down from the top of the table below the ids the fork retired.
+    pub const fn sstore_set_state_gas_legacy_share() -> GasId {
+        Self::new(245)
+    }
+
+    /// The legacy share of the state gas of the account a value `CALL` creates for its target:
+    /// the most of that charge regular gas pays before the reservoir pays any of it, as
+    /// [`sstore_set_state_gas_legacy_share`](Self::sstore_set_state_gas_legacy_share) is for a
+    /// slot. Zero on every schedule defined here.
+    pub const fn new_account_state_gas_legacy_share() -> GasId {
+        Self::new(244)
+    }
+
+    /// The legacy share of the state gas of the account a `SELFDESTRUCT` creates for its
+    /// beneficiary, as [`sstore_set_state_gas_legacy_share`](Self::sstore_set_state_gas_legacy_share)
+    /// is for a slot. Zero on every schedule defined here.
+    pub const fn selfdestruct_new_account_state_gas_legacy_share() -> GasId {
+        Self::new(243)
+    }
+
+    /// The legacy share of the state gas of the account a `CREATE` or `CREATE2` creates, as
+    /// [`sstore_set_state_gas_legacy_share`](Self::sstore_set_state_gas_legacy_share) is for a
+    /// slot. Zero on every schedule defined here.
+    pub const fn create_state_gas_legacy_share() -> GasId {
+        Self::new(242)
+    }
 }
 
 #[cfg(test)]
@@ -1714,16 +1799,44 @@ mod tests {
         );
 
         // The known GasIds are upstream's indices 1-49 (0 is unused) plus the fork's
-        // `code_deposit_history_gas` at 255, allocated from the top of the table so upstream's
-        // next sequential id does not collide with it. Every one of them has a name.
-        let expected_ids: HashSet<u8> = (1..=49).chain([255]).collect();
+        // `code_deposit_history_gas` at 255 and the four legacy shares at 242-245, allocated from
+        // the top of the table so upstream's next sequential id does not collide with them. Every
+        // one of them has a name.
+        let expected_ids: HashSet<u8> = (1..=49).chain(242..=245).chain([255]).collect();
         assert_eq!(named_ids, expected_ids);
         assert_eq!(
             unique_names.len(),
-            50,
-            "Expected 50 unique GasIds, found {}",
+            54,
+            "Expected 54 unique GasIds, found {}",
             unique_names.len()
         );
+    }
+
+    /// A forward of 98/100 of the regular gas to a child, `remaining - remaining * 2 / 100` rounded
+    /// down, is upstream's `call_stipend_reduction` with the quotient 50 in place of EIP-150's 64:
+    /// the two agree on every amount, so a chain that forwards 98/100 of its regular gas needs no
+    /// fork change, only the schedule entry.
+    #[test]
+    fn test_a_call_stipend_reduction_of_50_forwards_98_per_cent() {
+        let mut params = GasParams::new_spec(SpecId::OSAKA);
+        params.override_gas([(GasId::call_stipend_reduction(), 50)]);
+        let ninety_eight =
+            |remaining: u64| (remaining as u128 - remaining as u128 * 2 / 100) as u64;
+        let amounts = (0..10_000)
+            .chain([1_000_000, 16_777_216, 30_000_000, 1 << 40])
+            .chain([u64::MAX - 49, u64::MAX - 1, u64::MAX]);
+        for remaining in amounts {
+            assert_eq!(
+                params.call_stipend_reduction(remaining),
+                ninety_eight(remaining),
+                "{remaining}"
+            );
+        }
+        // Worked examples: 98% of 1,000 is 980; of 1,049 is 1,028.02, and the rule keeps 1,029: it
+        // takes 2% rounded down (20) away.
+        assert_eq!(params.call_stipend_reduction(1_000), 980);
+        assert_eq!(params.call_stipend_reduction(1_049), 1_029);
+        assert_eq!(params.call_stipend_reduction(99), 98);
     }
 
     #[test]

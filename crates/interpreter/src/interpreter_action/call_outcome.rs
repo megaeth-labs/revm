@@ -1,4 +1,4 @@
-use crate::{Gas, InstructionResult, InterpreterResult};
+use crate::{Gas, InstructionResult, InterpreterResult, OutcomeMark};
 use core::ops::Range;
 use primitives::{Address, Bytes, Log};
 use std::vec::Vec;
@@ -12,7 +12,7 @@ use std::vec::Vec;
 ///
 /// * `result` - The result of the interpreter's execution, including output data and gas usage.
 /// * `memory_offset` - The range in memory where the output data is located.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CallOutcome {
     /// The result of the interpreter's execution, including output data and gas usage
@@ -36,9 +36,34 @@ pub struct CallOutcome {
     /// was taken even when the price varies per account. Meaningless while
     /// `charged_new_account_state_gas` is `false`.
     ///
-    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     pub charged_state_gas_address: Address,
+    /// The start revm marked this outcome for before an inspector's end callbacks
+    /// ([`OutcomeMark`]): none on an outcome a constructor builds. No part of the outcome's value:
+    /// equality, the debug output and the encoding leave it out, and a decoded outcome carries
+    /// none.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub start_mark: OutcomeMark,
+}
+
+impl core::fmt::Debug for CallOutcome {
+    /// The output the derive gives the outcome's other fields, in their order; the mark is left
+    /// out.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CallOutcome")
+            .field("result", &self.result)
+            .field("memory_offset", &self.memory_offset)
+            .field("was_precompile_called", &self.was_precompile_called)
+            .field("precompile_call_logs", &self.precompile_call_logs)
+            .field(
+                "charged_new_account_state_gas",
+                &self.charged_new_account_state_gas,
+            )
+            .field("charged_state_gas_address", &self.charged_state_gas_address)
+            .finish()
+    }
 }
 
 impl CallOutcome {
@@ -58,6 +83,7 @@ impl CallOutcome {
             precompile_call_logs: Vec::new(),
             charged_new_account_state_gas: false,
             charged_state_gas_address: Address::ZERO,
+            start_mark: OutcomeMark::NONE,
         }
     }
 

@@ -3,11 +3,11 @@
 # Upstream floats on `stable` and fixes each release's new clippy lints in its
 # own code; this fork carries upstream code it does not edit, so it pins the
 # toolchain and moves the pin deliberately: with each base-line move, or in a
-# `mega:` commit of its own when a newer compiler is wanted. The channel is the
-# stable release upstream's own CI ran on when the base tag was cut, so the
-# upstream code in the tree is lint-clean by construction. The MSRV consumers
-# see is still `rust-version` in Cargo.toml.
+# commit of its own when a newer compiler is wanted. The channel is the stable
+# release upstream's own CI ran on when the base tag was cut, or a later stable
+# release taken for a compiler fix. The MSRV consumers see is still
+# `rust-version` in Cargo.toml.
 [toolchain]
-channel = "1.95.0"
+channel = "1.97.0"
 components = ["clippy", "rustfmt"]
 targets = ["riscv32imac-unknown-none-elf", "riscv64imac-unknown-none-elf"]

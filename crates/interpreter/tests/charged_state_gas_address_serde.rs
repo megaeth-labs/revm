@@ -1,7 +1,10 @@
 //! Serde encoding of `charged_state_gas_address` on the frame inputs and outcomes.
 //!
-//! New encodings carry the field. Encodings made before it existed lack it and still decode, to
-//! [`Address::ZERO`], which is what a frame without a charge carries.
+//! New encodings carry the field. In a format that carries field names, such as the JSON these
+//! tests use, encodings made before it existed lack it and still decode, to [`Address::ZERO`],
+//! which is what a frame without a charge carries. A format that encodes a struct by position,
+//! such as bincode, cannot read an encoding made before it existed, as with upstream's own field
+//! additions.
 #![cfg(feature = "serde")]
 
 use core::fmt::Debug;
@@ -50,7 +53,7 @@ const fn interpreter_result() -> InterpreterResult {
 }
 
 #[test]
-fn test_create_inputs_decode_with_and_without_the_charged_address() {
+fn test_create_inputs_decode_from_json_with_and_without_the_charged_address() {
     let inputs = |charged_address| {
         let mut inputs = CreateInputs::new(
             address!("0x00000000000000000000000000000000000c0de0"),
@@ -71,7 +74,7 @@ fn test_create_inputs_decode_with_and_without_the_charged_address() {
 }
 
 #[test]
-fn test_call_outcome_decodes_with_and_without_the_charged_address() {
+fn test_call_outcome_decodes_from_json_with_and_without_the_charged_address() {
     let outcome = |charged_address| {
         let mut outcome = CallOutcome::new(interpreter_result(), 0..8);
         outcome.charged_new_account_state_gas = true;
@@ -83,7 +86,7 @@ fn test_call_outcome_decodes_with_and_without_the_charged_address() {
 }
 
 #[test]
-fn test_create_outcome_decodes_with_and_without_the_charged_address() {
+fn test_create_outcome_decodes_from_json_with_and_without_the_charged_address() {
     let outcome = |charged_address| {
         let created = address!("0x000000000000000000000000000000000000c4ea");
         let mut outcome = CreateOutcome::new(interpreter_result(), Some(created));

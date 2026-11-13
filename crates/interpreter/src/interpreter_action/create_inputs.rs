@@ -26,7 +26,8 @@ pub struct CreateInputs {
     /// EIP-8037: the account `charged_create_state_gas` was priced for, so the refund re-prices
     /// the same address. Meaningless while `charged_create_state_gas` is `false`.
     ///
-    /// Encodings made before this field existed decode it as [`Address::ZERO`].
+    /// In a format that carries field names, such as JSON, encodings made before this field existed
+    /// decode it as [`Address::ZERO`].
     #[cfg_attr(feature = "serde", serde(default))]
     charged_state_gas_address: Address,
     /// Cached created address. This is computed lazily and cached to avoid
@@ -75,6 +76,12 @@ impl CreateInputs {
                 .create2(salt.to_be_bytes(), self.init_code_hash()),
             CreateScheme::Custom { address } => address,
         })
+    }
+
+    /// The created address, if [`created_address`](Self::created_address) has computed it since
+    /// the caller, the scheme or the init code last changed.
+    pub(crate) fn cached_created_address(&self) -> Option<Address> {
+        self.cached_address.get().copied()
     }
 
     /// Returns the keccak256 hash of the init code.

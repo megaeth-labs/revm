@@ -34,8 +34,9 @@ const CONTRACT: Address = address!("0x00000000000000000000000000000000000c0de0")
 /// Account the `CALL` tests call.
 const CALLEE: Address = address!("0x00000000000000000000000000000000000ca11e");
 
-/// A host whose accounts and slots are all cold, and that records whether each load was made or
-/// skipped because the frame could not pay for it.
+/// A host whose accounts and slots are all cold but the running frame's own account, which a
+/// journal holds warm, and that records whether each cold load was made or skipped because the
+/// frame could not pay for it.
 #[derive(Debug)]
 struct ColdHost {
     gas_params: GasParams,
@@ -187,13 +188,16 @@ impl Host for ColdHost {
 
     fn load_account_info_skip_cold_load(
         &mut self,
-        _address: Address,
+        address: Address,
         _load_code: bool,
         skip_cold_load: bool,
     ) -> Result<AccountInfoLoad<'_>, LoadError> {
-        self.load(skip_cold_load)?;
+        let is_cold = address != CONTRACT;
+        if is_cold {
+            self.load(skip_cold_load)?;
+        }
         Ok(AccountInfoLoad {
-            is_cold: true,
+            is_cold,
             ..Default::default()
         })
     }

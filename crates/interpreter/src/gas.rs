@@ -236,6 +236,34 @@ impl Gas {
         self.tracker.refill_reservoir(amount);
     }
 
+    /// The part of [`state_gas_spilled`](Self::state_gas_spilled) halts below this frame already
+    /// consumed. See [`GasTracker::halted_regular_paid`].
+    #[inline]
+    pub const fn halted_regular_paid(&self) -> u64 {
+        self.tracker.halted_regular_paid()
+    }
+
+    /// Consumes, after the rollback of a frame that halts, the part of its charges regular gas
+    /// paid. See [`GasTracker::consume_regular_paid_charges`].
+    #[inline]
+    pub const fn consume_regular_paid_charges(&mut self) {
+        self.tracker.consume_regular_paid_charges();
+    }
+
+    /// Whether every give-back of state or history gas credits the reservoir alone. See
+    /// [`GasTracker::reservoir_only_give_backs`].
+    #[inline]
+    pub const fn reservoir_only_give_backs(&self) -> bool {
+        self.tracker.reservoir_only_give_backs()
+    }
+
+    /// Sets whether every give-back of state or history gas credits the reservoir alone. See
+    /// [`GasTracker::set_reservoir_only_give_backs`].
+    #[inline]
+    pub const fn set_reservoir_only_give_backs(&mut self, on: bool) {
+        self.tracker.set_reservoir_only_give_backs(on);
+    }
+
     /// Erases a gas cost from remaining (returns gas from child frame).
     #[inline]
     pub const fn erase_cost(&mut self, returned: u64) {
@@ -351,6 +379,20 @@ impl Gas {
     #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
     pub const fn record_history_cost(&mut self, cost: u64) -> bool {
         self.tracker.record_history_cost(cost)
+    }
+
+    /// Records a state gas cost that takes its legacy share, `min(cost, legacy_share)`, from
+    /// `gas_left` before it draws the reservoir. See
+    /// [`GasTracker::record_state_cost_with_legacy_share`].
+    #[inline]
+    #[must_use = "In case of not enough gas, the interpreter should halt with an out-of-gas error"]
+    pub const fn record_state_cost_with_legacy_share(
+        &mut self,
+        cost: u64,
+        legacy_share: u64,
+    ) -> bool {
+        self.tracker
+            .record_state_cost_with_legacy_share(cost, legacy_share)
     }
 
     /// Records a regular gas cost: deducts from the spendable part of `remaining` only.

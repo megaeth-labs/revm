@@ -28,7 +28,9 @@ impl GasTracker {
     ///
     /// The interpreter records it too when it halts a frame out of gas with no record there: a
     /// cold access the instruction refused before its charge, because the frame could not pay it,
-    /// or an out-of-gas a consumer's instruction returned itself. The handler records it where a
+    /// an out-of-gas a consumer's instruction returned itself, or one an instruction hook asked
+    /// for ([`Host::write_completed`](crate::Host::write_completed),
+    /// [`Host::frame_starting`](crate::Host::frame_starting)). The handler records it where a
     /// precompile runs out of gas: the frame's whole gas limit, as nothing ran. A consumer that
     /// builds an out-of-gas result itself can record the same with
     /// [`set_failed_charge_remaining`](Self::set_failed_charge_remaining).
@@ -45,7 +47,11 @@ impl GasTracker {
     /// record is left on a creation that returns successfully.
     #[inline]
     pub const fn failed_charge_remaining(&self) -> Option<u64> {
-        self.failed_charge_remaining
+        if self.failed_charge_recorded {
+            Some(self.failed_charge_remaining)
+        } else {
+            None
+        }
     }
 
     /// Sets the record returned by [`failed_charge_remaining`](Self::failed_charge_remaining),
@@ -57,7 +63,20 @@ impl GasTracker {
     /// failure, the record survives [`spend_all`](Self::spend_all).
     #[inline]
     pub const fn set_failed_charge_remaining(&mut self, remaining: Option<u64>) {
+        match remaining {
+            Some(remaining) => self.record_failed_charge(remaining),
+            None => {
+                self.failed_charge_remaining = 0;
+                self.failed_charge_recorded = false;
+            }
+        }
+    }
+
+    /// Records `remaining` as the regular gas left before a failed charge.
+    #[inline]
+    const fn record_failed_charge(&mut self, remaining: u64) {
         self.failed_charge_remaining = remaining;
+        self.failed_charge_recorded = true;
     }
 
     /// Records a failed regular charge of `cost` against `spendable`: the regular gas left,
@@ -72,7 +91,7 @@ impl GasTracker {
     #[inline(never)]
     pub(super) const fn regular_charge_failed(&mut self, cost: u64, spendable: u64) {
         let remaining = spendable.saturating_add(self.withheld);
-        self.failed_charge_remaining = Some(remaining);
+        self.record_failed_charge(remaining);
         // `cost > spendable`, so a withheld part that covers the difference is never zero, and
         // neither is the regular gas left.
         if cost - spendable <= self.withheld {
@@ -92,7 +111,7 @@ impl GasTracker {
     #[cold]
     #[inline(never)]
     pub(super) const fn withheld_first_cost_failed(&mut self) {
-        self.failed_charge_remaining = Some(self.remaining.saturating_add(self.withheld));
+        self.record_failed_charge(self.remaining.saturating_add(self.withheld));
     }
 }
 
@@ -344,11 +363,11 @@ mod tests {
         assert_eq!(tracker.failed_charge_remaining(), None);
     }
 
-    /// The record round-trips, a zero included, and encodings made before it existed decode with
-    /// none.
+    /// The record round-trips, a zero included, and JSON encodings made before it existed decode
+    /// with none.
     #[cfg(feature = "serde")]
     #[test]
-    fn test_serde_round_trip_and_older_payloads() {
+    fn test_serde_round_trip_and_older_json_payloads() {
         for regular in [0, 400] {
             let mut tracker = GasTracker::new(1_000, regular, 0);
             fail(&mut tracker, regular + 1, false);

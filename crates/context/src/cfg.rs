@@ -186,6 +186,13 @@ pub struct CfgEnv<SPEC = SpecId> {
     /// [`CfgEnv::enable_amsterdam_eip7708`] does.
     #[cfg_attr(feature = "serde", serde(default))]
     pub legacy_journal_semantics: bool,
+    /// Credits every give-back of state or history gas to the reservoir alone, never to regular
+    /// gas: a refill, a failed frame's rollback and a reservoir a child returns. revm sets it on
+    /// the transaction's gas and on every frame's (`GasTracker::reservoir_only_give_backs`). For a
+    /// chain that keeps a frame's regular gas from rising within the frame; `false`, EIP-8037's
+    /// tracker, by default.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub reservoir_only_give_backs: bool,
 }
 
 impl CfgEnv {
@@ -307,6 +314,7 @@ impl<SPEC> CfgEnv<SPEC> {
             amsterdam_eip7708_disabled: self.amsterdam_eip7708_disabled,
             amsterdam_eip8246_delayed_clear_disabled: self.amsterdam_eip8246_delayed_clear_disabled,
             legacy_journal_semantics: self.legacy_journal_semantics,
+            reservoir_only_give_backs: self.reservoir_only_give_backs,
         }
     }
 
@@ -372,6 +380,13 @@ impl<SPEC> CfgEnv<SPEC> {
         self.legacy_journal_semantics = enable;
         self
     }
+
+    /// Credits every give-back of state or history gas to the reservoir alone; see
+    /// [`CfgEnv::reservoir_only_give_backs`].
+    pub const fn with_reservoir_only_give_backs(mut self, enable: bool) -> Self {
+        self.reservoir_only_give_backs = enable;
+        self
+    }
 }
 
 impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
@@ -413,6 +428,7 @@ impl<SPEC: Into<SpecId> + Clone> CfgEnv<SPEC> {
             amsterdam_eip7708_disabled: false,
             amsterdam_eip8246_delayed_clear_disabled: false,
             legacy_journal_semantics: false,
+            reservoir_only_give_backs: false,
         }
     }
 
@@ -646,6 +662,11 @@ impl<SPEC: Into<SpecId> + Clone> Cfg for CfgEnv<SPEC> {
     #[inline]
     fn legacy_journal_semantics(&self) -> bool {
         self.legacy_journal_semantics
+    }
+
+    #[inline]
+    fn reservoir_only_give_backs(&self) -> bool {
+        self.reservoir_only_give_backs
     }
 }
 

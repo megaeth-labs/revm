@@ -26,9 +26,12 @@
 //!   input's price is the gas that check asks for: every precompile with a flat price, the
 //!   BN254 pairing on a length that is not a multiple of 192 bytes, KZG point evaluation on any
 //!   malformed input, a `BLAKE2F` final-block flag other than 0 or 1;
-//! - `MODEXP` checks the sizes in its header between its two gas checks: a header whose sizes
-//!   do not fit (EIP-7823 under Osaka, or `usize` everywhere) prices at the minimum the first
-//!   gas check asks for, 0, 200 or 500 by schedule.
+//! - Osaka `MODEXP` prices every header by its formula before checking EIP-7823's bound, with
+//!   each length saturated to 64 bits. A formula price saturated to `u64::MAX` passes the gas
+//!   check at that exact gas limit and then fails the size bound.
+//!   Earlier schedules refuse a base or modulus length that
+//!   does not fit `usize` between the two gas checks, so those inputs keep the first check's
+//!   minimum price, 0 under Byzantium or 200 under Berlin.
 //!
 //! The price never tells whether a call with enough gas succeeds: an input that fails a check
 //! after the gas check is only told apart from one that succeeds by running it.
@@ -215,10 +218,10 @@ pub fn modexp_osaka(input: &[u8]) -> u64 {
 }
 
 /// Prices a `MODEXP` call with the run's own header parsing: [`modexp::run_inner`] reads the
-/// header, checks the sizes and prices the call exactly as a run does, and `gas_calc` is handed
-/// to it as the price, recorded and then refused, so the run stops at its gas check before any
-/// exponentiation. A header refused between the two gas checks never reaches `gas_calc`, and
-/// prices at `min_gas`.
+/// header and prices the call exactly as a run does, and `gas_calc` is handed to it as the price,
+/// recorded and then refused, so the run stops at its gas check before any exponentiation.
+/// Osaka prices every header before checking its size bound. Earlier forks still price a
+/// header refused between the two gas checks at `min_gas`.
 fn modexp_price<const OSAKA: bool>(
     input: &[u8],
     min_gas: u64,

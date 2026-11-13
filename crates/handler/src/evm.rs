@@ -1,11 +1,16 @@
 use crate::{
-    instructions::InstructionProvider, item_or_result::FrameInitOrResult, EthFrame, FrameResult,
-    ItemOrResult, PrecompileProvider,
+    instructions::InstructionProvider,
+    item_or_result::FrameInitOrResult,
+    lifecycle::{close_frame_start, Returning},
+    EthFrame, FrameResult, ItemOrResult, PrecompileProvider,
 };
 use auto_impl::auto_impl;
 use context::{ContextTr, Database, Evm, FrameStack};
 use context_interface::context::ContextError;
-use interpreter::{interpreter::EthInterpreter, interpreter_action::FrameInit, InterpreterResult};
+use interpreter::{
+    interpreter::EthInterpreter, interpreter_action::FrameInit, InterpreterAction,
+    InterpreterResult,
+};
 
 /// Type alias for database error within a context
 pub type ContextDbError<CTX> = ContextError<ContextTrDbError<CTX>>;
@@ -113,12 +118,54 @@ pub trait EvmTr {
     /// Run the frame from the top of the stack. Returns the frame init or result.
     ///
     /// If frame has returned result it would mark it as finished.
+    ///
+    /// A frame init it returns opens the child's start under the frame's own
+    /// ([`lifecycle::open_frame_start`](crate::lifecycle::open_frame_start)); a
+    /// reimplementation makes the same call for the init it consumed.
     fn frame_run(
         &mut self,
     ) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<Self::Context>>;
 
+    /// Receives the result of the frame on top of the stack as it leaves the frame's own run,
+    /// before anything else sees it. What it leaves in `result` is what the inspector and the
+    /// caller see.
+    ///
+    /// The handler loops call it once for each frame that ran and returns, after the frame's
+    /// last action was processed, while the frame is still on top of the stack:
+    /// `Handler::run_exec_loop` when [`frame_run`](EvmTr::frame_run) returns a result, and the
+    /// provided inspected run (`InspectorEvmTr::inspect_frame_run`) before the inspector's
+    /// `call_end`, `create_end` and `frame_end`. On both paths it runs before
+    /// [`frame_return_result`](EvmTr::frame_return_result).
+    ///
+    /// Whether the frame is marked finished differs by path and frame type, so an implementation
+    /// does not rely on the mark: `frame_run` marks it before the plain loop calls this, and the
+    /// inspected run marks a frame with an `EthFrame` after the inspector's end callbacks.
+    ///
+    /// The calls are on the EVM the loops run, so an EVM type that delegates `frame_run` to an
+    /// inner EVM still has its own method called. An override of `run_exec_loop` or of
+    /// `inspect_frame_run` calls it at the same point itself; one that delegates
+    /// `inspect_frame_run` to an inner EVM reaches the inner EVM's method instead.
+    ///
+    /// A result given without a run does not reach it: [`frame_init`](EvmTr::frame_init)
+    /// returns those (a start the handler refuses, a precompile's answer, an inspector's answer),
+    /// so `frame_init`, or the inspector, has them first.
+    ///
+    /// The default does nothing.
+    #[inline]
+    fn frame_run_result(
+        &mut self,
+        result: &mut <Self::Frame as FrameTr>::FrameResult,
+    ) -> Result<(), ContextDbError<Self::Context>> {
+        let _ = result;
+        Ok(())
+    }
+
     /// Returns the result of the frame to the caller. Frame is popped from the frame stack.
     /// Consumes the frame result or returns it if there is more frames to run.
+    ///
+    /// A result returned into a caller closes the start the caller opened for it
+    /// ([`lifecycle::close_frame_start`](crate::lifecycle::close_frame_start)); a
+    /// reimplementation makes the same call after it returns the result.
     fn frame_return_result(
         &mut self,
         result: <Self::Frame as FrameTr>::FrameResult,
@@ -195,7 +242,8 @@ where
         }))
     }
 
-    /// Run the frame from the top of the stack. Returns the frame init or result.
+    /// Run the frame from the top of the stack. Returns the frame init or result, and opens the
+    /// start of a frame init.
     #[inline]
     fn frame_run(&mut self) -> Result<FrameInitOrResult<Self::Frame>, ContextDbError<CTX>> {
         let frame = self.frame_stack.get();
@@ -208,14 +256,27 @@ where
             context,
         );
 
-        frame.process_next_action(context, action).inspect(|i| {
-            if i.is_result() {
-                frame.set_finished(true);
-            }
-        })
+        // The frame's `NewFrame` action is consumed here: the child's start opens before the
+        // action becomes the child's init, whose depth is one below the frame's. Reading only the
+        // action's kind and the frame's depth leaves the init to be built in the return value.
+        let frame = if let InterpreterAction::NewFrame(_) = &action {
+            let depth = frame.depth + 1;
+            crate::lifecycle::open_start(&mut self.ctx, &mut self.frame_stack, depth)?;
+            self.frame_stack.get()
+        } else {
+            frame
+        };
+        frame
+            .process_next_action(&mut self.ctx, action)
+            .inspect(|i| {
+                if i.is_result() {
+                    frame.set_finished(true);
+                }
+            })
     }
 
-    /// Returns the result of the frame to the caller. Frame is popped from the frame stack.
+    /// Returns the result of the frame to the caller, and closes its start. Frame is popped from
+    /// the frame stack.
     #[inline]
     fn frame_return_result(
         &mut self,
@@ -227,9 +288,12 @@ where
         if self.frame_stack.index().is_none() {
             return Ok(Some(result));
         }
-        self.frame_stack
-            .get()
-            .return_result::<_, ContextDbError<Self::Context>>(&mut self.ctx, result)?;
+        let caller = self.frame_stack.get();
+        let returning = Returning::new(&result, caller);
+        caller.return_result::<_, ContextDbError<Self::Context>>(&mut self.ctx, result)?;
+        close_frame_start(&mut self.ctx, &mut self.frame_stack, returning, |caller| {
+            caller
+        })?;
         Ok(None)
     }
 }

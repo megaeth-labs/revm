@@ -7,6 +7,7 @@ extern crate alloc as std;
 
 mod account_info;
 pub mod bal;
+mod original_info;
 mod types;
 
 pub use bytecode;

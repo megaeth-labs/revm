@@ -16,6 +16,7 @@ pub mod control;
 pub mod host;
 /// Signed 256-bit integer operations.
 pub mod i256;
+mod instruction_hooks;
 /// Memory operations (MLOAD, MSTORE, MSIZE, etc.).
 pub mod memory;
 /// Stack operations (PUSH, POP, DUP, SWAP, etc.).

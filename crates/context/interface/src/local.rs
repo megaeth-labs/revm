@@ -5,11 +5,22 @@ use core::{
 };
 use std::{rc::Rc, string::String, vec::Vec};
 
+mod lifecycle;
+mod mirror;
+
+pub use lifecycle::{PendingStart, StartLifecycleError};
+pub use mirror::{LifecycleEvent, LifecycleMirror};
+
 /// Non-empty, item-pooling Vec.
+///
+/// It also keeps the transaction's start lifecycle: the open start of the transaction and of each
+/// frame on the stack, which pairs every settlement with the start it closes
+/// ([`open_start`](Self::open_start), [`close_start`](Self::close_start)).
 #[derive(Debug, Clone)]
 pub struct FrameStack<T> {
     stack: Vec<T>,
     index: Option<usize>,
+    lifecycle: lifecycle::StartLifecycle,
 }
 
 impl<T> Default for FrameStack<T> {
@@ -26,6 +37,7 @@ impl<T> FrameStack<T> {
         Self {
             stack: Vec::with_capacity(8),
             index: None,
+            lifecycle: Default::default(),
         }
     }
 
@@ -37,7 +49,11 @@ impl<T> FrameStack<T> {
     {
         let mut stack = Vec::with_capacity(len);
         stack.resize_with(len, T::default);
-        Self { stack, index: None }
+        Self {
+            stack,
+            index: None,
+            lifecycle: Default::default(),
+        }
     }
 
     /// Initializes the stack with a single item.
@@ -223,6 +239,16 @@ pub trait LocalContextTr {
 
     /// Clear the local context.
     fn clear(&mut self);
+
+    /// The lifecycle mirror this local context keeps, if any: a debug check that the context's
+    /// lifecycle hooks feed ([`LifecycleMirror`]). revm's own local context keeps one in debug
+    /// builds only.
+    ///
+    /// The default keeps none.
+    #[inline]
+    fn lifecycle_mirror(&mut self) -> Option<&mut LifecycleMirror> {
+        None
+    }
 
     /// Set the error message for a precompile error, if any.
     ///

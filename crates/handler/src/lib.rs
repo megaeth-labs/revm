@@ -20,6 +20,7 @@ pub mod handler;
 /// EVM instruction set implementations and tables.
 pub mod instructions;
 mod item_or_result;
+pub mod lifecycle;
 mod mainnet_builder;
 mod mainnet_handler;
 /// Post-execution operations including gas refunds and state finalization.

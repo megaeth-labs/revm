@@ -1,7 +1,10 @@
 //! Serde encoding of the history gas counter on [`GasTracker`], and so on [`Gas`].
 //!
-//! New encodings carry the counter. Encodings made before it existed lack it and still decode, to
-//! zero, which is what a tracker that never charged history gas carries.
+//! New encodings carry the counter. In a format that carries field names, such as the JSON these
+//! tests use, encodings made before it existed lack it and still decode, to zero, which is what a
+//! tracker that never charged history gas carries. A format that encodes a struct by position,
+//! such as bincode, cannot read an encoding made before it existed, as with upstream's own field
+//! additions.
 #![cfg(feature = "serde")]
 
 use revm_interpreter::{Gas, GasTracker};
@@ -34,7 +37,7 @@ fn remove_field(tracker: &mut Value) -> Option<Value> {
 }
 
 #[test]
-fn test_gas_tracker_decodes_with_and_without_the_history_counter() {
+fn test_gas_tracker_decodes_from_json_with_and_without_the_history_counter() {
     let tracker = charged_tracker();
     let mut encoded = serde_json::to_value(tracker).unwrap();
     assert_eq!(
@@ -50,7 +53,7 @@ fn test_gas_tracker_decodes_with_and_without_the_history_counter() {
 }
 
 #[test]
-fn test_gas_decodes_with_and_without_the_history_counter() {
+fn test_gas_decodes_from_json_with_and_without_the_history_counter() {
     let mut gas = Gas::new_with_regular_gas_and_reservoir(100_000, 20_000);
     assert!(gas.record_history_cost(CHARGED));
     let mut encoded = serde_json::to_value(gas).unwrap();
